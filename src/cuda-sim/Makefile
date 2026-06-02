@@ -1,0 +1,178 @@
+# Copyright (c) 2009-2011, Tor M. Aamodt
+# Wilson W.L. Fung, Timothy G. Rogers, Ali Bakhoda
+# The University of British Columbia
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# Redistributions of source code must retain the above copyright notice, this
+# list of conditions and the following disclaimer.
+# Redistributions in binary form must reproduce the above copyright notice, this
+# list of conditions and the following disclaimer in the documentation and/or
+# other materials provided with the distribution.
+# Neither the name of The University of British Columbia nor the names of its
+# contributors may be used to endorse or promote products derived from this
+# software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+default: libgpgpu_ptx_sim.a 
+ 
+INTEL=0
+DEBUG?=0
+TRACE?=0
+
+CPP = g++ $(SNOW)
+ifeq ($(INTEL),1)
+	CPP = icpc
+	CC = icc
+endif
+
+include ../../version_detection.mk
+
+OUTPUT_DIR=$(SIM_OBJ_FILES_DIR)/cuda-sim
+
+OPT	:=  -O3 -g3 -Wall -Wno-unused-function -Wno-sign-compare
+OPT += -I../../compat/zlib
+ifeq ($(DEBUG),1)
+	OPT := -g3 -Wall  -Wno-unused-function -Wno-sign-compare
+endif
+OPT += -I$(CUDA_INSTALL_PATH)/include  -I$(OUTPUT_DIR)/ -I. -I$(SIM_OBJ_FILES_DIR)
+OPT += -fPIC 
+
+ifeq ($(TRACE),1)
+	OPT += -DTRACING_ON=1
+endif
+
+CXX_OPT = $(OPT)
+ifeq ($(INTEL),1)
+    CXX_OPT += -std=c++0x
+else 
+ifeq ($(GNUC_CPP0X),1)
+    CXX_OPT += -std=c++0x
+endif
+endif
+
+OBJS	:= $(OUTPUT_DIR)/ptx_parser.o $(OUTPUT_DIR)/ptx_loader.o $(OUTPUT_DIR)/cuda_device_printf.o $(OUTPUT_DIR)/instructions.o $(OUTPUT_DIR)/cuda-sim.o $(OUTPUT_DIR)/ptx_ir.o $(OUTPUT_DIR)/ptx_sim.o  $(OUTPUT_DIR)/memory.o $(OUTPUT_DIR)/ptx-stats.o $(OUTPUT_DIR)/decuda_pred_table/decuda_pred_table.o $(OUTPUT_DIR)/ptx.tab.o $(OUTPUT_DIR)/lex.ptx_.o $(OUTPUT_DIR)/ptxinfo.tab.o $(OUTPUT_DIR)/lex.ptxinfo_.o $(OUTPUT_DIR)/cuda_device_runtime.o
+
+
+OPT += -DCUDART_VERSION=$(CUDART_VERSION)
+
+SRCS = $(shell ls *.cc)
+PREGENERATED_PARSER_DIR := generated
+
+$(OUTPUT_DIR)/Makefile.makedepend: depend
+
+depend:
+	touch $(OUTPUT_DIR)/Makefile.makedepend
+	@if command -v makedepend >/dev/null 2>&1; then \
+		makedepend -f$(OUTPUT_DIR)/Makefile.makedepend -p$(OUTPUT_DIR)/ $(SRCS) 2> /dev/null; \
+	else \
+		echo "Warning: makedepend not found; skipping dependency generation for src/cuda-sim/Makefile"; \
+	fi
+
+libgpgpu_ptx_sim.a: $(OBJS) 
+	ar rcs $(OUTPUT_DIR)/libgpgpu_ptx_sim.a $(OUTPUT_DIR)/ptx.tab.o $(OUTPUT_DIR)/lex.ptx_.o $(OUTPUT_DIR)/ptxinfo.tab.o $(OUTPUT_DIR)/lex.ptxinfo_.o $(OBJS)
+
+$(OUTPUT_DIR)/ptx.tab.o: $(OUTPUT_DIR)/ptx.tab.c
+	$(CPP) -c $(CXX_OPT) -DYYDEBUG $(OUTPUT_DIR)/ptx.tab.c -o $(OUTPUT_DIR)/ptx.tab.o
+
+$(OUTPUT_DIR)/lex.ptx_.o: $(OUTPUT_DIR)/lex.ptx_.c 
+	$(CPP) -c $(CXX_OPT) $(OUTPUT_DIR)/lex.ptx_.c -o $(OUTPUT_DIR)/lex.ptx_.o
+
+$(OUTPUT_DIR)/ptxinfo.tab.o: $(OUTPUT_DIR)/ptxinfo.tab.c
+	$(CPP) -c $(CXX_OPT) -DYYDEBUG $(OUTPUT_DIR)/ptxinfo.tab.c -o $(OUTPUT_DIR)/ptxinfo.tab.o
+
+$(OUTPUT_DIR)/lex.ptxinfo_.o: $(OUTPUT_DIR)/lex.ptxinfo_.c $(OUTPUT_DIR)/ptxinfo.tab.c
+	$(CPP) -c $(CXX_OPT) $(OUTPUT_DIR)/lex.ptxinfo_.c -o $(OUTPUT_DIR)/lex.ptxinfo_.o
+
+$(OUTPUT_DIR)/ptx.tab.c: ptx.y
+	@if command -v bison >/dev/null 2>&1; then \
+		bison --name-prefix=ptx_ -v -d ptx.y --file-prefix=$(OUTPUT_DIR)/ptx; \
+	else \
+		echo "Warning: bison not found; using pregenerated PTX parser"; \
+		cp $(PREGENERATED_PARSER_DIR)/ptx.tab.c $(OUTPUT_DIR)/ptx.tab.c; \
+		cp $(PREGENERATED_PARSER_DIR)/ptx.tab.h $(OUTPUT_DIR)/ptx.tab.h; \
+	fi
+
+$(OUTPUT_DIR)/ptxinfo.tab.c: ptxinfo.y
+	@if command -v bison >/dev/null 2>&1; then \
+		bison --name-prefix=ptxinfo_ -v -d ptxinfo.y --file-prefix=$(OUTPUT_DIR)/ptxinfo; \
+	else \
+		echo "Warning: bison not found; using pregenerated PTX info parser"; \
+		cp $(PREGENERATED_PARSER_DIR)/ptxinfo.tab.c $(OUTPUT_DIR)/ptxinfo.tab.c; \
+		cp $(PREGENERATED_PARSER_DIR)/ptxinfo.tab.h $(OUTPUT_DIR)/ptxinfo.tab.h; \
+	fi
+
+$(OUTPUT_DIR)/lex.ptx_.c: ptx.l
+	@if command -v flex >/dev/null 2>&1; then \
+		flex --outfile=$(OUTPUT_DIR)/lex.ptx_.c ptx.l; \
+	else \
+		echo "Warning: flex not found; using pregenerated PTX lexer"; \
+		cp $(PREGENERATED_PARSER_DIR)/lex.ptx_.c $(OUTPUT_DIR)/lex.ptx_.c; \
+	fi
+
+$(OUTPUT_DIR)/lex.ptxinfo_.c: ptxinfo.l
+	@if command -v flex >/dev/null 2>&1; then \
+		flex --outfile=$(OUTPUT_DIR)/lex.ptxinfo_.c ptxinfo.l; \
+	else \
+		echo "Warning: flex not found; using pregenerated PTX info lexer"; \
+		cp $(PREGENERATED_PARSER_DIR)/lex.ptxinfo_.c $(OUTPUT_DIR)/lex.ptxinfo_.c; \
+	fi
+
+clean:
+	rm -f *~ *.o *.gcda *.gcno *.gcov libgpgpu_ptx_sim.a \
+		ptx.tab.h ptx.tab.c ptx.output lex.ptx_.c \
+		ptxinfo.tab.h ptxinfo.tab.c ptxinfo.output lex.ptxinfo_.c \
+		instructions.h ptx_parser_decode.def directed_tests.log 
+	rm -f $(OUTPUT_DIR)/decuda_pred_table/*.o
+	rm -f $(OUTPUT_DIR)/Makefile.makedepend $(OUTPUT_DIR)/Makefile.makedepend.bak
+
+$(OUTPUT_DIR)/%.o: %.c
+	$(CPP) -c $(OPT) $< -o $(OUTPUT_DIR)/$*.o
+$(OUTPUT_DIR)/%.o: %.cc
+	$(CPP) -c $(CXX_OPT) $< -o $(OUTPUT_DIR)/$*.o
+
+$(OUTPUT_DIR)/instructions.h: instructions.cc
+	@touch $*.h
+	@chmod +w $*.h
+	@echo "// DO NOT EDIT THIS FILE! IT IS AUTOMATICALLY GENERATED BY THE MAKEFILE (see target for instructions.h)" > $*.h
+	@echo "#include \"ptx_ir.h\"" >> $*.h
+	@echo "#ifndef instructions_h_included" >> $*.h
+	@echo "#define instructions_h_included" >> $*.h
+	@cat $< | grep "_impl(" | sed 's/{.*//' | sed 's/$$/;/' >> $*.h
+	@echo "#endif" >> $*.h
+	@chmod -w $*.h
+	@echo "created $(OUTPUT_DIR)/instructions.h"
+
+$(OUTPUT_DIR)/ptx_parser_decode.def: $(OUTPUT_DIR)/ptx.tab.c
+ifeq ($(shell uname),Linux)
+	cat $(OUTPUT_DIR)/ptx.tab.h | grep "=" | sed 's/^[ ]\+//' | sed 's/[=,]//g' | sed 's/\([_A-Z1-9]\+\)[ ]\+\([0-9]\+\)/\1 \1/' | sed 's/^/DEF(/' | sed 's/ /,"/' | sed 's/$$/")/' > $(OUTPUT_DIR)/ptx_parser_decode.def
+else
+	cat $(OUTPUT_DIR)/ptx.tab.h | grep "=" | sed -E 's/^ +//' | sed 's/[=,]//g' | sed -E 's/([_A-Z1-9]+).*/\1 \1/' | sed 's/^/DEF(/' | sed 's/ /,"/' | sed 's/$$/")/' > $(OUTPUT_DIR)/ptx_parser_decode.def
+endif
+
+$(OUTPUT_DIR)/instructions.o: $(OUTPUT_DIR)/instructions.h $(OUTPUT_DIR)/ptx.tab.c
+$(OUTPUT_DIR)/cuda_device_printf.o: $(OUTPUT_DIR)/ptx.tab.c
+$(OUTPUT_DIR)/ptx_ir.o: $(OUTPUT_DIR)/ptx.tab.c $(OUTPUT_DIR)/ptx_parser_decode.def
+$(OUTPUT_DIR)/ptx_loader.o: $(OUTPUT_DIR)/ptx.tab.c $(OUTPUT_DIR)/ptx_parser_decode.def
+$(OUTPUT_DIR)/ptx_parser.o: $(OUTPUT_DIR)/ptx.tab.c $(OUTPUT_DIR)/ptx_parser_decode.def
+$(OUTPUT_DIR)/ptxinfo.tab.o: $(OUTPUT_DIR)/ptx.tab.c
+$(OUTPUT_DIR)/ptx-stats.o: $(OUTPUT_DIR)/ptx.tab.c
+$(OUTPUT_DIR)/ptx_sim.o: $(OUTPUT_DIR)/ptx.tab.c
+$(OUTPUT_DIR)/cuda-sim.o: $(OUTPUT_DIR)/ptx.tab.c $(SIM_OBJ_FILES_DIR)/detailed_version
+$(OUTPUT_DIR)/lex.ptxinfo_.o: $(OUTPUT_DIR)/ptx.tab.c
+$(OUTPUT_DIR)/lex.ptx_.o: $(OUTPUT_DIR)/ptx.tab.c
+$(OUTPUT_DIR)/cuda_device_runtime.o: $(OUTPUT_DIR)/ptx.tab.c
+
+include $(OUTPUT_DIR)/Makefile.makedepend
