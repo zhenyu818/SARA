@@ -6093,205 +6093,10 @@ def _merge_global_readonly_line_bytes(
     return merged
 
 
-def _cache_tag_self_miss_trace_counts(
-    *,
-    line_states: Mapping[Tuple[int, int], Mapping[str, Any]],
-    sample_positions: Sequence[int],
-    shader_prefix: Mapping[int, Tuple[List[int], List[int], int]],
-    ge_mode: bool,
-    global_prefill: bool,
-    prefill_cycle: Optional[int],
-    excluded_alias_bits: Optional[Set[Tuple[int, int, int]]] = None,
-) -> Dict[str, Any]:
-    """Diagnostic-only same-line tag-miss counter.
-
-    A tag flip can make a later same-line lookup miss, but the shared campaign
-    oracle classifies outcomes by application output rather than by cache-hit
-    timing.  A same-line refill that returns the same bytes is therefore not
-    counted as SDC by the production tag model.  This helper is intentionally
-    not used in the final counts; it is kept only for trace diagnostics.
-    """
-
-    excluded = excluded_alias_bits or set()
-    counts = {"masked": 0, "sdc": 0, "due": 0, "unknown": 0}
-    intervals = 0
-    examples: List[Dict[str, Any]] = []
-    source_lines = 0
-    sampled_bits = 0
-
-    for (scope_raw, source_line_raw), source_state in sorted(line_states.items()):
-        scope = int(scope_raw)
-        source_line = int(source_line_raw)
-        source_first = source_state.get("first_load_cycle")
-        if source_first is None:
-            continue
-        source_active_from = (
-            int(prefill_cycle)
-            if bool(global_prefill) and prefill_cycle is not None
-            else int(source_first) + 1
-        )
-        source_cycles = [
-            int(c)
-            for c in source_state.get("load_cycles", [])
-            if int(c) >= int(source_active_from)
-        ]
-        if not source_cycles:
-            continue
-        shader_prefix_row = shader_prefix.get(int(scope))
-        if shader_prefix_row is None:
-            continue
-        cycles_shader, prefix_shader, _shader_mass_total = shader_prefix_row
-        source_lines += 1
-
-        for bitpos_raw in sample_positions:
-            bitpos = int(bitpos_raw)
-            if (int(scope), int(source_line), int(bitpos)) in excluded:
-                continue
-            sampled_bits += 1
-            prev_boundary = int(source_active_from)
-            for cyc in source_cycles:
-                boundary = int(cyc) + 1 if ge_mode else int(cyc)
-                if boundary <= prev_boundary:
-                    continue
-                mass = range_sum(
-                    cycles_shader,
-                    prefix_shader,
-                    int(prev_boundary),
-                    int(boundary),
-                )
-                if mass > 0:
-                    counts["sdc"] += int(mass)
-                    intervals += 1
-                    if len(examples) < 8:
-                        examples.append(
-                            {
-                                "scope": int(scope),
-                                "source_line": int(source_line),
-                                "actual_tag_bit": int(bitpos),
-                                "self_lookup_cycle": int(cyc),
-                                "classification": "sdc",
-                                "reason": "tag_self_miss_trace_divergence",
-                                "mass": int(mass),
-                            }
-                        )
-                prev_boundary = int(boundary)
-
-    return {
-        "counts": counts,
-        "intervals": int(intervals),
-        "source_lines": int(source_lines),
-        "sampled_bits": int(sampled_bits),
-        "examples": examples,
-    }
-
-
-def _cache_tag_alias_reachability_counts(
-    *,
-    line_states: Mapping[Tuple[int, int], Mapping[str, Any]],
-    sample_positions: Sequence[int],
-    shader_prefix: Mapping[int, Tuple[List[int], List[int], int]],
-    nset: int,
-    ge_mode: bool,
-    global_prefill: bool,
-    prefill_cycle: Optional[int],
-    only_pairs: Optional[Set[Tuple[int, int, int]]] = None,
-) -> Dict[str, Any]:
-    """Count reachable but unproved wrong-line tag aliases as Unknown.
-
-    This is a proof fallback rather than a fitted policy.  Under the shared
-    output oracle, a tag corruption is externally observable only if it can turn
-    a later access to a different line in the same set into a wrong-line hit.
-    If no such target-line access exists in the golden trace, the tag bit is
-    proven Masked by denominator closure.  Reachable aliases without a
-    trace-delta value proof remain Unknown.
-    """
-
-    nset_i = int(nset)
-    counts = {"masked": 0, "sdc": 0, "due": 0, "unknown": 0}
-    if nset_i <= 0:
-        return {
-            "counts": counts,
-            "reachable_pairs": 0,
-            "reachable_intervals": 0,
-            "examples": [],
-        }
-
-    reachable_pairs = 0
-    reachable_intervals = 0
-    examples: List[Dict[str, Any]] = []
-    only = only_pairs if only_pairs is not None else None
-
-    for (scope_raw, source_line_raw), source_state in sorted(line_states.items()):
-        scope = int(scope_raw)
-        source_line = int(source_line_raw)
-        source_first = source_state.get("first_load_cycle")
-        if source_first is None:
-            continue
-        source_active_from = (
-            int(prefill_cycle)
-            if bool(global_prefill) and prefill_cycle is not None
-            else int(source_first) + 1
-        )
-        shader_prefix_row = shader_prefix.get(scope)
-        if shader_prefix_row is None:
-            continue
-        cycles_shader, prefix_shader, _shader_mass_total = shader_prefix_row
-        source_tag = source_line // nset_i
-        set_idx = source_line % nset_i
-        for bitpos_raw in sample_positions:
-            bitpos = int(bitpos_raw)
-            pair_key = (scope, source_line, bitpos)
-            if only is not None and pair_key not in only:
-                continue
-            target_tag = int(source_tag) ^ (1 << bitpos)
-            target_line = int(set_idx) + nset_i * int(target_tag)
-            target_state = line_states.get((scope, target_line))
-            if target_state is None:
-                continue
-            target_cycles = [
-                int(c)
-                for c in target_state.get("load_cycles", [])
-                if int(c) >= int(source_active_from)
-            ]
-            if not target_cycles:
-                continue
-            reachable_pairs += 1
-            prev_boundary = int(source_active_from)
-            for cyc in target_cycles:
-                boundary = int(cyc) + 1 if ge_mode else int(cyc)
-                if boundary <= prev_boundary:
-                    continue
-                mass = range_sum(cycles_shader, prefix_shader, prev_boundary, boundary)
-                if mass > 0:
-                    counts["unknown"] += int(mass)
-                    reachable_intervals += 1
-                    if len(examples) < 8:
-                        examples.append(
-                            {
-                                "scope": scope,
-                                "source_line": source_line,
-                                "target_line": int(target_line),
-                                "actual_tag_bit": bitpos,
-                                "target_cycle": int(cyc),
-                                "classification": "unknown",
-                                "reason": "reachable_tag_alias_without_trace_delta_proof",
-                                "mass": int(mass),
-                            }
-                        )
-                prev_boundary = int(boundary)
-
-    return {
-        "counts": {
-            "masked": int(counts.get("masked", 0)),
-            "sdc": int(counts.get("sdc", 0)),
-            "due": int(counts.get("due", 0)),
-            "unknown": int(counts.get("unknown", 0)),
-        },
-        "reachable_pairs": int(reachable_pairs),
-        "reachable_intervals": int(reachable_intervals),
-        "examples": examples,
-    }
-
+# Cache-tag accounting below treats tag bits as cache-line identity faults.
+# Same-line tag misses and reachable wrong-line aliases are resolved by the
+# identity-byte comparison in _exact_l1d_tag_counts_global_readonly_alias, so no
+# separate cache-timing or trace-delta tag model is retained here.
 
 def _parse_output_spec_ranges(
     trace_template: Dict[str, Any],
@@ -6350,1540 +6155,114 @@ def _raw_store_matches_output_ranges(
     return False
 
 
-def _build_trace_delta_context(trace_template: Dict[str, Any]) -> Dict[str, Any]:
-    events_raw = trace_template.get("events", [])
-    if not isinstance(events_raw, list):
-        events_raw = []
-    prepared_events: List[Optional[TraceDeltaPreparedEvent]] = [None] * len(events_raw)
+# Cache-tag sites are now handled as cache-line identity faults by
+# _cache_tag_output_relevant_lookup_masks and
+# _exact_l1d_tag_counts_global_readonly_alias below.  The previous tag-local
+# trace-delta replay path was intentionally removed because a wrong-line tag hit
+# can change multiple data bits and therefore cannot be converted into an SDC
+# proof by reusing per-bit output-relevance masks.
 
-    output_ranges = _parse_output_spec_ranges(trace_template)
-    cta_event_indices: Dict[Tuple[int, int], List[int]] = defaultdict(list)
-    cta_prepared_events: Dict[Tuple[int, int], List[TraceDeltaPreparedEvent]] = defaultdict(list)
-    sm_event_indices: Dict[int, List[int]] = defaultdict(list)
-    sm_prepared_events: Dict[int, List[TraceDeltaPreparedEvent]] = defaultdict(list)
-    baseline_output_final_bytes: Dict[int, int] = {}
-    baseline_output_last_writer_index: Dict[int, int] = {}
-
-    for idx, raw in enumerate(events_raw):
-        if not isinstance(raw, dict):
-            continue
-        prepared = _prepare_trace_delta_event(raw, int(idx))
-        prepared_events[int(idx)] = prepared
-        sm_id = raw.get("sm_id")
-        cta_id = raw.get("cta_id")
-        if sm_id is not None:
-            sm_event_indices[int(sm_id)].append(int(idx))
-            sm_prepared_events[int(sm_id)].append(prepared)
-            if cta_id is not None:
-                cta_event_indices[(int(sm_id), int(cta_id))].append(int(idx))
-                cta_prepared_events[(int(sm_id), int(cta_id))].append(prepared)
-        if not bool(raw.get("is_output_store", False)):
-            continue
-        cspace = canonical_space(raw.get("mem_space") or raw.get("space"))
-        if cspace != "global":
-            continue
-        addr_raw = raw.get("mem_addr", raw.get("base"))
-        if addr_raw is None:
-            continue
-        addr = parse_int(addr_raw)
-        size_bytes = access_size_bytes_for_raw_event(raw)
-        if size_bytes <= 0:
-            continue
-        src_vals = raw.get("src_vals", [])
-        try:
-            data_idx = int(raw.get("store_data_src_index", 1))
-        except Exception:
-            data_idx = 1
-        try:
-            byte_off = int(raw.get("store_data_byte_offset", 0))
-        except Exception:
-            byte_off = 0
-        if not isinstance(src_vals, list) or data_idx < 0 or data_idx >= len(src_vals):
-            continue
-        try:
-            data_val = parse_int(src_vals[data_idx]) & MASK64
-        except Exception:
-            continue
-        payload = int((data_val >> (8 * int(byte_off))) & width_mask(int(size_bytes) * 8))
-        for byte_i in range(int(size_bytes)):
-            baddr = int(addr + byte_i)
-            bval = int((payload >> (8 * byte_i)) & 0xFF)
-            baseline_output_final_bytes[int(baddr)] = int(bval)
-            baseline_output_last_writer_index[int(baddr)] = int(idx)
-
-    return {
-        "events_raw": events_raw,
-        "prepared_events": list(prepared_events),
-        "output_ranges": output_ranges,
-        "cta_event_indices": {
-            (int(sm), int(cta)): list(rows)
-            for (sm, cta), rows in cta_event_indices.items()
-        },
-        "cta_prepared_events": {
-            (int(sm), int(cta)): tuple(rows)
-            for (sm, cta), rows in cta_prepared_events.items()
-        },
-        "sm_event_indices": {int(sm): list(rows) for sm, rows in sm_event_indices.items()},
-        "sm_prepared_events": {
-            int(sm): tuple(rows)
-            for sm, rows in sm_prepared_events.items()
-        },
-        "baseline_output_final_bytes": {
-            int(addr): int(val) for addr, val in baseline_output_final_bytes.items()
-        },
-        "baseline_output_last_writer_index": {
-            int(addr): int(idx) for addr, idx in baseline_output_last_writer_index.items()
-        },
-    }
-
-
-def _current_src_vals_for_raw_event(
-    raw: Any,
-    reg_state: Dict[Tuple[int, str], int],
-) -> Tuple[List[int], bool]:
-    if isinstance(raw, TraceDeltaPreparedEvent):
-        if not reg_state or not bool(raw.has_virtual_src_regs):
-            return raw.src_vals, False
-        virtual_keys = (
-            raw.virtual_src_state_keys
-            if raw.virtual_src_state_keys
-            else tuple(
-                (int(raw.thread_id), str(raw.src_regs[int(src_i)]))
-                for src_i in raw.virtual_src_indices
-            )
-        )
-        reg_state_get = reg_state.get
-        if len(raw.virtual_src_indices) == 1 and len(virtual_keys) == 1:
-            src_i = int(raw.virtual_src_indices[0])
-            golden = int(raw.src_vals[int(src_i)]) & MASK64
-            cur = int(reg_state_get(virtual_keys[0], int(golden))) & MASK64
-            if int(cur) == int(golden):
-                return raw.src_vals, False
-            out = list(raw.src_vals)
-            out[int(src_i)] = int(cur) & MASK64
-            return out, True
-        out: Optional[List[int]] = None
-        for src_i, state_key in zip(raw.virtual_src_indices, virtual_keys):
-            golden = int(raw.src_vals[int(src_i)]) & MASK64
-            cur = int(reg_state_get(state_key, int(golden))) & MASK64
-            if int(cur) != int(golden):
-                if out is None:
-                    out = list(raw.src_vals)
-                out[int(src_i)] = int(cur) & MASK64
-        if out is None:
-            return raw.src_vals, False
-        return out, True
-
-    tid = int(raw.get("thread_id", -1))
-    src_regs = raw.get("src_regs", [])
-    src_vals_raw = raw.get("src_vals", [])
-    if not isinstance(src_regs, list):
-        src_regs = []
-    if not isinstance(src_vals_raw, list):
-        src_vals_raw = []
-    out: List[int] = []
-    changed = False
-    for src_i, golden_raw in enumerate(src_vals_raw):
-        try:
-            golden = parse_int(golden_raw) & MASK64
-        except Exception:
-            golden = 0
-        reg_name = str(src_regs[src_i]) if src_i < len(src_regs) else ""
-        if reg_name.startswith("%"):
-            cur = int(reg_state.get((int(tid), str(reg_name)), int(golden))) & MASK64
-        else:
-            cur = int(golden) & MASK64
-        if int(cur) != int(golden):
-            changed = True
-        out.append(int(cur) & MASK64)
-    return out, bool(changed)
-
-
-def _current_src_vals_for_prepared_event(
-    raw: "TraceDeltaPreparedEvent",
-    reg_state: Dict[Tuple[int, str], int],
-    reg_state_get: Any,
-    reg_state_contains: Any,
-) -> Tuple[Sequence[int], bool]:
-    """Fast path for trace-delta semantic on already prepared events."""
-
-    if not reg_state or not bool(raw.has_virtual_src_regs):
-        return raw.src_vals, False
-
-    src_vals_raw = raw.src_vals
-    virtual_indices = raw.virtual_src_indices
-    virtual_keys = raw.virtual_src_state_keys
-
-    if len(virtual_indices) == 1 and len(virtual_keys) == 1:
-        src_i = int(virtual_indices[0])
-        state_key = virtual_keys[0]
-        if not reg_state_contains(state_key):
-            return src_vals_raw, False
-        golden = int(src_vals_raw[src_i]) & MASK64
-        cur = int(reg_state_get(state_key, int(golden))) & MASK64
-        if int(cur) == int(golden):
-            return src_vals_raw, False
-        out = list(src_vals_raw)
-        out[src_i] = int(cur) & MASK64
-        return out, True
-
-    out: Optional[List[int]] = None
-    for src_i, state_key in zip(virtual_indices, virtual_keys):
-        if not reg_state_contains(state_key):
-            continue
-        golden = int(src_vals_raw[int(src_i)]) & MASK64
-        cur = int(reg_state_get(state_key, int(golden))) & MASK64
-        if int(cur) != int(golden):
-            if out is None:
-                out = list(src_vals_raw)
-            out[int(src_i)] = int(cur) & MASK64
-    if out is None:
-        return src_vals_raw, False
-    return out, True
-
-
-def _raw_event_addr_source_indices(raw: Dict[str, Any]) -> List[int]:
-    out: List[int] = []
-    base_raw = raw.get("ea_base_src_indices", [])
-    if isinstance(base_raw, list):
-        for idx_raw in base_raw:
-            try:
-                out.append(int(idx_raw))
-            except Exception:
-                continue
-    expr_raw = raw.get("ea_expr")
-    if isinstance(expr_raw, dict):
-        src_indices_raw = expr_raw.get("src_indices", [])
-        if isinstance(src_indices_raw, list):
-            for idx_raw in src_indices_raw:
-                try:
-                    out.append(int(idx_raw))
-                except Exception:
-                    continue
-    return sorted(set(int(v) for v in out if int(v) >= 0))
-
-
-def _eval_raw_event_addr(
-    raw: Any,
-    src_vals: List[int],
-    analysis_mod: Any,
-) -> Optional[int]:
-    if isinstance(raw, TraceDeltaPreparedEvent):
-        expr_raw = raw.ea_expr_raw
-        try:
-            width_bits = int(raw.raw.get("ea_width_bits", raw.raw.get("mem_addr_effective_bits", 64)))
-        except Exception:
-            width_bits = 64
-        if isinstance(expr_raw, dict):
-            try:
-                expr = analysis_mod.parse_generic_expr(
-                    expr_raw,
-                    int(raw.event_index),
-                    int(width_bits),
-                    "ea_expr",
-                )
-                if expr is None:
-                    return None
-                return int(
-                    analysis_mod.eval_expr(
-                        expr,
-                        list(int(v) & MASK64 for v in src_vals),
-                        int(raw.ea_const_offset),
-                    )
-                ) & MASK64
-            except Exception:
-                return None
-        if raw.addr_source_indices:
-            acc = int(raw.ea_const_offset) & MASK64
-            for src_i in raw.addr_source_indices:
-                if int(src_i) >= len(src_vals):
-                    return None
-                acc = (int(acc) + (int(src_vals[int(src_i)]) & MASK64)) & MASK64
-            return int(acc) & MASK64
-        if raw.addr_i is None:
-            return None
-        return int(raw.addr_i) & MASK64
-
-    expr_raw = raw.get("ea_expr")
-    try:
-        width_bits = int(raw.get("ea_width_bits", raw.get("mem_addr_effective_bits", 64)))
-    except Exception:
-        width_bits = 64
-    if isinstance(expr_raw, dict):
-        try:
-            expr = analysis_mod.parse_generic_expr(expr_raw, int(raw.get("event_index", -1)), int(width_bits), "ea_expr")
-            if expr is None:
-                return None
-            return int(
-                analysis_mod.eval_expr(
-                    expr,
-                    list(int(v) & MASK64 for v in src_vals),
-                    int(raw.get("ea_const_offset", 0)),
-                )
-            ) & MASK64
-        except Exception:
-            return None
-    idxs = _raw_event_addr_source_indices(raw)
-    if idxs:
-        acc = int(raw.get("ea_const_offset", 0)) & MASK64
-        for src_i in idxs:
-            if src_i >= len(src_vals):
-                return None
-            acc = (int(acc) + (int(src_vals[src_i]) & MASK64)) & MASK64
-        return int(acc) & MASK64
-    addr_raw = raw.get("mem_addr", raw.get("base"))
-    if addr_raw is None:
-        return None
-    return parse_int(addr_raw) & MASK64
-
-
-def _eval_raw_branch_taken(
-    raw: Any,
-    src_vals: List[int],
-    analysis_mod: Any,
-) -> Optional[bool]:
-    if isinstance(raw, TraceDeltaPreparedEvent):
-        expr_raw = raw.control_expr_raw
-        if isinstance(expr_raw, dict):
-            try:
-                expr = analysis_mod.parse_generic_expr(
-                    expr_raw,
-                    int(raw.event_index),
-                    1,
-                    "control_expr",
-                )
-                if expr is None:
-                    return None
-                return bool(int(analysis_mod.eval_expr(expr, list(src_vals), 0)) & 1)
-            except Exception:
-                return None
-        if len(src_vals) == 1:
-            return bool(int(src_vals[0]) & 1)
-        return None
-
-    expr_raw = raw.get("control_expr")
-    if isinstance(expr_raw, dict):
-        try:
-            expr = analysis_mod.parse_generic_expr(
-                expr_raw,
-                int(raw.get("event_index", -1)),
-                1,
-                "control_expr",
-            )
-            if expr is None:
-                return None
-            return bool(int(analysis_mod.eval_expr(expr, list(src_vals), 0)) & 1)
-        except Exception:
-            return None
-    if len(src_vals) == 1:
-        return bool(int(src_vals[0]) & 1)
-    return None
-
-
-def _merge_write_value(
+def _cache_tag_output_relevant_lookup_masks(
     *,
-    old_val: int,
-    write_val: int,
-    write_mask: int,
-) -> int:
-    return ((int(old_val) & (~int(write_mask) & MASK64)) | (int(write_val) & int(write_mask))) & MASK64
-
-
-def _load_value_from_overrides(
-    *,
-    space_bytes: Dict[int, int],
-    addr: int,
-    size_bytes: int,
-    golden_value: int,
-) -> int:
-    out = int(golden_value) & MASK64
-    for byte_i in range(int(size_bytes)):
-        baddr = int(addr + byte_i)
-        if int(baddr) not in space_bytes:
-            continue
-        out &= (~(0xFF << (8 * byte_i))) & MASK64
-        out |= (int(space_bytes[int(baddr)]) & 0xFF) << (8 * byte_i)
-    return int(out) & MASK64
-
-
-def _load_value_from_line_bytes(
-    *,
-    line_bytes: Dict[int, int],
-    addr: int,
-    size_bytes: int,
+    cache_sites: Sequence[Dict[str, Any]],
     line_size_bytes: int,
-) -> Optional[int]:
-    value, missing_offsets = _load_value_from_line_bytes_detail(
-        line_bytes=line_bytes,
-        addr=addr,
-        size_bytes=size_bytes,
-        line_size_bytes=line_size_bytes,
-    )
-    if missing_offsets:
-        return None
-    return value
+    cache_component: str,
+    scope_mode: str,
+    trace_expanding_policy: str = CANONICAL_TRACE_EXPANDING_POLICY,
+    trace_uncovered_mode: str = CANONICAL_TRACE_UNCOVERED_MODE,
+    trace_expanding_resolution_mode: str = CANONICAL_TRACE_EXPANDING_RESOLUTION_MODE,
+    trace_divergence_policy: str = CANONICAL_TRACE_DIVERGENCE_POLICY,
+) -> Dict[Tuple[int, int, int], Dict[int, int]]:
+    """Return output-relevant load-byte masks keyed by cache scope, line, and cycle.
 
-
-def _load_value_from_line_bytes_detail(
-    *,
-    line_bytes: Dict[int, int],
-    addr: int,
-    size_bytes: int,
-    line_size_bytes: int,
-) -> Tuple[int, Tuple[int, ...]]:
-    out = 0
-    missing_offsets: List[int] = []
-    for byte_i in range(int(size_bytes)):
-        off = int((int(addr) + int(byte_i)) % int(line_size_bytes))
-        if int(off) not in line_bytes:
-            missing_offsets.append(int(off))
-            continue
-        out |= (int(line_bytes[int(off)]) & 0xFF) << (8 * byte_i)
-    return int(out) & MASK64, tuple(sorted(set(int(v) for v in missing_offsets)))
-
-
-def _classify_missing_source_line_offsets(
-    *,
-    addr_ranges: Sequence[Dict[str, Any]],
-    source_line: int,
-    missing_offsets: Sequence[int],
-    line_size_bytes: int,
-    event_index: Optional[int],
-    cycle: Optional[int],
-    thread_id: Optional[int],
-    cta_id: Optional[int],
-    sm_id: Optional[int],
-) -> Dict[str, Any]:
-    source_base_addr = int(source_line) * int(line_size_bytes)
-    if not missing_offsets:
-        return {
-            "classification": "masked",
-            "reason": "no_missing_source_offsets",
-            "source_addr_samples": [],
-            "missing_offsets": [],
-        }
-
-    has_context = False
-    oob_offsets: List[int] = []
-    unresolved_offsets: List[int] = []
-    for off in sorted(set(int(v) for v in missing_offsets)):
-        valid, ctx = _addr_access_validity(
-            ranges=addr_ranges,
-            mem_space="global",
-            addr=int(source_base_addr) + int(off),
-            size_bytes=1,
-            event_index=event_index,
-            cycle=cycle,
-            thread_id=thread_id,
-            cta_id=cta_id,
-            sm_id=sm_id,
-        )
-        has_context = has_context or bool(ctx)
-        if bool(ctx) and not bool(valid):
-            oob_offsets.append(int(off))
-        else:
-            unresolved_offsets.append(int(off))
-
-    sample_addrs = [
-        f"0x{int(source_base_addr) + int(off):016x}"
-        for off in sorted(set(int(v) for v in missing_offsets))[:8]
-    ]
-    if has_context and oob_offsets and not unresolved_offsets:
-        return {
-            "classification": "due",
-            "reason": "target_line_source_bytes_oob",
-            "source_addr_samples": sample_addrs,
-            "missing_offsets": [int(v) for v in oob_offsets[:16]],
-        }
-    return {
-        "classification": "unknown",
-        "reason": "target_line_source_bytes_incomplete",
-        "source_addr_samples": sample_addrs,
-        "missing_offsets": [int(v) for v in sorted(set(int(v) for v in missing_offsets))[:16]],
-    }
-
-
-@dataclass(frozen=True)
-class TraceDeltaPreparedEvent:
-    raw: Dict[str, Any]
-    event_index: int
-    kind: str
-    thread_id: int
-    sm_id: int
-    cta_id: int
-    cycle: int
-    pred_reg: Optional[str]
-    pred_val: int
-    src_regs: Tuple[str, ...]
-    src_reg_is_virtual: Tuple[bool, ...]
-    virtual_src_indices: Tuple[int, ...]
-    has_virtual_src_regs: bool
-    src_vals: Tuple[int, ...]
-    src_width_bits: Tuple[int, ...]
-    dst_reg: Optional[str]
-    dst_old_val: int
-    dst_val: int
-    dst_write_mask: int
-    width_bits: int
-    opcode_raw: str
-    opcode_norm: str
-    opcode_is_setp: bool
-    pc: str
-    cspace: Optional[str]
-    addr_i: Optional[int]
-    access_size_bytes: int
-    addr_source_indices: Tuple[int, ...]
-    ea_expr_raw: Any
-    ea_const_offset: int
-    control_expr_raw: Any
-    store_data_src_index: int
-    store_data_byte_offset: int
-    is_output_store: bool
-    branch_taken: bool
-    virtual_src_state_keys: Tuple[Tuple[int, str], ...] = ()
-    dst_state_key: Optional[Tuple[int, str]] = None
-
-
-@lru_cache(maxsize=None)
-def _trace_delta_canonical_op(opcode_raw: str) -> str:
-    import reg_observed_analyzer as analysis_mod
-
-    return str(analysis_mod.canonical_op(str(opcode_raw)))
-
-
-def _prepare_trace_delta_event(
-    raw: Dict[str, Any],
-    event_index: int,
-) -> TraceDeltaPreparedEvent:
-    kind = str(raw.get("kind", "")).strip().lower()
-    try:
-        width_bits = max(1, min(64, int(raw.get("width_bits", 32))))
-    except Exception:
-        width_bits = 32
-    try:
-        write_mask_default = width_mask(max(1, min(64, int(raw.get("width_bits", 64)))))
-    except Exception:
-        write_mask_default = MASK64
-    src_regs_raw = raw.get("src_regs", [])
-    if not isinstance(src_regs_raw, list):
-        src_regs_raw = []
-    src_vals_raw = raw.get("src_vals", [])
-    if not isinstance(src_vals_raw, list):
-        src_vals_raw = []
-    src_regs_list = [str(v) for v in src_regs_raw]
-    src_reg_is_virtual_list = [str(v).startswith("%") for v in src_regs_list]
-    virtual_src_indices = tuple(
-        idx for idx, is_virtual in enumerate(src_reg_is_virtual_list) if bool(is_virtual)
-    )
-    src_vals: List[int] = []
-    for golden_raw in src_vals_raw:
-        try:
-            src_vals.append(parse_int(golden_raw) & MASK64)
-        except Exception:
-            src_vals.append(0)
-    while len(src_regs_list) < len(src_vals):
-        src_regs_list.append("")
-        src_reg_is_virtual_list.append(False)
-    src_width_bits_raw = raw.get("src_width_bits", [])
-    if not isinstance(src_width_bits_raw, list):
-        src_width_bits_raw = []
-    src_width_bits: List[int] = []
-    for w_raw in src_width_bits_raw:
-        try:
-            src_width_bits.append(max(1, min(64, int(w_raw))))
-        except Exception:
-            src_width_bits.append(int(width_bits))
-    while len(src_width_bits) < len(src_vals):
-        src_width_bits.append(int(width_bits))
-
-    pred_reg: Optional[str] = None
-    pred_val = 0
-    pred_raw = raw.get("pred")
-    if isinstance(pred_raw, dict) and pred_raw.get("reg") is not None:
-        pred_reg = str(pred_raw.get("reg"))
-        pred_val = int(pred_raw.get("val", 0)) & 1
-
-    dst_reg_raw = raw.get("dst_reg")
-    dst_reg = str(dst_reg_raw) if dst_reg_raw is not None else None
-    try:
-        dst_old_val = parse_int(raw.get("dst_old_val", 0)) & MASK64
-    except Exception:
-        dst_old_val = 0
-    try:
-        dst_val = parse_int(raw.get("dst_val", 0)) & MASK64
-    except Exception:
-        dst_val = 0
-    dst_write_mask = parse_mask(raw.get("dst_write_mask", write_mask_default)) & MASK64
-    opcode_raw = str(raw.get("opcode", ""))
-    opcode_norm = _trace_delta_canonical_op(opcode_raw) if kind == "inst" else ""
-    cspace = canonical_space(raw.get("mem_space") or raw.get("space"))
-    addr_i: Optional[int] = None
-    if kind in ("load", "store"):
-        addr_raw = raw.get("mem_addr", raw.get("base"))
-        if addr_raw is not None:
-            try:
-                addr_i = parse_int(addr_raw) & MASK64
-            except Exception:
-                addr_i = None
-    access_size = access_size_bytes_for_raw_event(raw) if kind in ("load", "store") else 0
-    try:
-        ea_const_offset = int(raw.get("ea_const_offset", 0))
-    except Exception:
-        ea_const_offset = 0
-    try:
-        store_data_src_index = int(raw.get("store_data_src_index", 0))
-    except Exception:
-        store_data_src_index = 0
-    try:
-        store_data_byte_offset = int(raw.get("store_data_byte_offset", 0))
-    except Exception:
-        store_data_byte_offset = 0
-    thread_id = int(raw.get("thread_id", -1))
-    virtual_src_state_keys = tuple(
-        (int(thread_id), str(src_regs_list[int(src_i)]))
-        for src_i in virtual_src_indices
-    )
-    dst_state_key = (
-        (int(thread_id), str(dst_reg))
-        if dst_reg is not None
-        else None
-    )
-
-    return TraceDeltaPreparedEvent(
-        raw=raw,
-        event_index=int(event_index),
-        kind=str(kind),
-        thread_id=int(thread_id),
-        sm_id=int(raw.get("sm_id", -1)),
-        cta_id=int(raw.get("cta_id", -1)),
-        cycle=int(raw.get("cycle", event_index)),
-        pred_reg=pred_reg,
-        pred_val=int(pred_val),
-        src_regs=tuple(src_regs_list),
-        src_reg_is_virtual=tuple(src_reg_is_virtual_list),
-        virtual_src_indices=virtual_src_indices,
-        has_virtual_src_regs=bool(virtual_src_indices),
-        src_vals=tuple(int(v) & MASK64 for v in src_vals),
-        src_width_bits=tuple(int(v) for v in src_width_bits),
-        dst_reg=dst_reg,
-        dst_old_val=int(dst_old_val) & MASK64,
-        dst_val=int(dst_val) & MASK64,
-        dst_write_mask=int(dst_write_mask) & MASK64,
-        width_bits=int(width_bits),
-        opcode_raw=str(opcode_raw),
-        opcode_norm=str(opcode_norm),
-        opcode_is_setp=bool(str(opcode_norm).startswith("SETP_")),
-        pc=str(raw.get("pc", "")),
-        cspace=cspace,
-        addr_i=(int(addr_i) & MASK64) if addr_i is not None else None,
-        access_size_bytes=int(access_size),
-        addr_source_indices=tuple(_raw_event_addr_source_indices(raw)),
-        ea_expr_raw=raw.get("ea_expr"),
-        ea_const_offset=int(ea_const_offset),
-        control_expr_raw=raw.get("control_expr"),
-        store_data_src_index=int(store_data_src_index),
-        store_data_byte_offset=int(store_data_byte_offset),
-        is_output_store=bool(raw.get("is_output_store", False)),
-        branch_taken=bool(raw.get("branch_taken", False)),
-        virtual_src_state_keys=virtual_src_state_keys,
-        dst_state_key=dst_state_key,
-    )
-
-
-def _classify_l1d_alias_cycle_trace_delta_from_state(
-    *,
-    cta_prepared: Sequence[TraceDeltaPreparedEvent],
-    start_pos: int,
-    sm_id: int,
-    cta_id: int,
-    target_line: int,
-    source_line: int,
-    source_line_bytes: Dict[int, int],
-    target_cycle: int,
-    line_size_bytes: int,
-    output_last_writer: Dict[int, int],
-    output_final_bytes: Dict[int, int],
-    analysis_mod: Any,
-    addr_ranges: Optional[Sequence[Dict[str, Any]]] = None,
-    source_line_value_cache: Optional[
-        Dict[Tuple[int, int], Tuple[int, Tuple[int, ...]]]
-    ] = None,
-) -> Dict[str, Any]:
-    target_cycle_i = int(target_cycle)
-    target_line_i = int(target_line)
-    source_line_i = int(source_line)
-    line_size_bytes_i = int(line_size_bytes)
-    target_lines = (target_line_i, source_line_i)
-    reg_state: Dict[Tuple[int, str], int] = {}
-    mem_state: Dict[str, Dict[int, int]] = defaultdict(dict)
-    output_byte_overrides: Dict[int, Tuple[int, int]] = {}
-    thread_state_counts: Dict[int, int] = {}
-    mem_diff_count = 0
-    reg_state_get = reg_state.get
-    reg_state_contains = reg_state.__contains__
-    if source_line_value_cache is None:
-        source_line_value_cache = {}
-
-    def set_reg_state(
-        state_key: Tuple[int, str],
-        current_value: int,
-        golden_value: int,
-    ) -> None:
-        key = (int(state_key[0]), str(state_key[1]))
-        key_tid = int(key[0])
-        had_key = key in reg_state
-        if int(current_value) == int(golden_value):
-            if had_key:
-                reg_state.pop(key, None)
-                next_count = int(thread_state_counts.get(key_tid, 0)) - 1
-                if next_count > 0:
-                    thread_state_counts[key_tid] = int(next_count)
-                else:
-                    thread_state_counts.pop(key_tid, None)
-            return
-        reg_state[key] = int(current_value) & MASK64
-        if not had_key:
-            thread_state_counts[key_tid] = int(thread_state_counts.get(key_tid, 0)) + 1
-
-    for prepared in cta_prepared[start_pos:]:
-        tid = int(prepared.thread_id)
-        kind = str(prepared.kind)
-        cycle = int(prepared.cycle)
-        addr_i = None
-        line_addr = -1
-        relevant_fault_load = False
-        if kind in ("load", "store"):
-            addr_i = int(prepared.addr_i) if prepared.addr_i is not None else None
-            if addr_i is None:
-                return {
-                    "classification": "unknown",
-                    "reason": "memory_address_parse_failed",
-                    "event_index": int(prepared.event_index),
-                    "thread_id": int(tid),
-                    "pc": str(prepared.pc),
-                    "addr": "",
-                }
-            if str(prepared.cspace) == "global":
-                line_addr = int(int(addr_i) // int(line_size_bytes_i))
-                relevant_fault_load = bool(
-                    kind == "load"
-                    and int(cycle) >= int(target_cycle_i)
-                    and int(line_addr) in target_lines
-                )
-        if (
-            not relevant_fault_load
-            and int(thread_state_counts.get(int(tid), 0)) <= 0
-            and int(mem_diff_count) == 0
-            and not output_byte_overrides
-        ):
-            continue
-        pred_reg = prepared.pred_reg
-        golden_pred = int(prepared.pred_val) & 1
-        if pred_reg is not None:
-            cur_pred = int(reg_state_get((int(tid), str(pred_reg)), int(golden_pred))) & 1
-            if int(cur_pred) != int(golden_pred):
-                return {
-                    "classification": "unknown",
-                    "reason": "predicate_divergence",
-                    "event_index": int(prepared.event_index),
-                    "thread_id": int(tid),
-                    "pc": str(prepared.pc),
-                    "pred_reg": str(pred_reg),
-                }
-
-        src_vals_cur: Sequence[int] = prepared.src_vals
-        src_changed = False
-        if (
-            bool(prepared.has_virtual_src_regs)
-            and (
-                kind in ("branch", "loop_branch", "inst", "store")
-                or (kind == "load" and bool(prepared.addr_source_indices))
-            )
-        ):
-            src_vals_cur, src_changed = _current_src_vals_for_prepared_event(
-                prepared,
-                reg_state,
-                reg_state_get,
-                reg_state_contains,
-            )
-        src_vals_raw: Sequence[Any] = prepared.src_vals
-        if kind in ("load", "store") and src_changed:
-            addr_src_changed = False
-            addr_src_indices = prepared.addr_source_indices
-            for src_i in addr_src_indices:
-                if src_i < 0 or src_i >= len(src_vals_cur) or src_i >= len(src_vals_raw):
-                    continue
-                golden_src = int(src_vals_raw[src_i]) & MASK64
-                if int(src_vals_cur[src_i]) != int(golden_src):
-                    addr_src_changed = True
-                    break
-            if addr_src_changed:
-                addr_eval = _eval_raw_event_addr(prepared, src_vals_cur, analysis_mod)
-                if addr_eval is None or int(addr_i) != int(addr_eval):
-                    return {
-                        "classification": "unknown",
-                        "reason": "address_divergence",
-                        "event_index": int(prepared.event_index),
-                        "thread_id": int(tid),
-                        "pc": str(prepared.pc),
-                    }
-        if kind in ("branch", "loop_branch"):
-            if src_changed:
-                taken_eval = _eval_raw_branch_taken(prepared, src_vals_cur, analysis_mod)
-                golden_taken = bool(prepared.branch_taken)
-                if taken_eval is None or bool(taken_eval) != bool(golden_taken):
-                    return {
-                        "classification": "unknown",
-                        "reason": "branch_divergence",
-                        "event_index": int(prepared.event_index),
-                        "thread_id": int(tid),
-                        "pc": str(prepared.pc),
-                    }
-            continue
-
-        if kind == "load":
-            dst_reg = prepared.dst_reg
-            if dst_reg is None:
-                continue
-            cspace = prepared.cspace
-            if cspace is None:
-                return {
-                    "classification": "unknown",
-                    "reason": "load_space_missing",
-                    "event_index": int(prepared.event_index),
-                }
-            size_bytes = prepared.access_size_bytes
-            if size_bytes <= 0 or addr_i is None:
-                return {
-                    "classification": "unknown",
-                    "reason": "load_shape_invalid",
-                    "event_index": int(prepared.event_index),
-                }
-            golden_load_val = int(prepared.dst_val)
-            line_addr = int(int(addr_i) // int(line_size_bytes_i)) if str(cspace) == "global" else -1
-            load_val = None
-            if (
-                str(cspace) == "global"
-                and int(cycle) >= int(target_cycle_i)
-                and int(line_addr) in target_lines
-            ):
-                load_cache_key = (int(addr_i), int(size_bytes))
-                cached_load = source_line_value_cache.get(load_cache_key)
-                if cached_load is None:
-                    cached_load = _load_value_from_line_bytes_detail(
-                        line_bytes=source_line_bytes,
-                        addr=int(addr_i),
-                        size_bytes=int(size_bytes),
-                        line_size_bytes=int(line_size_bytes_i),
-                    )
-                    source_line_value_cache[load_cache_key] = cached_load
-                load_val, missing_offsets = cached_load
-                if missing_offsets:
-                    missing_cls = _classify_missing_source_line_offsets(
-                        addr_ranges=list(addr_ranges or []),
-                        source_line=int(source_line_i),
-                        missing_offsets=missing_offsets,
-                        line_size_bytes=int(line_size_bytes_i),
-                        event_index=int(prepared.event_index),
-                        cycle=int(cycle),
-                        thread_id=int(tid),
-                        cta_id=int(cta_id),
-                        sm_id=int(sm_id),
-                    )
-                    return {
-                        "classification": str(
-                            missing_cls.get("classification", "unknown")
-                        ).strip().lower(),
-                        "reason": str(
-                            missing_cls.get(
-                                "reason",
-                                "target_line_source_bytes_incomplete",
-                            )
-                        ),
-                        "event_index": int(prepared.event_index),
-                        "thread_id": int(tid),
-                        "missing_offsets": list(
-                            missing_cls.get("missing_offsets", [])
-                        ),
-                        "source_addr_samples": list(
-                            missing_cls.get("source_addr_samples", [])
-                        ),
-                    }
-            else:
-                load_val = _load_value_from_overrides(
-                    space_bytes=mem_state.setdefault(str(cspace), {}),
-                    addr=int(addr_i),
-                    size_bytes=int(size_bytes),
-                    golden_value=int(golden_load_val),
-                )
-            old_key = (
-                prepared.dst_state_key
-                if prepared.dst_state_key is not None
-                else (int(tid), str(dst_reg))
-            )
-            golden_old = int(prepared.dst_old_val)
-            old_cur = int(reg_state_get(old_key, int(golden_old))) & MASK64
-            write_mask = int(prepared.dst_write_mask)
-            new_cur = _merge_write_value(old_val=int(old_cur), write_val=int(load_val), write_mask=int(write_mask))
-            golden_cur = _merge_write_value(old_val=int(golden_old), write_val=int(golden_load_val), write_mask=int(write_mask))
-            set_reg_state(old_key, int(new_cur), int(golden_cur))
-            continue
-
-        if kind == "store":
-            cspace = prepared.cspace
-            if cspace is None or addr_i is None:
-                return {
-                    "classification": "unknown",
-                    "reason": "store_shape_invalid",
-                    "event_index": int(prepared.event_index),
-                }
-            size_bytes = prepared.access_size_bytes
-            if size_bytes <= 0:
-                return {
-                    "classification": "unknown",
-                    "reason": "store_size_invalid",
-                    "event_index": int(prepared.event_index),
-                }
-            data_idx = int(prepared.store_data_src_index)
-            byte_off = int(prepared.store_data_byte_offset)
-            if data_idx < 0 or data_idx >= len(src_vals_cur):
-                return {
-                    "classification": "unknown",
-                    "reason": "store_data_index_invalid",
-                    "event_index": int(prepared.event_index),
-                }
-            payload = int((int(src_vals_cur[data_idx]) >> (8 * int(byte_off))) & width_mask(int(size_bytes) * 8))
-            space_bytes = mem_state.setdefault(str(cspace), {})
-            golden_payload = 0
-            if 0 <= data_idx < len(src_vals_raw):
-                golden_payload = int(
-                    (int(src_vals_raw[data_idx]) >> (8 * int(byte_off)))
-                    & width_mask(int(size_bytes) * 8)
-                )
-            for byte_i in range(int(size_bytes)):
-                baddr = int(int(addr_i) + int(byte_i))
-                bval = int((payload >> (8 * byte_i)) & 0xFF)
-                golden_bval = int((golden_payload >> (8 * byte_i)) & 0xFF)
-                if int(bval) == int(golden_bval):
-                    if int(baddr) in space_bytes:
-                        space_bytes.pop(int(baddr), None)
-                        mem_diff_count -= 1
-                else:
-                    if int(baddr) not in space_bytes:
-                        mem_diff_count += 1
-                    space_bytes[int(baddr)] = int(bval)
-                if bool(prepared.is_output_store) and str(cspace) == "global":
-                    baseline_idx = int(output_last_writer.get(int(baddr), -1))
-                    if int(prepared.event_index) == int(baseline_idx):
-                        baseline_val = int(output_final_bytes.get(int(baddr), -1))
-                        if int(bval) != int(baseline_val):
-                            return {
-                                "classification": "sdc",
-                                "reason": "output_byte_diff",
-                                "byte_addr": int(baddr),
-                                "writer_event_index": int(prepared.event_index),
-                                "golden_byte": int(baseline_val),
-                                "faulted_byte": int(bval),
-                            }
-                        output_byte_overrides.pop(int(baddr), None)
-                    elif int(bval) != int(golden_bval):
-                        output_byte_overrides[int(baddr)] = (int(prepared.event_index), int(bval))
-                    else:
-                        output_byte_overrides.pop(int(baddr), None)
-            continue
-
-        if kind == "inst":
-            dst_reg = prepared.dst_reg
-            opcode_norm = prepared.opcode_norm
-            if dst_reg is None:
-                continue
-            old_key = (
-                prepared.dst_state_key
-                if prepared.dst_state_key is not None
-                else (int(tid), str(dst_reg))
-            )
-            old_cur = int(reg_state_get(old_key, int(prepared.dst_old_val))) & MASK64
-            golden_old = int(prepared.dst_old_val)
-            write_mask = int(prepared.dst_write_mask)
-            need_eval = bool(src_changed or old_key in reg_state)
-            if not need_eval:
-                continue
-            try:
-                if prepared.opcode_is_setp:
-                    src_widths = list(prepared.src_width_bits)
-                    if not src_widths:
-                        src_widths = [max(1, min(64, int(prepared.width_bits)))] * max(1, len(src_vals_cur))
-                    write_val = int(
-                        analysis_mod.eval_setp_predicate(
-                            str(prepared.opcode_raw),
-                            list(int(v) & MASK64 for v in src_vals_cur),
-                            src_widths,
-                        )
-                    ) & MASK64
-                else:
-                    if str(opcode_norm) not in analysis_mod.SUPPORTED_OPS:
-                        return {
-                            "classification": "unknown",
-                            "reason": "unsupported_opcode_in_trace_delta",
-                            "event_index": int(prepared.event_index),
-                            "thread_id": int(tid),
-                            "pc": str(prepared.pc),
-                            "opcode": str(prepared.opcode_raw),
-                        }
-                    write_val = int(
-                        analysis_mod.eval_op(
-                            str(opcode_norm),
-                            list(int(v) & MASK64 for v in src_vals_cur),
-                            int(prepared.width_bits),
-                        )
-                    ) & MASK64
-            except Exception:
-                return {
-                    "classification": "unknown",
-                    "reason": "opcode_eval_failed_in_trace_delta",
-                    "event_index": int(prepared.event_index),
-                    "thread_id": int(tid),
-                    "pc": str(prepared.pc),
-                    "opcode": str(prepared.opcode_raw),
-                }
-            new_cur = _merge_write_value(old_val=int(old_cur), write_val=int(write_val), write_mask=int(write_mask))
-            golden_write = int(prepared.dst_val)
-            golden_cur = _merge_write_value(old_val=int(golden_old), write_val=int(golden_write), write_mask=int(write_mask))
-            set_reg_state(old_key, int(new_cur), int(golden_cur))
-            continue
-
-    for addr, (writer_idx, byte_val) in output_byte_overrides.items():
-        baseline_idx = int(output_last_writer.get(int(addr), -1))
-        if int(writer_idx) != int(baseline_idx):
-            continue
-        baseline_val = int(output_final_bytes.get(int(addr), -1))
-        if int(byte_val) != int(baseline_val):
-            return {
-                "classification": "sdc",
-                "reason": "output_byte_diff",
-                "byte_addr": int(addr),
-                "writer_event_index": int(writer_idx),
-                "golden_byte": int(baseline_val),
-                "faulted_byte": int(byte_val),
-            }
-    return {"classification": "masked", "reason": "output_equal"}
-
-
-def _trace_delta_cross_cta_conflict(
-    *,
-    sm_prepared: Sequence[TraceDeltaPreparedEvent],
-    sm_start_pos: int,
-    cta_id: int,
-    target_line: int,
-    source_line: int,
-    line_size_bytes: int,
-) -> Optional[Dict[str, Any]]:
-    for prepared in sm_prepared[sm_start_pos:]:
-        if int(prepared.cta_id) == int(cta_id):
-            continue
-        if prepared.cspace != "global":
-            continue
-        addr_i = prepared.addr_i
-        if addr_i is None:
-            return {
-                "classification": "unknown",
-                "reason": "cross_cta_memory_address_parse_failed",
-                "event_index": int(prepared.event_index),
-                "addr": "",
-            }
-        line_addr = int(int(addr_i) // int(line_size_bytes))
-        if int(line_addr) in (int(target_line), int(source_line)):
-            return {
-                "classification": "unknown",
-                "reason": "cross_cta_same_sm_cache_line_access",
-                "event_index": int(prepared.event_index),
-                "line_addr": int(line_addr),
-            }
-    return None
-
-
-def _trace_delta_sm_cross_cta_indexes(
-    trace_delta_ctx: Dict[str, Any],
-    *,
-    line_size_bytes: int,
-) -> Tuple[
-    Dict[int, Dict[int, List[Tuple[int, int]]]],
-    Dict[int, List[Tuple[int, int]]],
-]:
-    cache = trace_delta_ctx.setdefault("_sm_cross_cta_indexes_by_line_size", {})
-    cache_key = int(line_size_bytes)
-    cached = cache.get(cache_key) if isinstance(cache, dict) else None
-    if cached is not None:
-        return cached
-
-    sm_prepared_rows = trace_delta_ctx.get("sm_prepared_events", {})
-    line_positions_by_sm: Dict[int, Dict[int, List[Tuple[int, int]]]] = {}
-    invalid_positions_by_sm: Dict[int, List[Tuple[int, int]]] = {}
-    if isinstance(sm_prepared_rows, dict):
-        for sm_raw, rows_raw in sm_prepared_rows.items():
-            try:
-                sm_id = int(sm_raw)
-            except Exception:
-                continue
-            rows = rows_raw if isinstance(rows_raw, (list, tuple)) else ()
-            line_positions: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
-            invalid_positions: List[Tuple[int, int]] = []
-            for pos, prepared in enumerate(rows):
-                if prepared is None or getattr(prepared, "cspace", None) != "global":
-                    continue
-                cta_id = int(getattr(prepared, "cta_id", -1))
-                addr_i = getattr(prepared, "addr_i", None)
-                if addr_i is None:
-                    invalid_positions.append((int(pos), int(cta_id)))
-                    continue
-                line_addr = int(int(addr_i) // int(line_size_bytes))
-                line_positions[int(line_addr)].append((int(pos), int(cta_id)))
-            line_positions_by_sm[int(sm_id)] = {
-                int(line): list(pos_rows) for line, pos_rows in line_positions.items()
-            }
-            if invalid_positions:
-                invalid_positions_by_sm[int(sm_id)] = list(invalid_positions)
-
-    cached = (line_positions_by_sm, invalid_positions_by_sm)
-    if isinstance(cache, dict):
-        cache[cache_key] = cached
-    return cached
-
-
-def _trace_delta_cross_cta_conflict_indexed(
-    trace_delta_ctx: Dict[str, Any],
-    *,
-    sm_prepared: Sequence[TraceDeltaPreparedEvent],
-    sm_id: int,
-    sm_start_pos: int,
-    cta_id: int,
-    target_line: int,
-    source_line: int,
-    line_size_bytes: int,
-) -> Optional[Dict[str, Any]]:
-    line_positions_by_sm, invalid_positions_by_sm = _trace_delta_sm_cross_cta_indexes(
-        trace_delta_ctx,
-        line_size_bytes=int(line_size_bytes),
-    )
-    candidate_pos: Optional[int] = None
-    candidate_kind = ""
-    candidate_line = -1
-
-    def consider(pos: int, kind: str, line_addr: int = -1) -> None:
-        nonlocal candidate_pos, candidate_kind, candidate_line
-        if candidate_pos is None or int(pos) < int(candidate_pos):
-            candidate_pos = int(pos)
-            candidate_kind = str(kind)
-            candidate_line = int(line_addr)
-
-    invalid_positions = invalid_positions_by_sm.get(int(sm_id), [])
-    invalid_idx = bisect.bisect_left(invalid_positions, (int(sm_start_pos), -10**30))
-    while invalid_idx < len(invalid_positions):
-        pos, other_cta = invalid_positions[invalid_idx]
-        if int(other_cta) != int(cta_id):
-            consider(int(pos), "invalid")
-            break
-        invalid_idx += 1
-
-    line_positions = line_positions_by_sm.get(int(sm_id), {})
-    for line_addr in (int(target_line), int(source_line)):
-        pos_rows = line_positions.get(int(line_addr), [])
-        idx = bisect.bisect_left(pos_rows, (int(sm_start_pos), -10**30))
-        while idx < len(pos_rows):
-            pos, other_cta = pos_rows[idx]
-            if int(other_cta) != int(cta_id):
-                consider(int(pos), "line", int(line_addr))
-                break
-            idx += 1
-
-    if candidate_pos is None:
-        return None
-    prepared = sm_prepared[int(candidate_pos)] if 0 <= int(candidate_pos) < len(sm_prepared) else None
-    if candidate_kind == "invalid":
-        return {
-            "classification": "unknown",
-            "reason": "cross_cta_memory_address_parse_failed",
-            "event_index": int(getattr(prepared, "event_index", -1)),
-            "addr": "",
-        }
-    return {
-        "classification": "unknown",
-        "reason": "cross_cta_same_sm_cache_line_access",
-        "event_index": int(getattr(prepared, "event_index", -1)),
-        "line_addr": int(candidate_line),
-    }
-
-
-def _trace_delta_cta_line_load_positions(
-    trace_delta_ctx: Dict[str, Any],
-    *,
-    line_size_bytes: int,
-) -> Tuple[Dict[Tuple[int, int], Dict[int, List[int]]], Dict[Tuple[int, int], List[int]]]:
-    cache = trace_delta_ctx.setdefault("_cta_line_load_positions_by_line_size", {})
-    cache_key = int(line_size_bytes)
-    cached = cache.get(cache_key) if isinstance(cache, dict) else None
-    if cached is not None:
-        return cached
-    cta_prepared_rows = trace_delta_ctx.get("cta_prepared_events", {})
-    positions_by_cta: Dict[Tuple[int, int], Dict[int, List[int]]] = {}
-    invalid_memory_positions_by_cta: Dict[Tuple[int, int], List[int]] = {}
-    if isinstance(cta_prepared_rows, dict):
-        for raw_key, rows_raw in cta_prepared_rows.items():
-            if not isinstance(raw_key, tuple) or len(raw_key) != 2:
-                continue
-            try:
-                cta_key = (int(raw_key[0]), int(raw_key[1]))
-            except Exception:
-                continue
-            rows = rows_raw if isinstance(rows_raw, (list, tuple)) else ()
-            line_positions: Dict[int, List[int]] = defaultdict(list)
-            invalid_positions: List[int] = []
-            for pos, prepared in enumerate(rows):
-                if prepared is None:
-                    continue
-                kind = str(getattr(prepared, "kind", ""))
-                if kind not in ("load", "store"):
-                    continue
-                addr_i = getattr(prepared, "addr_i", None)
-                if addr_i is None:
-                    invalid_positions.append(int(pos))
-                    continue
-                if kind == "load" and getattr(prepared, "cspace", None) == "global":
-                    line_addr = int(int(addr_i) // int(line_size_bytes))
-                    line_positions[int(line_addr)].append(int(pos))
-            positions_by_cta[cta_key] = {
-                int(line): list(pos_list)
-                for line, pos_list in line_positions.items()
-            }
-            if invalid_positions:
-                invalid_memory_positions_by_cta[cta_key] = list(invalid_positions)
-    cached = (positions_by_cta, invalid_memory_positions_by_cta)
-    if isinstance(cache, dict):
-        cache[cache_key] = cached
-    return cached
-
-
-def _trace_delta_l1d_adjusted_start(
-    *,
-    trace_delta_ctx: Dict[str, Any],
-    cta_key: Tuple[int, int],
-    cta_prepared: Sequence[TraceDeltaPreparedEvent],
-    start_pos: int,
-    target_cycle: int,
-    target_line: int,
-    source_line: int,
-    line_size_bytes: int,
-) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
-    positions_by_cta, invalid_positions_by_cta = _trace_delta_cta_line_load_positions(
-        trace_delta_ctx,
-        line_size_bytes=int(line_size_bytes),
-    )
-    cta_positions = positions_by_cta.get((int(cta_key[0]), int(cta_key[1])), {})
-    candidates: List[int] = []
-    for line in (int(target_line), int(source_line)):
-        pos_list = cta_positions.get(int(line), [])
-        idx = bisect.bisect_left(pos_list, int(start_pos))
-        while idx < len(pos_list):
-            pos = int(pos_list[idx])
-            if 0 <= pos < len(cta_prepared):
-                prepared = cta_prepared[pos]
-                if int(getattr(prepared, "cycle", 0)) >= int(target_cycle):
-                    candidates.append(int(pos))
-                    break
-            idx += 1
-    first_relevant_pos = min(candidates) if candidates else None
-    invalid_positions = invalid_positions_by_cta.get((int(cta_key[0]), int(cta_key[1])), [])
-    invalid_idx = bisect.bisect_left(invalid_positions, int(start_pos))
-    if invalid_idx < len(invalid_positions):
-        invalid_pos = int(invalid_positions[invalid_idx])
-        if first_relevant_pos is None or int(invalid_pos) < int(first_relevant_pos):
-            prepared = cta_prepared[invalid_pos] if 0 <= invalid_pos < len(cta_prepared) else None
-            return None, {
-                "classification": "unknown",
-                "reason": "memory_address_parse_failed",
-                "event_index": int(getattr(prepared, "event_index", -1)),
-                "thread_id": int(getattr(prepared, "thread_id", -1)),
-                "pc": str(getattr(prepared, "pc", "")),
-                "addr": "",
-            }
-    if first_relevant_pos is None:
-        return None, {"classification": "masked", "reason": "no_future_alias_load"}
-    return int(first_relevant_pos), None
-
-
-def _classify_l1d_alias_cycle_trace_delta(
-    *,
-    trace_delta_ctx: Dict[str, Any],
-    sm_id: int,
-    cta_id: int,
-    target_line: int,
-    source_line: int,
-    source_line_bytes: Dict[int, int],
-    target_cycle: int,
-    target_event_indices: Sequence[int],
-    line_size_bytes: int,
-    addr_ranges: Optional[Sequence[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
-    import reg_observed_analyzer as analysis_mod
-
-    def prepared_cycles(rows: Sequence[TraceDeltaPreparedEvent]) -> Tuple[int, ...]:
-        cycles: List[int] = []
-        for row in rows:
-            try:
-                cycles.append(int(row.cycle))
-            except Exception:
-                return ()
-        return tuple(cycles)
-
-    events_raw = trace_delta_ctx.get("events_raw", [])
-    if not isinstance(events_raw, list):
-        return {"classification": "unknown", "reason": "trace_events_missing"}
-    prepared_events_raw = trace_delta_ctx.get("prepared_events", [])
-    prepared_events: Sequence[Optional[TraceDeltaPreparedEvent]]
-    if isinstance(prepared_events_raw, list):
-        prepared_events = prepared_events_raw
-    else:
-        prepared_events = ()
-
-    cta_rows = trace_delta_ctx.get("cta_event_indices", {})
-    if not isinstance(cta_rows, dict):
-        return {"classification": "unknown", "reason": "cta_event_index_missing"}
-    sm_rows = trace_delta_ctx.get("sm_event_indices", {})
-
-    cta_indices_raw = cta_rows.get((int(sm_id), int(cta_id)), ())
-    cta_indices = cta_indices_raw if isinstance(cta_indices_raw, (list, tuple)) else ()
-    if not cta_indices:
-        return {"classification": "unknown", "reason": "cta_events_empty"}
-
-    target_set = set(int(v) for v in target_event_indices)
-    if not target_set:
-        return {"classification": "unknown", "reason": "target_events_empty"}
-    start_index = min(int(v) for v in target_set)
-
-    cta_prepared_rows = trace_delta_ctx.get("cta_prepared_events", {})
-    if isinstance(cta_prepared_rows, dict):
-        cta_prepared_raw = cta_prepared_rows.get((int(sm_id), int(cta_id)), ())
-    else:
-        cta_prepared_raw = ()
-    cta_prepared = (
-        cta_prepared_raw if isinstance(cta_prepared_raw, (list, tuple)) else ()
-    )
-    if not cta_prepared and prepared_events:
-        cta_prepared = tuple(
-            prepared_events[int(idx)]
-            for idx in cta_indices
-            if 0 <= int(idx) < len(prepared_events)
-            and prepared_events[int(idx)] is not None
-        )
-    if not cta_prepared:
-        return {"classification": "unknown", "reason": "cta_prepared_events_missing"}
-
-    start_pos = bisect.bisect_left(cta_indices, int(start_index))
-    cta_cycles = prepared_cycles(cta_prepared)
-    if len(cta_cycles) == len(cta_indices):
-        start_pos = max(
-            int(start_pos),
-            int(bisect.bisect_left(cta_cycles, int(target_cycle))),
-        )
-
-    output_last_writer = trace_delta_ctx.get("baseline_output_last_writer_index", {})
-    output_final_bytes = trace_delta_ctx.get("baseline_output_final_bytes", {})
-    if not isinstance(output_last_writer, dict) or not isinstance(output_final_bytes, dict):
-        return {"classification": "unknown", "reason": "output_baseline_missing"}
-
-    if isinstance(sm_rows, dict):
-        sm_indices_raw = sm_rows.get(int(sm_id), ())
-        sm_indices = sm_indices_raw if isinstance(sm_indices_raw, (list, tuple)) else ()
-    else:
-        sm_indices = ()
-    sm_prepared_rows = trace_delta_ctx.get("sm_prepared_events", {})
-    if isinstance(sm_prepared_rows, dict):
-        sm_prepared_raw = sm_prepared_rows.get(int(sm_id), ())
-    else:
-        sm_prepared_raw = ()
-    sm_prepared = (
-        sm_prepared_raw if isinstance(sm_prepared_raw, (list, tuple)) else ()
-    )
-    if not sm_prepared and prepared_events:
-        sm_prepared = tuple(
-            prepared_events[int(idx)]
-            for idx in sm_indices
-            if 0 <= int(idx) < len(prepared_events)
-            and prepared_events[int(idx)] is not None
-        )
-
-    if sm_prepared:
-        sm_start_pos = bisect.bisect_left(sm_indices, int(start_index))
-        sm_cycles = prepared_cycles(sm_prepared)
-        if len(sm_cycles) == len(sm_indices):
-            sm_start_pos = max(
-                int(sm_start_pos),
-                int(bisect.bisect_left(sm_cycles, int(target_cycle))),
-            )
-        conflict = _trace_delta_cross_cta_conflict_indexed(
-            trace_delta_ctx,
-            sm_prepared=sm_prepared,
-            sm_id=int(sm_id),
-            sm_start_pos=int(sm_start_pos),
-            cta_id=int(cta_id),
-            target_line=int(target_line),
-            source_line=int(source_line),
-            line_size_bytes=int(line_size_bytes),
-        )
-        if conflict is not None:
-            return dict(conflict)
-
-    adjusted_start_pos, precomputed_result = _trace_delta_l1d_adjusted_start(
-        trace_delta_ctx=trace_delta_ctx,
-        cta_key=(int(sm_id), int(cta_id)),
-        cta_prepared=cta_prepared,
-        start_pos=int(start_pos),
-        target_cycle=int(target_cycle),
-        target_line=int(target_line),
-        source_line=int(source_line),
-        line_size_bytes=int(line_size_bytes),
-    )
-    if precomputed_result is not None:
-        return dict(precomputed_result)
-    if adjusted_start_pos is not None:
-        start_pos = int(adjusted_start_pos)
-
-    source_line_value_cache: Dict[Tuple[int, int], Tuple[int, Tuple[int, ...]]] = {}
-    return _classify_l1d_alias_cycle_trace_delta_from_state(
-        cta_prepared=cta_prepared,
-        start_pos=int(start_pos),
-        sm_id=int(sm_id),
-        cta_id=int(cta_id),
-        target_line=int(target_line),
-        source_line=int(source_line),
-        source_line_bytes=source_line_bytes,
-        target_cycle=int(target_cycle),
-        line_size_bytes=int(line_size_bytes),
-        output_last_writer=output_last_writer,
-        output_final_bytes=output_final_bytes,
-        analysis_mod=analysis_mod,
-        addr_ranges=addr_ranges,
-        source_line_value_cache=source_line_value_cache,
-    )
-
-
-def _classify_l1d_alias_cycle_trace_delta_many(
-    *,
-    trace_delta_ctx: Dict[str, Any],
-    sm_id: int,
-    cta_id: int,
-    target_line: int,
-    source_line: int,
-    source_line_bytes: Dict[int, int],
-    target_cycle_groups: Sequence[Tuple[int, Sequence[int]]],
-    line_size_bytes: int,
-    addr_ranges: Optional[Sequence[Dict[str, Any]]] = None,
-) -> Dict[int, Dict[str, Any]]:
-    """Classify multiple same-CTA alias cycles through the trace-delta path."""
-
-    out: Dict[int, Dict[str, Any]] = {}
-    for target_cycle, event_indices in target_cycle_groups:
-        out[int(target_cycle)] = _classify_l1d_alias_cycle_trace_delta(
-            trace_delta_ctx=trace_delta_ctx,
-            sm_id=int(sm_id),
-            cta_id=int(cta_id),
-            target_line=int(target_line),
-            source_line=int(source_line),
-            source_line_bytes=source_line_bytes,
-            target_cycle=int(target_cycle),
-            target_event_indices=event_indices,
-            line_size_bytes=int(line_size_bytes),
-            addr_ranges=addr_ranges,
-        )
-    return out
-
-
-def _l1d_alias_sample_cycles(target_cycles: Sequence[int]) -> List[int]:
-    if not target_cycles:
-        return []
-    return sorted({int(v) for v in target_cycles})
-
-
-def _classify_l1d_tag_alias_interval(
-    *,
-    trace_delta_ctx: Dict[str, Any],
-    addr_ranges_seq: Sequence[Dict[str, Any]],
-    events_raw: Sequence[Any],
-    sm_id: int,
-    source_line: int,
-    target_line: int,
-    patch: Dict[int, int],
-    source_line_bytes: Dict[int, int],
-    source_line_missing_offsets: Sequence[int],
-    target_cycle: int,
-    target_event_indices: Sequence[int],
-    target_thread_ids: Sequence[int],
-    line_size_bytes: int,
-) -> Dict[str, Any]:
-    """Classify a reachable L1D tag-alias interval using trace-delta semantics.
-
-    The SDC_Compute_Once tag strategy first proves no-alias tag bits masked.  For
-    reachable L1D aliases, it replays the affected later lookup with the source
-    line's bytes substituted for the target line.  This repository no longer
-    carries the older LocalizedReplayEngine helper, so the same decision is made
-    through the maintained trace-delta semantic path for both single-event and
-    multi-event alias cycles.
+    Cache-tag faults are cache-line identity faults.  A tag flip matters only
+    when a later lookup that is already output-relevant for the golden value can
+    be served by a different resident line.  This helper reuses only the
+    single-byte output-relevance evidence of the golden lookup to decide whether
+    a lookup must be considered; it does not use that mask to classify a
+    multi-byte wrong-line value change as SDC.
     """
 
-    cycle_event_indices = [int(v) for v in target_event_indices]
-    if not cycle_event_indices:
-        return {"classification": "unknown", "reason": "target_event_missing"}
-    sm_ids = sorted(
-        {
-            int(events_raw[event_idx].get("sm_id", -1))
-            for event_idx in cycle_event_indices
-            if 0 <= int(event_idx) < len(events_raw)
-            and isinstance(events_raw[int(event_idx)], dict)
-            and events_raw[int(event_idx)].get("sm_id") is not None
-        }
-    )
-    cta_ids = sorted(
-        {
-            int(events_raw[event_idx].get("cta_id", -1))
-            for event_idx in cycle_event_indices
-            if 0 <= int(event_idx) < len(events_raw)
-            and isinstance(events_raw[int(event_idx)], dict)
-            and events_raw[int(event_idx)].get("cta_id") is not None
-        }
-    )
-    if len(sm_ids) != 1 or int(sm_ids[0]) < 0:
-        return {"classification": "unknown", "reason": "sm_disambiguation_failed"}
-    if int(sm_id) >= 0 and int(sm_ids[0]) != int(sm_id):
-        return {"classification": "unknown", "reason": "sm_scope_mismatch"}
-    if len(cta_ids) != 1 or int(cta_ids[0]) < 0:
-        return {"classification": "unknown", "reason": "cta_disambiguation_failed"}
-    raw = _classify_l1d_alias_cycle_trace_delta(
-        trace_delta_ctx=trace_delta_ctx,
-        sm_id=int(sm_ids[0]),
-        cta_id=int(cta_ids[0]),
-        target_line=int(target_line),
-        source_line=int(source_line),
-        source_line_bytes=source_line_bytes,
-        target_cycle=int(target_cycle),
-        target_event_indices=cycle_event_indices,
-        line_size_bytes=int(line_size_bytes),
-        addr_ranges=list(addr_ranges_seq or []),
-    )
-    cls = str(raw.get("classification", "")).strip().lower()
-    if cls not in ("masked", "sdc", "due"):
-        cls = "unknown"
-    reason = str(raw.get("reason", ""))
-    if not reason:
-        reason = "trace_delta_tag_alias"
-    return {
-        "classification": str(cls),
-        "reason": reason,
-        "patch_byte_count": int(len(patch)),
-        "missing_source_offsets": [
-            int(v) for v in list(source_line_missing_offsets)[:16]
-        ],
-        "thread_count": int(len(set(int(v) for v in target_thread_ids))),
-    }
+    component = str(cache_component).strip().lower() or "l1d"
+    expected_kind = "l2_load" if component == "l2" else "l1d_load"
+    scope_mode_n = str(scope_mode).strip().lower() or component
+    out: Dict[Tuple[int, int, int], Dict[int, int]] = defaultdict(dict)
+    for rec in cache_sites:
+        if str(_cache_site_row_field(rec, "site_kind", "")) != expected_kind:
+            continue
+        mem_space = canonical_space(_cache_site_row_field(rec, "mem_space"))
+        if mem_space != "global":
+            continue
+        try:
+            addr = int(_cache_site_row_field(rec, "addr", 0))
+            cycle = int(_cache_site_row_field(rec, "cycle", -1))
+        except Exception:
+            continue
+        if cycle < 0:
+            continue
+        if int(line_size_bytes) <= 0:
+            continue
+        scope = (
+            int(_cache_site_row_field(rec, "sm_id", -1))
+            if scope_mode_n == "l1d"
+            else 0
+        )
+        if scope_mode_n == "l1d" and scope < 0:
+            continue
+        line_addr = int(addr // int(line_size_bytes))
+        byte_off = int(addr % int(line_size_bytes))
+        try:
+            (
+                due_mask,
+                sdc_mask,
+                unknown_mask,
+                _trace_uncovered_mask,
+                _trace_policy_override_mask,
+            ) = final_due_sdc_masks_for_site_extended(
+                rec=rec,
+                trace_expanding_policy=trace_expanding_policy,
+                trace_uncovered_mode=trace_uncovered_mode,
+                trace_expanding_resolution_mode=trace_expanding_resolution_mode,
+            )
+        except Exception:
+            # If the golden lookup record cannot be interpreted, the lookup is
+            # still a possible output-relevant use but the byte evidence is not
+            # reliable enough for a Masked proof.
+            relevant_mask = 0xFF
+        else:
+            trace_mask_this_site = (
+                parse_mask(_cache_site_row_field(rec, "trace_expanding_mask_this_site", 0))
+                & 0xFF
+            )
+            (
+                due_mask,
+                sdc_mask,
+                unknown_mask,
+                _trace_div_mask_this_site,
+            ) = _apply_trace_divergence_policy_to_masks(
+                due_mask=int(due_mask),
+                sdc_mask=int(sdc_mask),
+                unknown_mask=int(unknown_mask),
+                trace_mask=int(trace_mask_this_site),
+                width_bits=8,
+                policy=trace_divergence_policy,
+            )
+            due_mask &= 0xFF
+            unknown_mask &= 0xFF
+            due_mask &= (~unknown_mask) & 0xFF
+            sdc_mask &= (~due_mask) & 0xFF
+            sdc_mask &= (~unknown_mask) & 0xFF
+            # SDC bits are output-relevant by proof.  Unknown bits are also kept
+            # as relevant because SARA cannot prove them harmless.  DUE bits do
+            # not make a tag alias SDC; they are retained only through Unknown if
+            # the output-relevance evidence is incomplete.
+            relevant_mask = (int(sdc_mask) | int(unknown_mask)) & 0xFF
+        if relevant_mask == 0:
+            continue
+        key = (int(scope), int(line_addr), int(cycle))
+        prev = int(out[key].get(int(byte_off), 0))
+        out[key][int(byte_off)] = (prev | int(relevant_mask)) & 0xFF
+    return out
 
 
 def _exact_l1d_tag_counts_global_readonly_alias(
@@ -7901,7 +6280,22 @@ def _exact_l1d_tag_counts_global_readonly_alias(
     cache_component: str = "l1d",
     scope_mode: str = "l1d",
     global_prefill: bool = False,
+    trace_expanding_policy: str = CANONICAL_TRACE_EXPANDING_POLICY,
+    trace_uncovered_mode: str = CANONICAL_TRACE_UNCOVERED_MODE,
+    trace_expanding_resolution_mode: str = CANONICAL_TRACE_EXPANDING_RESOLUTION_MODE,
+    trace_divergence_policy: str = CANONICAL_TRACE_DIVERGENCE_POLICY,
 ) -> Optional[Dict[str, Any]]:
+    """Classify cache-tag bits as cache-line identity faults.
+
+    A tag bit is Masked unless the corrupted tag can make a later
+    output-relevant lookup select another resident line.  When such a lookup is
+    present, SARA compares the aliased line bytes with the bytes returned by the
+    golden lookup.  Equal bytes remain Masked; unequal or missing bytes are
+    Unknown because a wrong-line hit can change multiple data bits and therefore
+    cannot reuse the per-bit output-relevance mask as an SDC proof.
+    """
+
+    del trace_path, addr_ranges
     if any(
         canonical_space(_cache_site_row_field(rec, "mem_space")) != "global"
         for rec in l1d_sites
@@ -7924,12 +6318,29 @@ def _exact_l1d_tag_counts_global_readonly_alias(
         scope_mode=str(scope_mode),
     )
     if not line_states:
-        return None
-    if addr_ranges is None:
-        addr_ranges = _load_addr_valid_ranges(
-            trace_memory_ranges=list(trace_template.get("memory_ranges", [])),
-            external_path=None,
-        )
+        return {
+            "counts": {"masked": 0, "sdc": 0, "due": 0, "unknown": 0},
+            "ordered_pairs": 0,
+            "potential_ordered_pairs": 0,
+            "replay_intervals": 0,
+            "alias_intervals": 0,
+            "fallback_reachable_intervals": 0,
+            "fallback_reason": "no_global_cache_lookup",
+            "self_miss_intervals": 0,
+            "self_miss_sdc": 0,
+            "self_miss_source_lines": 0,
+            "self_miss_sampled_bits": 0,
+            "multievent_cycles": 0,
+            "multithread_cycles": 0,
+            "multievent_examples": [],
+            "self_miss_examples": [],
+            "byte_match_intervals": 0,
+            "byte_mismatch_intervals": 0,
+            "missing_byte_intervals": 0,
+            "examples": [],
+            "mode": f"exact_{cache_component}_tag_identity_byte_compare",
+        }
+
     sample_positions = _cache_actual_tag_bit_positions(int(sample_tag_bits))
     prefill_cycle = None
     if bool(global_prefill):
@@ -7942,102 +6353,42 @@ def _exact_l1d_tag_counts_global_readonly_alias(
             ]
             if prefill_cycles:
                 prefill_cycle = min(prefill_cycles)
+
     stable_line_states = {
         key: state
         for key, state in line_states.items()
         if _line_state_load_window_stable(state)
     }
-
-    def tag_alias_fallback(reason: str) -> Dict[str, Any]:
-        fallback = _cache_tag_alias_reachability_counts(
-            line_states=line_states,
-            sample_positions=sample_positions,
-            shader_prefix=shader_prefix,
-            nset=int(nset),
-            ge_mode=bool(ge_mode),
-            global_prefill=bool(global_prefill),
-            prefill_cycle=prefill_cycle,
-        )
-        return {
-            "counts": dict(fallback.get("counts", {})),
-            "ordered_pairs": int(fallback.get("reachable_pairs", 0)),
-            "potential_ordered_pairs": int(fallback.get("reachable_pairs", 0)),
-            "replay_intervals": 0,
-            "alias_intervals": 0,
-            "fallback_reachable_intervals": int(fallback.get("reachable_intervals", 0)),
-            "self_miss_intervals": 0,
-            "self_miss_sdc": 0,
-            "self_miss_source_lines": 0,
-            "self_miss_sampled_bits": 0,
-            "multievent_cycles": 0,
-            "multithread_cycles": 0,
-            "multievent_examples": [],
-            "self_miss_examples": [],
-            "examples": list(fallback.get("examples", [])),
-            "mode": f"exact_{cache_component}_tag_alias_reachability_fallback",
-            "fallback_reason": str(reason),
-        }
-
-    if not stable_line_states:
-        return tag_alias_fallback("no_stable_load_window")
-    has_post_load_stores = any(
-        _line_state_has_post_load_store(state) for state in stable_line_states.values()
-    )
-    if has_post_load_stores:
-        return tag_alias_fallback("post_load_store_in_stable_window")
-
-    potential_ordered_pairs = 0
-    alias_reachable_bits: Set[Tuple[int, int, int]] = set()
-    for (sm_id, source_line), source_state in sorted(stable_line_states.items()):
-        source_first = source_state.get("first_load_cycle")
-        if source_first is None:
-            continue
-        source_active_from = (
-            int(prefill_cycle)
-            if bool(global_prefill) and prefill_cycle is not None
-            else int(source_first) + 1
-        )
-        source_tag = int(source_line) // int(nset)
-        set_idx = int(source_line) % int(nset)
-        for bitpos in sample_positions:
-            target_tag = int(source_tag) ^ (1 << int(bitpos))
-            target_line = int(set_idx) + int(nset) * int(target_tag)
-            target_state = stable_line_states.get((int(sm_id), int(target_line)))
-            if target_state is None:
-                continue
-            target_cycles = [
-                int(c)
-                for c in target_state.get("load_cycles", [])
-                if int(c) >= int(source_active_from)
-            ]
-            if target_cycles:
-                potential_ordered_pairs += 1
-                alias_reachable_bits.add((int(sm_id), int(source_line), int(bitpos)))
-
     global_line_bytes = _merge_global_readonly_line_bytes(stable_line_states)
+    line_bytes_mergeable = global_line_bytes is not None
     if global_line_bytes is None:
-        return tag_alias_fallback("line_bytes_not_mergeable")
-    scope_line_counts: Counter = Counter(
-        int(scope) for scope, _line in stable_line_states.keys()
-    )
-    if any(int(v) > int(line_capacity) for v in scope_line_counts.values()):
-        return tag_alias_fallback("line_capacity_exceeded")
+        global_line_bytes = {}
+    scope_line_counts: Counter = Counter(int(scope) for scope, _line in line_states.keys())
+    line_capacity_exceeded = any(int(v) > int(line_capacity) for v in scope_line_counts.values())
 
-    trace_delta_ctx = _build_trace_delta_context(trace_template)
-    addr_ranges_seq = list(addr_ranges or [])
-    events_raw = trace_delta_ctx.get("events_raw", [])
-    if not isinstance(events_raw, list):
-        events_raw = []
+    relevant_lookup_masks = _cache_tag_output_relevant_lookup_masks(
+        cache_sites=l1d_sites,
+        line_size_bytes=int(line_size_bytes),
+        cache_component=str(cache_component),
+        scope_mode=str(scope_mode),
+        trace_expanding_policy=str(trace_expanding_policy),
+        trace_uncovered_mode=str(trace_uncovered_mode),
+        trace_expanding_resolution_mode=str(trace_expanding_resolution_mode),
+        trace_divergence_policy=str(trace_divergence_policy),
+    )
+
     counts = {"masked": 0, "sdc": 0, "due": 0, "unknown": 0}
     examples: List[Dict[str, Any]] = []
     ordered_pairs = 0
-    replay_intervals = 0
-    multievent_cycles = 0
-    multithread_cycles = 0
-    multievent_examples: List[Dict[str, Any]] = []
-    alias_interval_cache: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    alias_intervals = 0
+    byte_match_intervals = 0
+    missing_byte_intervals = 0
+    byte_mismatch_intervals = 0
 
-    for (sm_id, source_line), source_state in sorted(stable_line_states.items()):
+    nset_i = int(nset)
+    for (scope_raw, source_line_raw), source_state in sorted(line_states.items()):
+        scope = int(scope_raw)
+        source_line = int(source_line_raw)
         source_first = source_state.get("first_load_cycle")
         if source_first is None:
             continue
@@ -8046,291 +6397,121 @@ def _exact_l1d_tag_counts_global_readonly_alias(
             if bool(global_prefill) and prefill_cycle is not None
             else int(source_first) + 1
         )
-        source_tag = int(source_line) // int(nset)
-        set_idx = int(source_line) % int(nset)
-        shader_prefix_row = shader_prefix.get(int(sm_id))
+        shader_prefix_row = shader_prefix.get(scope)
         if shader_prefix_row is None:
             continue
         cycles_shader, prefix_shader, _shader_mass_total = shader_prefix_row
-        for bitpos in sample_positions:
-            if (int(sm_id), int(source_line), int(bitpos)) not in alias_reachable_bits:
-                continue
+        source_tag = int(source_line) // nset_i
+        set_idx = int(source_line) % nset_i
+        source_stable = (scope, source_line) in stable_line_states
+        source_line_bytes = global_line_bytes.get(int(source_line), {})
+
+        for bitpos_raw in sample_positions:
+            bitpos = int(bitpos_raw)
             target_tag = int(source_tag) ^ (1 << int(bitpos))
-            target_line = int(set_idx) + int(nset) * int(target_tag)
-            target_state = stable_line_states.get((int(sm_id), int(target_line)))
+            target_line = int(set_idx) + nset_i * int(target_tag)
+            target_state = line_states.get((scope, target_line))
             if target_state is None:
                 continue
             target_cycles = [
                 int(c)
                 for c in target_state.get("load_cycles", [])
                 if int(c) >= int(source_active_from)
+                and (scope, int(target_line), int(c)) in relevant_lookup_masks
             ]
             if not target_cycles:
                 continue
-            patch: Dict[int, int] = {}
-            source_line_bytes = global_line_bytes.get(int(source_line), {})
-            source_line_missing_offsets: List[int] = []
-            for off, tgt_byte in sorted(target_state.get("bytes_by_offset", {}).items()):
-                if int(off) not in source_line_bytes:
-                    source_line_missing_offsets.append(int(off))
-                    continue
-                src_byte = int(source_line_bytes.get(int(off), 0)) & 0xFF
-                tgt_byte_i = int(tgt_byte) & 0xFF
-                if src_byte != tgt_byte_i:
-                    patch[int(target_line) * int(line_size_bytes) + int(off)] = int(src_byte)
-            if not patch and not source_line_missing_offsets:
-                continue
-            patch_key = tuple(sorted((int(k), int(v)) for k, v in patch.items()))
-            source_line_bytes_key = tuple(
-                sorted((int(k), int(v)) for k, v in source_line_bytes.items())
-            )
-            source_line_missing_offsets_key = tuple(
-                int(v) for v in source_line_missing_offsets
-            )
             ordered_pairs += 1
-            pair_constant_cls: Optional[str] = None
-            sampled_classifications: Dict[int, Dict[str, str]] = {}
-            sample_cycles = _l1d_alias_sample_cycles(target_cycles)
-            if sample_cycles:
-                sampled_classes: Set[str] = set()
-                for sample_cycle in sample_cycles:
-                    cycle_event_indices = list(
-                        target_state.get("event_indices_by_cycle", {}).get(
-                            int(sample_cycle), []
-                        )
-                    )
-                    cycle_thread_ids = list(
-                        target_state.get("thread_ids_by_cycle", {}).get(
-                            int(sample_cycle), []
-                        )
-                    )
-                    sample_key = (
-                        int(sm_id),
-                        int(source_line),
-                        int(target_line),
-                        patch_key,
-                        source_line_bytes_key,
-                        source_line_missing_offsets_key,
-                        int(sample_cycle),
-                        tuple(int(v) for v in cycle_event_indices),
-                        tuple(int(v) for v in cycle_thread_ids),
-                    )
-                    sample_raw = alias_interval_cache.get(sample_key)
-                    if sample_raw is None:
-                        sample_raw = _classify_l1d_tag_alias_interval(
-                            trace_delta_ctx=trace_delta_ctx,
-                            addr_ranges_seq=addr_ranges_seq,
-                            events_raw=events_raw,
-                            sm_id=(int(sm_id) if str(scope_mode) == "l1d" else -1),
-                            source_line=int(source_line),
-                            target_line=int(target_line),
-                            patch=dict(patch),
-                            source_line_bytes=dict(source_line_bytes),
-                            source_line_missing_offsets=list(source_line_missing_offsets),
-                            target_cycle=int(sample_cycle),
-                            target_event_indices=cycle_event_indices,
-                            target_thread_ids=cycle_thread_ids,
-                            line_size_bytes=int(line_size_bytes),
-                        )
-                        alias_interval_cache[sample_key] = dict(sample_raw)
-                    else:
-                        sample_raw = dict(sample_raw)
-                    sample_cls = str(
-                        sample_raw.get("classification", "unknown")
-                    ).strip().lower()
-                    sample_reason = str(sample_raw.get("reason", "")).strip().lower()
-                    sampled_classifications[int(sample_cycle)] = {
-                        "classification": str(sample_cls),
-                        "reason": str(sample_reason),
-                    }
-                    sampled_classes.add(str(sample_cls))
-                # The downstream accounting only consumes the classification
-                # class.  Treat the class as the stable proof surface and keep
-                # reason strings only as diagnostics.
-                if (
-                    len(sampled_classes) == 1
-                    and next(iter(sampled_classes)) in ("masked", "sdc", "due")
-                ):
-                    pair_constant_cls = str(next(iter(sampled_classes)))
-            trace_delta_pending_groups: List[Tuple[int, Sequence[int]]] = []
-            trace_delta_pending_results: Dict[int, Dict[str, Any]] = {}
-            trace_delta_cta_keys: Set[Tuple[int, int]] = set()
-            trace_delta_grouping_valid = True
-            if not pair_constant_cls:
-                for cyc in target_cycles:
-                    if int(cyc) in sampled_classifications:
-                        continue
-                    cycle_event_indices = list(
-                        target_state.get("event_indices_by_cycle", {}).get(int(cyc), [])
-                    )
-                    cycle_cta_keys = {
-                        (
-                            int(events_raw[event_idx].get("sm_id", -1)),
-                            int(events_raw[event_idx].get("cta_id", -1)),
-                        )
-                        for event_idx in cycle_event_indices
-                        if 0 <= int(event_idx) < len(events_raw)
-                        and isinstance(events_raw[int(event_idx)], dict)
-                        and events_raw[int(event_idx)].get("sm_id") is not None
-                        and events_raw[int(event_idx)].get("cta_id") is not None
-                    }
-                    if (
-                        len(cycle_cta_keys) != 1
-                        or next(iter(cycle_cta_keys))[0] < 0
-                        or next(iter(cycle_cta_keys))[1] < 0
-                    ):
-                        trace_delta_grouping_valid = False
-                        break
-                    trace_delta_cta_keys.update(cycle_cta_keys)
-                    trace_delta_pending_groups.append(
-                        (int(cyc), tuple(int(v) for v in cycle_event_indices))
-                    )
-                if (
-                    trace_delta_grouping_valid
-                    and trace_delta_pending_groups
-                    and len(trace_delta_cta_keys) == 1
-                ):
-                    replay_sm_id, replay_cta_id = next(iter(trace_delta_cta_keys))
-                    if str(scope_mode) == "l1d" and int(replay_sm_id) != int(sm_id):
-                        trace_delta_grouping_valid = False
-                    else:
-                        grouped_trace_delta = _classify_l1d_alias_cycle_trace_delta_many(
-                            trace_delta_ctx=trace_delta_ctx,
-                            sm_id=int(replay_sm_id),
-                            cta_id=int(replay_cta_id),
-                            target_line=int(target_line),
-                            source_line=int(source_line),
-                            source_line_bytes=source_line_bytes,
-                            target_cycle_groups=trace_delta_pending_groups,
-                            line_size_bytes=int(line_size_bytes),
-                            addr_ranges=addr_ranges_seq,
-                        )
-                        if grouped_trace_delta is not None:
-                            trace_delta_pending_results = {
-                                int(cycle): dict(result)
-                                for cycle, result in grouped_trace_delta.items()
-                            }
+            target_stable = (scope, int(target_line)) in stable_line_states
             prev_boundary = int(source_active_from)
             for cyc in target_cycles:
                 boundary = int(cyc) + 1 if ge_mode else int(cyc)
                 if boundary <= prev_boundary:
                     continue
-                cycle_event_indices = list(
-                    target_state.get("event_indices_by_cycle", {}).get(int(cyc), [])
+                mass = range_sum(cycles_shader, prefix_shader, int(prev_boundary), int(boundary))
+                if mass <= 0:
+                    prev_boundary = int(boundary)
+                    continue
+                alias_intervals += 1
+                relevant_offsets = relevant_lookup_masks.get(
+                    (scope, int(target_line), int(cyc)), {}
                 )
-                cycle_thread_ids = list(
-                    target_state.get("thread_ids_by_cycle", {}).get(int(cyc), [])
-                )
-                if len(cycle_event_indices) > 1:
-                    multievent_cycles += 1
-                if len(cycle_thread_ids) > 1:
-                    multithread_cycles += 1
+                cls = "masked"
+                reason = "tag_identity_bytes_match"
                 if (
-                    (len(cycle_event_indices) > 1 or len(cycle_thread_ids) > 1)
-                    and len(multievent_examples) < 8
+                    not line_bytes_mergeable
+                    or line_capacity_exceeded
+                    or not source_stable
+                    or not target_stable
                 ):
-                    multievent_examples.append(
+                    cls = "unknown"
+                    reason = "tag_identity_line_byte_evidence_missing"
+                else:
+                    target_bytes = target_state.get("bytes_by_offset", {})
+                    if not isinstance(target_bytes, dict):
+                        target_bytes = {}
+                    for off_raw in sorted(relevant_offsets):
+                        off = int(off_raw)
+                        if off not in source_line_bytes or off not in target_bytes:
+                            cls = "unknown"
+                            reason = "tag_identity_byte_evidence_missing"
+                            break
+                        src_byte = int(source_line_bytes.get(off, 0)) & 0xFF
+                        tgt_byte = int(target_bytes.get(off, 0)) & 0xFF
+                        if src_byte != tgt_byte:
+                            cls = "unknown"
+                            reason = "tag_identity_byte_mismatch"
+                            break
+                if cls == "unknown":
+                    counts["unknown"] += int(mass)
+                    if reason.endswith("missing"):
+                        missing_byte_intervals += 1
+                    else:
+                        byte_mismatch_intervals += 1
+                else:
+                    byte_match_intervals += 1
+                if len(examples) < 8:
+                    examples.append(
                         {
-                            "sm_id": int(sm_id),
+                            "scope": int(scope),
                             "source_line": int(source_line),
                             "target_line": int(target_line),
+                            "actual_tag_bit": int(bitpos),
                             "target_cycle": int(cyc),
-                            "event_count": int(len(cycle_event_indices)),
-                            "thread_count": int(len(cycle_thread_ids)),
-                            "thread_ids": [int(v) for v in cycle_thread_ids[:16]],
+                            "classification": str(cls),
+                            "reason": str(reason),
+                            "mass": int(mass),
+                            "relevant_byte_count": int(len(relevant_offsets)),
                         }
                     )
-                replay_intervals += 1
-                cls = str(pair_constant_cls or "").strip().lower()
-                if cls:
-                    pass
-                else:
-                    sample_raw = sampled_classifications.get(int(cyc))
-                    if sample_raw is None:
-                        sample_raw = trace_delta_pending_results.get(int(cyc))
-                    if sample_raw is None:
-                        cycle_key = (
-                            int(sm_id),
-                            int(source_line),
-                            int(target_line),
-                            patch_key,
-                            source_line_bytes_key,
-                            source_line_missing_offsets_key,
-                            int(cyc),
-                            tuple(int(v) for v in cycle_event_indices),
-                            tuple(int(v) for v in cycle_thread_ids),
-                        )
-                        sample_raw = alias_interval_cache.get(cycle_key)
-                        if sample_raw is None:
-                            sample_raw = _classify_l1d_tag_alias_interval(
-                                trace_delta_ctx=trace_delta_ctx,
-                                addr_ranges_seq=addr_ranges_seq,
-                                events_raw=events_raw,
-                                sm_id=(int(sm_id) if str(scope_mode) == "l1d" else -1),
-                                source_line=int(source_line),
-                                target_line=int(target_line),
-                                patch=dict(patch),
-                                source_line_bytes=dict(source_line_bytes),
-                                source_line_missing_offsets=list(
-                                    source_line_missing_offsets
-                                ),
-                                target_cycle=int(cyc),
-                                target_event_indices=cycle_event_indices,
-                                target_thread_ids=cycle_thread_ids,
-                                line_size_bytes=int(line_size_bytes),
-                            )
-                            alias_interval_cache[cycle_key] = dict(sample_raw)
-                        else:
-                            sample_raw = dict(sample_raw)
-                    cls = str(sample_raw.get("classification", "unknown")).strip().lower()
-                    if cls not in ("masked", "sdc", "due"):
-                        cls = "unknown"
-                mass = range_sum(
-                    cycles_shader,
-                    prefix_shader,
-                    int(prev_boundary),
-                    int(boundary),
-                )
-                if mass > 0:
-                    counts[str(cls)] += int(mass)
-                    if len(examples) < 8:
-                        examples.append(
-                            {
-                                "sm_id": int(sm_id),
-                                "source_line": int(source_line),
-                                "target_line": int(target_line),
-                                "actual_tag_bit": int(bitpos),
-                                "target_cycle": int(cyc),
-                                "classification": str(cls),
-                                "mass": int(mass),
-                                "patch_byte_count": int(len(patch)),
-                            }
-                        )
                 prev_boundary = int(boundary)
 
     return {
         "counts": {
             "masked": int(counts.get("masked", 0)),
-            "sdc": int(counts.get("sdc", 0)),
-            "due": int(counts.get("due", 0)),
+            "sdc": 0,
+            "due": 0,
             "unknown": int(counts.get("unknown", 0)),
         },
         "ordered_pairs": int(ordered_pairs),
-        "potential_ordered_pairs": int(potential_ordered_pairs),
-        "replay_intervals": int(replay_intervals),
-        "alias_intervals": int(replay_intervals),
+        "potential_ordered_pairs": int(ordered_pairs),
+        "replay_intervals": 0,
+        "alias_intervals": int(alias_intervals),
         "fallback_reachable_intervals": 0,
         "fallback_reason": "",
         "self_miss_intervals": 0,
         "self_miss_sdc": 0,
         "self_miss_source_lines": 0,
         "self_miss_sampled_bits": 0,
-        "multievent_cycles": int(multievent_cycles),
-        "multithread_cycles": int(multithread_cycles),
-        "multievent_examples": multievent_examples,
+        "multievent_cycles": 0,
+        "multithread_cycles": 0,
+        "multievent_examples": [],
         "self_miss_examples": [],
+        "byte_match_intervals": int(byte_match_intervals),
+        "byte_mismatch_intervals": int(byte_mismatch_intervals),
+        "missing_byte_intervals": int(missing_byte_intervals),
         "examples": examples,
-        "mode": f"exact_{cache_component}_global_readonly_alias_trace_delta",
+        "mode": f"exact_{cache_component}_tag_identity_byte_compare",
     }
 
 def _exact_l2_tag_counts_global_readonly_no_alias(
@@ -13550,6 +11731,10 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
         sample_tag_bits=int(l1d_tag_bits),
         ge_mode=bool(ge_mode),
         addr_ranges=addr_ranges,
+        trace_expanding_policy=trace_expanding_policy,
+        trace_uncovered_mode=trace_uncovered_mode,
+        trace_expanding_resolution_mode=trace_expanding_resolution_mode,
+        trace_divergence_policy=trace_divergence_policy,
     )
     if tag_exact_info is not None:
         tag_counts = {
@@ -14648,6 +12833,10 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
         cache_component="l2",
         scope_mode="l2",
         global_prefill=bool(global_prefill),
+        trace_expanding_policy=trace_expanding_policy,
+        trace_uncovered_mode=trace_uncovered_mode,
+        trace_expanding_resolution_mode=trace_expanding_resolution_mode,
+        trace_divergence_policy=trace_divergence_policy,
     )
     if tag_exact_info is not None:
         tag_counts = {

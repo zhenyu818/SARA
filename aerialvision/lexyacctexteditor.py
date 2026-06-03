@@ -147,7 +147,7 @@ def ptxToCudaMapping(filename):
       map[loc] = []
       map[loc].append(count)
 
-    m = re.search('\.loc\s+(\d+)\s+(\d+)\s+(\d+)', line)
+    m = re.search(r'\.loc\s+(\d+)\s+(\d+)\s+(\d+)', line)
     if (m != None):
       loc = int(m.group(2))
 
@@ -166,4 +166,3 @@ if __name__ == "__main__":
   
   
   
-

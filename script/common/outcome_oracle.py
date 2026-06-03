@@ -764,7 +764,7 @@ def compare_observations(
     }
 
 
-def compare_fi_logs(
+def classify_fi_logs(
     *,
     golden_log: Path,
     run_log: Path,
@@ -933,7 +933,7 @@ def compare_outputs(
                 exit_status=None,
             ),
         }
-    return compare_fi_logs(
+    return classify_fi_logs(
         golden_log=golden_log,
         run_log=run_log,
         output_spec=spec,
@@ -1232,7 +1232,7 @@ def _batch_worker(task: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(tol_policy, dict):
         tol_policy = {}
 
-    result = compare_fi_logs(
+    result = classify_fi_logs(
         golden_log=Path(str(task["golden_log"])),
         run_log=run_log,
         output_spec=output_spec,
@@ -1262,7 +1262,7 @@ def _batch_worker(task: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def compare_fi_logs_batch(
+def classify_fi_logs_batch(
     *,
     golden_log: Path,
     entries: Sequence[Dict[str, Any]],
@@ -1457,7 +1457,7 @@ def main() -> int:
 
     if args.cmd == "fi-logs":
         spec = _load_output_spec(args.output_spec) if args.output_spec is not None else []
-        res = compare_fi_logs(
+        res = classify_fi_logs(
             golden_log=args.golden_log,
             run_log=args.run_log,
             output_spec=spec,
@@ -1483,7 +1483,7 @@ def main() -> int:
         if not entries:
             raise ValueError("fi-batch requires --batch-file and/or --batch-dir with entries")
 
-        res = compare_fi_logs_batch(
+        res = classify_fi_logs_batch(
             golden_log=args.golden_log,
             entries=entries,
             output_spec=spec,

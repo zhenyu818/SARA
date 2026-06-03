@@ -9376,7 +9376,7 @@ def main() -> int:
         action="store_true",
         help=(
             "Write compact read_events records that keep only fields required by "
-            "exact_sdc_compute/exact_classify_points."
+            "exact_sdc_compute."
         ),
     )
     parser.add_argument(

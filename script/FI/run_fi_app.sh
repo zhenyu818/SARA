@@ -264,6 +264,18 @@ resolve_output_oracle_policy() {
     fi
 }
 
+resolve_output_oracle_policy_from_sara_input() {
+    local fi_input_dir="$1"
+    local policy_file="${fi_input_dir}/output_oracle_policy.json"
+
+    if [[ -f "${policy_file}" ]]; then
+        OUTPUT_ORACLE_TOL_POLICY="$(cat "${policy_file}")"
+        OUTPUT_ORACLE_TOL_POLICY_SOURCE="sara_input_policy"
+    else
+        resolve_output_oracle_policy
+    fi
+}
+
 # -------- CYCLES --------
 get_cycles() {
     local v
@@ -780,7 +792,6 @@ main() {
         # Find the corresponding .cu under inject_app by 'b' and copy to root as ${TEST_APP_NAME}.cu
         cu_file="test_apps/${TEST_APP_NAME}/inject_app/${TEST_APP_NAME}_${b}.cu"
         if [[ -f "$cu_file" ]]; then
-            resolve_output_oracle_policy
             cp "$cu_file" "./${TEST_APP_NAME}.cu"
         fi
 
@@ -961,6 +972,7 @@ main() {
         echo "=== Starting fault injection experiment: ${TEST_APP_NAME}, file ${filename} ==="
         filename_no_ext="${filename%.txt}"
         fi_input_dir="${FI_COMPARE_INPUT_ROOT}/${TEST_APP_NAME}/${filename_no_ext}"
+        resolve_output_oracle_policy_from_sara_input "${fi_input_dir}"
 
         export FI_RF_FAULT_MODEL="${RF_FAULT_MODEL}"
         export FI_ADDR_DUE_MODE="${ANALYZER_ADDR_DUE_MODE}"

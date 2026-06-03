@@ -116,12 +116,6 @@ VALIDATE_MAX_REGS="${VALIDATE_MAX_REGS:-2}"
 VALIDATE_BITS="${VALIDATE_BITS:-1:2}"
 VALIDATE_TOL="${VALIDATE_TOL:-1e-12}"
 
-COMPARE_FI_RUNS="${COMPARE_FI_RUNS:-${RUN_PER_EPOCH}}"
-COMPARE_FI_SEED_BASE="${COMPARE_FI_SEED_BASE:-0}"
-COMPARE_FI_TOP_K="${COMPARE_FI_TOP_K:-50}"
-COMPARE_FI_SHOW_BASE_DIAG="${COMPARE_FI_SHOW_BASE_DIAG:-0}"
-COMPARE_FI_REQUIRE_ZERO_MISMATCH="${COMPARE_FI_REQUIRE_ZERO_MISMATCH:-1}"
-COMPARE_FI_REQUIRE_ZERO_MISMATCH_BASIS="${COMPARE_FI_REQUIRE_ZERO_MISMATCH_BASIS:-auto}" # auto|base|final|primary
 OUTPUT_ORACLE_TIMEOUT_EXIT_STATUSES="${OUTPUT_ORACLE_TIMEOUT_EXIT_STATUSES:-124:137}"
 
 CONFIG_FILE="./gpgpusim.config"
@@ -236,8 +230,6 @@ EXACT_GLOBAL_CACHE="${EXACT_GLOBAL_CACHE:-1}"
 ANALYZER_GLOBAL_CACHE="${ANALYZER_GLOBAL_CACHE:-${EXACT_GLOBAL_CACHE}}"
 ANALYZER_GLOBAL_CACHE_DIR="${ANALYZER_GLOBAL_CACHE_DIR:-${EXACT_WORK_ROOT}/.cache_exact_sdc}"
 ANALYZER_GLOBAL_CACHE_LINK_MODE="${ANALYZER_GLOBAL_CACHE_LINK_MODE:-copy}"
-COMPARE_FI_BATCH_ORACLE="${COMPARE_FI_BATCH_ORACLE:-1}"
-COMPARE_FI_BATCH_ORACLE_JOBS="${COMPARE_FI_BATCH_ORACLE_JOBS:-0}"
 ALL_COMPONENTS="${ALL_COMPONENTS:-rf:smem_rf:l1d:l2}" # components for mode=all_components
 ALL_COMPONENTS_TABLE_BASENAME="${ALL_COMPONENTS_TABLE_BASENAME:-all_components_rates.tsv}"
 ALL_COMPONENTS_COMPACT_OUTPUT="${ALL_COMPONENTS_COMPACT_OUTPUT:-1}" # 1 => print concise all-components report
@@ -249,8 +241,8 @@ if [[ -z "${EXACT_RESULT_VARIANT}" && "${FAULT_COMPONENT}" == "gmem" ]]; then
     EXACT_RESULT_VARIANT="gmem"
 fi
 TIMING_ENABLED=0
-TIMINGS_COMPARE_FI_FILE_BASENAME="${TIMINGS_COMPARE_FI_FILE_BASENAME:-timings_compare_fi.tsv}"
-TIMINGS_COMPARE_FI_SUMMARY_FILE_BASENAME="${TIMINGS_COMPARE_FI_SUMMARY_FILE_BASENAME:-timings_compare_fi_summary.txt}"
+TIMINGS_FILE_BASENAME="${TIMINGS_FILE_BASENAME:-timings.tsv}"
+TIMINGS_SUMMARY_FILE_BASENAME="${TIMINGS_SUMMARY_FILE_BASENAME:-timing_summary.txt}"
 TIME_BIN_PATH="${TIME_BIN_PATH:-}"
 TIME_BIN_WARNED=0
 TIMING_LOG_START_LINE=-1
@@ -513,7 +505,7 @@ rewrite_simple_summary_total_time() {
 
 collect_step_timing_lines_since_start() {
     local log_path start_line
-    log_path="$(resolve_compare_fi_timing_log_path)"
+    log_path="$(resolve_timing_log_path)"
     start_line="${TIMING_LOG_START_LINE:-0}"
     if [[ ! -f "${log_path}" ]]; then
         return 0
@@ -557,7 +549,7 @@ PY
 
 sum_step_timing_seconds_since_start() {
     local log_path start_line
-    log_path="$(resolve_compare_fi_timing_log_path)"
+    log_path="$(resolve_timing_log_path)"
     start_line="${TIMING_LOG_START_LINE:-0}"
     if [[ ! -f "${log_path}" ]]; then
         echo "0.000000"
@@ -597,7 +589,7 @@ print(f"{overall:.6f}")
 PY
 }
 
-resolve_compare_fi_timing_log_path() {
+resolve_timing_log_path() {
     local dir candidate
     local -a dirs=()
     if [[ -n "${RESULT_DIR:-}" ]]; then
@@ -614,7 +606,7 @@ resolve_compare_fi_timing_log_path() {
     for dir in "${dirs[@]}"; do
         [[ -n "${dir}" ]] || continue
         mkdir -p "${dir}" 2>/dev/null || true
-        candidate="${dir}/${TIMINGS_COMPARE_FI_FILE_BASENAME}"
+        candidate="${dir}/${TIMINGS_FILE_BASENAME}"
         if [[ ( -e "${candidate}" && -w "${candidate}" ) || ( ! -e "${candidate}" && -w "${dir}" ) ]]; then
             echo "${candidate}"
             return 0
@@ -623,10 +615,10 @@ resolve_compare_fi_timing_log_path() {
 
     dir="${TMPDIR:-/tmp}/sdc_compute_once_timing/${TEST_APP_NAME:-unknown}/${RESULT_BASENAME:-run}"
     mkdir -p "${dir}" 2>/dev/null || true
-    echo "${dir}/${TIMINGS_COMPARE_FI_FILE_BASENAME}"
+    echo "${dir}/${TIMINGS_FILE_BASENAME}"
 }
 
-resolve_compare_fi_timing_summary_path() {
+resolve_timing_summary_path() {
     local dir candidate
     local -a dirs=()
     if [[ -n "${RESULT_DIR:-}" ]]; then
@@ -643,7 +635,7 @@ resolve_compare_fi_timing_summary_path() {
     for dir in "${dirs[@]}"; do
         [[ -n "${dir}" ]] || continue
         mkdir -p "${dir}" 2>/dev/null || true
-        candidate="${dir}/${TIMINGS_COMPARE_FI_SUMMARY_FILE_BASENAME}"
+        candidate="${dir}/${TIMINGS_SUMMARY_FILE_BASENAME}"
         if [[ ( -e "${candidate}" && -w "${candidate}" ) || ( ! -e "${candidate}" && -w "${dir}" ) ]]; then
             echo "${candidate}"
             return 0
@@ -652,7 +644,7 @@ resolve_compare_fi_timing_summary_path() {
 
     dir="${TMPDIR:-/tmp}/sdc_compute_once_timing/${TEST_APP_NAME:-unknown}/${RESULT_BASENAME:-run}"
     mkdir -p "${dir}" 2>/dev/null || true
-    echo "${dir}/${TIMINGS_COMPARE_FI_SUMMARY_FILE_BASENAME}"
+    echo "${dir}/${TIMINGS_SUMMARY_FILE_BASENAME}"
 }
 
 timing_log_path_is_writable() {
@@ -710,7 +702,7 @@ ensure_timing_session_start_line() {
     fi
 
     local timing_log_path
-    timing_log_path="$(resolve_compare_fi_timing_log_path)"
+    timing_log_path="$(resolve_timing_log_path)"
     if [[ -f "${timing_log_path}" ]]; then
         TIMING_LOG_START_LINE="$(wc -l < "${timing_log_path}")"
     else
@@ -784,7 +776,7 @@ run_timed() {
     fi
     rm -f "${time_tmp}"
 
-    log_path="$(resolve_compare_fi_timing_log_path)"
+    log_path="$(resolve_timing_log_path)"
     if timing_log_path_is_writable "${log_path}"; then
         if [[ ! -f "${log_path}" ]]; then
             printf 'timestamp_iso\tstep_label\twall_s\tuser_s\tsys_s\tmaxrss_kb\texit_code\tcommand\n' >> "${log_path}" 2>/dev/null || true
@@ -856,7 +848,7 @@ run_timed_shell() {
     wall_ns=$((end_ns - start_ns))
     wall_s="$(awk -v ns="${wall_ns}" 'BEGIN { printf "%.9f", ns / 1000000000 }')"
 
-    log_path="$(resolve_compare_fi_timing_log_path)"
+    log_path="$(resolve_timing_log_path)"
     if timing_log_path_is_writable "${log_path}"; then
         if [[ ! -f "${log_path}" ]]; then
             printf 'timestamp_iso\tstep_label\twall_s\tuser_s\tsys_s\tmaxrss_kb\texit_code\tcommand\n' >> "${log_path}" 2>/dev/null || true
@@ -880,29 +872,6 @@ run_timed_shell() {
         >&2
 
     return "${exit_code}"
-}
-
-effective_batch_oracle_jobs() {
-    local jobs="${COMPARE_FI_BATCH_ORACLE_JOBS:-0}"
-    if [[ "${jobs}" =~ ^[0-9]+$ ]] && (( jobs > 0 )); then
-        echo "${jobs}"
-        return 0
-    fi
-    local cpu_count="1"
-    cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
-    if [[ -z "${cpu_count}" || ! "${cpu_count}" =~ ^[0-9]+$ || "${cpu_count}" -le 0 ]]; then
-        cpu_count="$(nproc 2>/dev/null || true)"
-    fi
-    if [[ -z "${cpu_count}" || ! "${cpu_count}" =~ ^[0-9]+$ || "${cpu_count}" -le 0 ]]; then
-        cpu_count="1"
-    fi
-    if (( cpu_count > 8 )); then
-        cpu_count=8
-    fi
-    if (( cpu_count < 1 )); then
-        cpu_count=1
-    fi
-    echo "${cpu_count}"
 }
 
 cache_meta_path_for_dir() {
@@ -1471,16 +1440,16 @@ json_codec_suffix() {
     esac
 }
 
-emit_compare_fi_timing_summary() {
+emit_timing_summary() {
     local context_label
     local log_path summary_path start_line
     context_label="${1:-${TIMING_CONTEXT_LABEL:-${MODE}}}"
-    log_path="$(resolve_compare_fi_timing_log_path)"
-    summary_path="$(resolve_compare_fi_timing_summary_path)"
+    log_path="$(resolve_timing_log_path)"
+    summary_path="$(resolve_timing_summary_path)"
     start_line="${TIMING_LOG_START_LINE:-0}"
 
     if [[ ! -f "${log_path}" ]]; then
-        echo "=== compare_fi timing summary: no timing log found ==="
+        echo "=== timing summary: no timing log found ==="
         return
     fi
 
@@ -1548,7 +1517,7 @@ with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             exit_i = int(exit_code)
         except ValueError:
             exit_i = 1
-        norm_label = re.sub(r"compare_fi_run_[0-9]+_", "compare_fi_run_*_", label)
+        norm_label = re.sub(r"timed_run_[0-9]+_", "timed_run_*_", label)
         rows.append(
             {
                 "label": label,
@@ -1561,7 +1530,7 @@ with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         )
 
 if not rows:
-    content = "=== compare_fi timing summary: no new timing records for this run ===\n"
+    content = "=== timing summary: no new timing records for this run ===\n"
     with open(summary_path, "w", encoding="utf-8") as out:
         out.write(content)
     safe_stdout_write(content)
@@ -1624,7 +1593,7 @@ with open(summary_path, "w", encoding="utf-8") as out:
 safe_stdout_write(content)
 PY
     then
-        echo "=== Warning: failed to generate readable compare_fi timing summary ===" >&2
+        echo "=== Warning: failed to generate readable timing summary ===" >&2
         return
     fi
 
@@ -3315,7 +3284,7 @@ prepare_case_files() {
     if [[ "${FRESH_RUN}" == "1" && -d "${CURRENT_RUN_DIR}" ]]; then
         local preserved_timing_log=""
         local timing_log_path=""
-        timing_log_path="$(resolve_compare_fi_timing_log_path)"
+        timing_log_path="$(resolve_timing_log_path)"
         if [[ -n "${timing_log_path}" ]]; then
             preserved_timing_log="$(mktemp)"
             if [[ -f "${timing_log_path}" ]]; then
@@ -5850,362 +5819,6 @@ EOF
         --tolerance "${VALIDATE_TOL}"
 }
 
-run_compare_fi_mode() {
-    local saved_write_single_csv
-    saved_write_single_csv="${RUN_ANALYZER_WRITE_SINGLE_CSV}"
-    RUN_ANALYZER_WRITE_SINGLE_CSV=0
-    if [[ "${FAULT_COMPONENT}" != "rf" ]]; then
-        echo "=== Error: compare_fi mode currently supports FAULT_COMPONENT=rf only (got ${FAULT_COMPONENT}) ===" >&2
-        echo "=== Hint: use mode=run for strict exact-rate derivation on smem_rf/smem_lds/l1d/l2. ===" >&2
-        exit 1
-    fi
-    start_timing_session "compare_fi"
-
-    local compare_require_zero_mismatch compare_require_zero_mismatch_basis
-    compare_require_zero_mismatch="${COMPARE_FI_REQUIRE_ZERO_MISMATCH:-1}"
-    compare_require_zero_mismatch_basis="${COMPARE_FI_REQUIRE_ZERO_MISMATCH_BASIS:-auto}"
-    if [[ "${compare_require_zero_mismatch}" != "0" && "${compare_require_zero_mismatch}" != "1" ]]; then
-        echo "=== Error: COMPARE_FI_REQUIRE_ZERO_MISMATCH must be 0 or 1 ===" >&2
-        exit 1
-    fi
-    if [[ "${compare_require_zero_mismatch_basis}" != "auto" && "${compare_require_zero_mismatch_basis}" != "base" && "${compare_require_zero_mismatch_basis}" != "final" && "${compare_require_zero_mismatch_basis}" != "primary" ]]; then
-        echo "=== Error: COMPARE_FI_REQUIRE_ZERO_MISMATCH_BASIS must be auto|base|final|primary (got ${compare_require_zero_mismatch_basis}) ===" >&2
-        exit 1
-    fi
-    local batch_oracle_enabled
-    batch_oracle_enabled="${COMPARE_FI_BATCH_ORACLE:-1}"
-    if [[ "${batch_oracle_enabled}" != "0" && "${batch_oracle_enabled}" != "1" ]]; then
-        echo "=== Error: COMPARE_FI_BATCH_ORACLE must be 0 or 1 ===" >&2
-        exit 1
-    fi
-    local reuse_existing
-    reuse_existing="${COMPARE_FI_REUSE_EXISTING:-0}"
-    if [[ "${reuse_existing}" == "1" ]]; then
-        echo "=== compare_fi: reusing existing artifacts under EXACT_WORK_ROOT ==="
-        build_project_if_needed
-        generate_results_if_needed
-        prepare_case_files
-        CURRENT_ACTIVE_THREADS_LOG="${CURRENT_RUN_DIR}/inst_trace.json.active_threads.jsonl"
-        if [[ ! -f "${CURRENT_ACTIVE_THREADS_LOG}" ]]; then
-            echo "=== Error: reuse mode missing active-thread trace: ${CURRENT_ACTIVE_THREADS_LOG} ===" >&2
-            exit 1
-        fi
-    else
-        run_pipeline
-    fi
-
-    echo "=== compare_fi: preparing campaign/classification artifacts (${COMPARE_FI_RUNS} trials) ==="
-    local fi_points fi_outcomes fi_predicted fi_report fi_report_alias fi_log
-    local fi_logs_prefix fi_logs_root
-    fi_points="${CURRENT_RUN_DIR}/fi_injection_points.csv"
-    fi_outcomes="${CURRENT_RUN_DIR}/fi_outcomes.csv"
-    fi_predicted="${CURRENT_RUN_DIR}/exact_predicted_outcomes.csv"
-    fi_report="${CURRENT_RUN_DIR}/fi_vs_exact_mismatch_report.json"
-    fi_report_alias="${CURRENT_RUN_DIR}/mismatch_report.json"
-    fi_log="${CURRENT_RUN_DIR}/fi_campaign.log"
-    fi_logs_root="${CURRENT_RUN_DIR}/fi_logs"
-    fi_logs_prefix="${fi_logs_root}/run_"
-
-    if [[ "${reuse_existing}" == "1" ]]; then
-        if [[ -d "${CURRENT_RUN_DIR}/fi_logs" ]]; then
-            fi_logs_root="${CURRENT_RUN_DIR}/fi_logs"
-            fi_logs_prefix="${fi_logs_root}/run_"
-        else
-            fi_logs_root="."
-            fi_logs_prefix=""
-        fi
-        if [[ ! -f "${fi_points}" ]]; then
-            echo "=== Error: reuse mode missing FI points CSV: ${fi_points} ===" >&2
-            exit 1
-        fi
-        if [[ ! -f "${fi_outcomes}" ]]; then
-            echo "=== Error: reuse mode missing FI outcomes CSV: ${fi_outcomes} ===" >&2
-            exit 1
-        fi
-        if [[ ! -f "${CURRENT_ANALYZER_OUTPUT_FILE:-${CURRENT_RUN_DIR}/analyzer_output.json}" ]]; then
-            echo "=== Error: reuse mode missing analyzer output ===" >&2
-            exit 1
-        fi
-        if [[ ! -f "${CURRENT_RUN_DIR}/regfile_trace.bin" ]]; then
-            echo "=== Error: reuse mode missing regfile trace ===" >&2
-            exit 1
-        fi
-        if [[ ! -f "${CURRENT_RUN_DIR}/cycles_all.txt" ]]; then
-            echo "=== Error: reuse mode missing cycles domain ===" >&2
-            exit 1
-        fi
-    else
-        echo "=== compare_fi: running fault injection campaign (${COMPARE_FI_RUNS} trials) ==="
-        local fi_oracle_mode="single"
-        local cache_tag_override campaign_component_set
-        campaign_component_set="$(fault_component_to_campaign_component "${FAULT_COMPONENT}")"
-        if [[ -z "${campaign_component_set}" ]]; then
-            echo "=== Error: unsupported FAULT_COMPONENT=${FAULT_COMPONENT} for compare_fi campaign ===" >&2
-            exit 1
-        fi
-        cache_tag_override=""
-        if [[ "${FAULT_COMPONENT}" == "l1d" ]]; then
-            cache_tag_override="${CURRENT_L1D_TAG_BITS:-${WEIGHT_L1D_TAG_BITS:-auto}}"
-        elif [[ "${FAULT_COMPONENT}" == "l2" ]]; then
-            cache_tag_override="${CURRENT_L2_TAG_BITS:-${WEIGHT_L2_TAG_BITS:-auto}}"
-        fi
-        if [[ "${batch_oracle_enabled}" == "1" ]]; then
-            fi_oracle_mode="off"
-        fi
-        rm -f "${fi_points}" "${fi_outcomes}" "${fi_log}"
-        rm -rf "${fi_logs_root}" "${CURRENT_RUN_DIR}/fi_cache_logs"
-        mkdir -p "${fi_logs_root}"
-        (
-            TIMED_PYTHON3_BIN="$(command -v python3)"
-            python3() {
-                local label="campaign_python3"
-                local run_idx="${trial_id:-${CURRENT_TRIAL_ID:-0}}"
-                if [[ "${1:-}" == "script/common/outcome_oracle.py" ]]; then
-                    if [[ "${run_idx}" =~ ^[0-9]+$ ]]; then
-                        printf -v label "compare_fi_run_%03d_output_oracle" "${run_idx}"
-                    else
-                        label="compare_fi_output_oracle"
-                    fi
-                    run_timed "${label}" "${TIMED_PYTHON3_BIN}" "$@"
-                else
-                    "${TIMED_PYTHON3_BIN}" "$@"
-                fi
-            }
-            export TIMING_ENABLED RESULT_DIR TIMINGS_COMPARE_FI_FILE_BASENAME TIMED_PYTHON3_BIN
-            export -f run_timed sanitize_tsv_field resolve_compare_fi_timing_log_path python3
-            run_timed "compare_fi_campaign_exec" env \
-                CAMPAIGN_RUNS_OVERRIDE="${COMPARE_FI_RUNS}" \
-                CAMPAIGN_COMPONENT_SET_OVERRIDE="${campaign_component_set}" \
-                CAMPAIGN_CUDA_UUT_OVERRIDE="./${TEST_APP_NAME} ${CURRENT_SIZE_LINE}" \
-                CAMPAIGN_CYCLES_OVERRIDE="${CURRENT_GOLDEN_CYCLES}" \
-                CAMPAIGN_CYCLES_FILE_OVERRIDE="${CURRENT_RUN_DIR}/cycles_all.txt" \
-                CAMPAIGN_TIMEOUT_VAL_OVERRIDE="${TIMEOUT_VAL}" \
-                CAMPAIGN_DATATYPE_SIZE_OVERRIDE="${CURRENT_DATATYPE_BITS}" \
-                CAMPAIGN_THREAD_RAND_MAX_OVERRIDE="${CURRENT_THREAD_RAND_MAX:-${WEIGHT_THREAD_RAND_MAX:-}}" \
-                CAMPAIGN_PROFILE_TMP_OUT_OVERRIDE="${PROFILE_METRICS_SOURCE:-${PROFILE_TMP_OUT:-auto}}" \
-                CACHE_TAG_ARRAY_BITS="${cache_tag_override}" \
-                CAMPAIGN_PROFILE_OVERRIDE="0" \
-                FI_INJECTION_POINTS_FILE="${fi_points}" \
-                FI_OUTCOMES_FILE="${fi_outcomes}" \
-                FI_ACTIVE_THREADS_LOG="${CURRENT_ACTIVE_THREADS_LOG}" \
-                FI_ANALYZER_OUTPUT="${CURRENT_ANALYZER_OUTPUT_FILE:-${CURRENT_RUN_DIR}/analyzer_output.json}" \
-                FI_GOLDEN_LOG="${CURRENT_RUN_DIR}/golden.log" \
-                FI_OUTPUT_SPEC="${CURRENT_RUN_DIR}/output_spec.json" \
-                FI_OUTPUT_ORACLE_TIMEOUT_EXIT_STATUSES="${OUTPUT_ORACLE_TIMEOUT_EXIT_STATUSES}" \
-                FI_OUTPUT_ORACLE_MODE="${fi_oracle_mode}" \
-                FI_SEED_BASE="${COMPARE_FI_SEED_BASE}" \
-                TMP_DIR="${fi_logs_prefix}" \
-                CACHE_LOGS_DIR="${CURRENT_RUN_DIR}/fi_cache_logs" \
-                bash "${SARA_COMMON_DIR}/campaign_exec.sh"
-        ) > "${fi_log}" 2>&1
-    fi
-
-    if [[ ! -f "${fi_points}" ]]; then
-        echo "=== Error: expected injection points CSV missing: ${fi_points} ===" >&2
-        exit 1
-    fi
-    if [[ ! -f "${fi_outcomes}" ]]; then
-        echo "=== Error: expected FI outcomes CSV missing: ${fi_outcomes} ===" >&2
-        exit 1
-    fi
-    if [[ "${batch_oracle_enabled}" == "1" && "${reuse_existing}" != "1" ]]; then
-        local fi_oracle_batch_json fi_oracle_jobs
-        fi_oracle_batch_json="${CURRENT_RUN_DIR}/fi_oracle_batch.json"
-        fi_oracle_jobs="$(effective_batch_oracle_jobs)"
-        run_timed "compare_fi_output_oracle_batch_py" python3 script/common/outcome_oracle.py fi-batch \
-            --golden-log "${CURRENT_RUN_DIR}/golden.log" \
-            --output-spec "${CURRENT_RUN_DIR}/output_spec.json" \
-            --batch-file "${fi_outcomes}" \
-            --batch-dir "${fi_logs_root}" \
-            --run-log-name "tmp.out" \
-            --jobs "${fi_oracle_jobs}" \
-            --timeout-exit-statuses "${OUTPUT_ORACLE_TIMEOUT_EXIT_STATUSES}" \
-            --output-json "${fi_oracle_batch_json}" \
-            > /dev/null
-        run_timed "compare_fi_output_oracle_merge_py" python3 - "${fi_outcomes}" "${fi_oracle_batch_json}" <<'PY'
-import csv
-import json
-import sys
-from pathlib import Path
-
-outcomes_path = Path(sys.argv[1])
-batch_path = Path(sys.argv[2])
-if not outcomes_path.is_file():
-    raise SystemExit("missing outcomes csv: {}".format(outcomes_path))
-if not batch_path.is_file():
-    raise SystemExit("missing batch oracle json: {}".format(batch_path))
-
-batch = json.loads(batch_path.read_text())
-rows = batch.get("results", [])
-if not isinstance(rows, list):
-    rows = []
-by_trial = {}
-for item in rows:
-    if not isinstance(item, dict):
-        continue
-    rid = str(item.get("run_id", "")).strip()
-    if rid:
-        by_trial[rid] = item
-
-with outcomes_path.open("r", encoding="utf-8", newline="") as f:
-    reader = csv.DictReader(f)
-    fieldnames = list(reader.fieldnames or [])
-    old_rows = [dict(r) for r in reader]
-if not fieldnames:
-    raise SystemExit("empty outcomes csv header: {}".format(outcomes_path))
-
-updated = 0
-for row in old_rows:
-    trial = str(row.get("trial", "")).strip()
-    match = by_trial.get(trial)
-    if match is None:
-        continue
-    outcome = str(match.get("outcome", "")).strip() or str(row.get("outcome", "")).strip()
-    due_reason = str(match.get("due_reason", "")).strip()
-    row["outcome"] = outcome
-    row["due_reason"] = due_reason if outcome == "DUE" else ""
-    updated += 1
-
-tmp = outcomes_path.with_suffix(outcomes_path.suffix + ".tmp")
-with tmp.open("w", encoding="utf-8", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=fieldnames)
-    writer.writeheader()
-    for row in old_rows:
-        writer.writerow(row)
-tmp.replace(outcomes_path)
-print("updated_trials={}".format(int(updated)))
-PY
-    fi
-
-    ensure_current_register_domain_file
-    local -a classify_cmd=(
-        python3
-        script/SARA/exact_classify_points.py
-        --analyzer-output "${CURRENT_ANALYZER_OUTPUT_FILE:-${CURRENT_RUN_DIR}/analyzer_output.json}"
-        --regfile-trace "${CURRENT_RUN_DIR}/regfile_trace.bin"
-        --active-threads-log "${CURRENT_ACTIVE_THREADS_LOG}"
-        --cycles "${CURRENT_RUN_DIR}/cycles_all.txt"
-        --registers "${CURRENT_REGISTER_DOMAIN_FILE}"
-        --fi-injection-points "${fi_points}"
-        --fi-outcomes "${fi_outcomes}"
-        --top-k "${COMPARE_FI_TOP_K}"
-        --output-predicted "${fi_predicted}"
-        --output-report "${fi_report}"
-    )
-    local classify_cache_meta_file classify_payload_tmp classify_sig classify_hit
-    local classify_params_json
-    local -a classify_sig_inputs classify_cache_outputs
-    classify_cache_meta_file="$(cache_meta_path_for_dir "${CURRENT_RUN_DIR}")"
-    classify_payload_tmp="$(mktemp)"
-    classify_params_json="$(printf '{"exact_semantics_profile":"%s","top_k":%s,"output_oracle_timeout_exit_statuses":"%s"}' \
-        "${EXACT_SEMANTICS_PROFILE}" "${COMPARE_FI_TOP_K}" \
-        "${OUTPUT_ORACLE_TIMEOUT_EXIT_STATUSES}")"
-    classify_sig_inputs=(
-        "${CURRENT_ANALYZER_OUTPUT_FILE:-${CURRENT_RUN_DIR}/analyzer_output.json}"
-        "${CURRENT_RUN_DIR}/regfile_trace.bin"
-        "${CURRENT_ACTIVE_THREADS_LOG}"
-        "${CURRENT_RUN_DIR}/cycles_all.txt"
-        "${CURRENT_REGISTER_DOMAIN_FILE}"
-        "${fi_points}"
-        "${fi_outcomes}"
-        "script/SARA/exact_classify_points.py"
-        "script/SARA/exact_sdc_compute.py"
-        "script/common/outcome_oracle.py"
-    )
-    classify_sig="$(cache_compute_signature "compare_fi_exact_classify_points" "${classify_params_json}" "${classify_payload_tmp}" \
-        "${classify_sig_inputs[@]}")"
-    classify_cache_outputs=("${fi_predicted}" "${fi_report}")
-    classify_hit="0"
-    if [[ "${ANALYZER_CACHE_ENABLE}" == "1" && "${ANALYZER_CACHE_FORCE_REBUILD}" != "1" ]]; then
-        classify_hit="$(cache_step_hit "${classify_cache_meta_file}" "compare_fi_exact_classify_points" "${classify_sig}" \
-            "${classify_cache_outputs[@]}")"
-    fi
-    if [[ "${classify_hit}" == "1" ]]; then
-        echo "=== Cache hit: compare_fi_exact_classify_points ==="
-    else
-        run_timed "compare_fi_exact_classify_points_py" "${classify_cmd[@]}"
-        if [[ "${ANALYZER_CACHE_ENABLE}" == "1" ]]; then
-            cache_step_update "${classify_cache_meta_file}" "compare_fi_exact_classify_points" "${classify_sig}" "${classify_payload_tmp}" \
-                "${classify_cache_outputs[@]}"
-        fi
-    fi
-    rm -f "${classify_payload_tmp}"
-    cp "${fi_report}" "${fi_report_alias}"
-
-    run_timed "compare_fi_report_summary_py" python3 - "${fi_report}" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-raw = json.loads(open(path).read())
-labels = ["Masked", "SDC", "DUE"]
-cm = raw.get("confusion_matrix_base") or raw.get("confusion_matrix", {})
-
-def print_cm(title, cm):
-    print(title)
-    print("FI\\Exact,Masked,SDC,DUE")
-    for a in labels:
-        row = cm.get(a, {}) if isinstance(cm, dict) else {}
-        vals = [str(int(row.get(p, 0))) for p in labels]
-        print("{},{}".format(a, ",".join(vals)))
-
-print_cm("=== compare_fi confusion matrix (FI rows x exact cols) ===", cm)
-compared = int(raw.get("compared_trials_base", raw.get("compared_trials", 0)))
-mismatched = int(raw.get("mismatch_count_base", raw.get("mismatched_trials", 0)))
-rate = float(raw.get("mismatch_rate_base", raw.get("mismatch_rate", 0.0))) * 100.0
-print("=== compare_fi mismatch summary ===")
-print("compared_trials={}".format(compared))
-print("mismatched_trials={}".format(mismatched))
-print("mismatch_rate_percent={:.6f}".format(rate))
-cause_counts = raw.get("mismatch_parameter_counts_base", raw.get("mismatch_parameter_counts", {}))
-reason_counts = raw.get("mismatch_reason_counts_base", raw.get("mismatch_reason_counts", {}))
-if cause_counts:
-    print("mismatch_parameter_counts=" + json.dumps(cause_counts, sort_keys=True))
-if reason_counts:
-    print("mismatch_reason_counts=" + json.dumps(reason_counts, sort_keys=True))
-PY
-
-    if [[ "${compare_require_zero_mismatch}" == "1" ]]; then
-        local mismatch_basis mismatch_count compared_trials mismatch_rate
-        IFS=$'\t' read -r mismatch_basis mismatch_count compared_trials mismatch_rate < <(python3 - "${fi_report}" "${compare_require_zero_mismatch_basis}" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-basis_req = str(sys.argv[2]).strip().lower()
-raw = json.loads(open(path).read())
-
-if basis_req not in ("auto", "base", "primary"):
-    basis_req = "auto"
-basis = "base"
-compared = int(raw.get("compared_trials_base", raw.get("compared_trials", 0)))
-mismatched = int(raw.get("mismatch_count_base", raw.get("mismatched_trials", 0)))
-rate = float(raw.get("mismatch_rate_base", raw.get("mismatch_rate", 0.0)))
-print("{}\t{}\t{}\t{:.12f}".format(basis, mismatched, compared, rate))
-PY
-)
-        if [[ -z "${mismatch_count}" || -z "${compared_trials}" ]]; then
-            echo "=== Error: failed to parse compare_fi mismatch report for strict zero-mismatch check ===" >&2
-            echo "=== Report path: ${fi_report} ===" >&2
-            exit 1
-        fi
-        if [[ "${mismatch_count}" != "0" ]]; then
-            echo "=== Error: compare_fi strict zero-mismatch check failed (basis=${mismatch_basis}, mismatched=${mismatch_count}/${compared_trials}, mismatch_rate=${mismatch_rate}) ===" >&2
-            echo "=== See mismatch report: ${fi_report} ===" >&2
-            exit 1
-        fi
-        echo "=== compare_fi strict zero-mismatch check passed (basis=${mismatch_basis}, mismatched=0/${compared_trials}) ==="
-    fi
-
-    echo "Wrote FI injection points: ${fi_points}"
-    echo "Wrote FI outcomes: ${fi_outcomes}"
-    echo "Wrote exact predictions: ${fi_predicted}"
-    echo "Wrote mismatch report: ${fi_report}"
-    echo "Wrote mismatch report alias: ${fi_report_alias}"
-    emit_compare_fi_timing_summary
-    RUN_ANALYZER_WRITE_SINGLE_CSV="${saved_write_single_csv}"
-}
-
 collect_csv_entries_from_file() {
     local file="$1"
     while IFS= read -r line || [[ -n "${line}" ]]; do
@@ -6373,7 +5986,7 @@ main() {
     case "${MODE}" in
         run)
             run_pipeline
-            emit_compare_fi_timing_summary "run"
+            emit_timing_summary "run"
             ;;
         gmem)
             if [[ -z "${EXACT_RESULT_VARIANT}" ]]; then
@@ -6382,13 +5995,10 @@ main() {
             FAULT_COMPONENT="gmem"
             RUN_ANALYZER_WRITE_SINGLE_CSV=0
             run_pipeline
-            emit_compare_fi_timing_summary "run"
+            emit_timing_summary "run"
             ;;
         validate)
             run_validation_mode
-            ;;
-        compare_fi)
-            run_compare_fi_mode
             ;;
         all_components|all)
             run_all_components_mode
@@ -6397,7 +6007,7 @@ main() {
             run_csv_mode "$@"
             ;;
         *)
-            echo "Usage: $0 [run|gmem|validate|compare_fi|all_components|all|csv] [csv_entries...]" >&2
+            echo "Usage: $0 [run|gmem|validate|all_components|all|csv] [csv_entries...]" >&2
             echo "CSV entry format: BENCH,TRACE_TEMPLATE or BENCH=TRACE_TEMPLATE or BENCH" >&2
             exit 1
             ;;

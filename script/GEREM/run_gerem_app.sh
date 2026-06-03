@@ -52,13 +52,13 @@ sanitize_tsv_field() {
     printf '%s' "${1//$'\t'/ }" | tr '\n' ' '
 }
 
-resolve_compare_fi_timing_log_path() {
+resolve_timing_log_path() {
     echo "${CURRENT_RUN_DIR}/${GEREM_TIMING_FILE_BASENAME}"
 }
 
 start_timing_session() {
     local _label="${1:-gerem_storage}"
-    CURRENT_TIMING_LOG_PATH="$(resolve_compare_fi_timing_log_path)"
+    CURRENT_TIMING_LOG_PATH="$(resolve_timing_log_path)"
     mkdir -p "$(dirname "${CURRENT_TIMING_LOG_PATH}")"
     printf 'timestamp_iso\tstep_label\twall_s\tuser_s\tsys_s\tmaxrss_kb\texit_code\tcommand\n' > "${CURRENT_TIMING_LOG_PATH}"
 }

@@ -98,6 +98,17 @@ option_label() {
   fi
 }
 
+require_option_value() {
+  local opt="$1"
+  local value="${2:-}"
+  if [[ -z "${value}" || "${value}" == --* ]]; then
+    echo "Missing value for ${opt}" >&2
+    usage >&2
+    exit 2
+  fi
+  printf '%s' "${value}"
+}
+
 arrow_select() {
   local var_name="$1"
   local prompt="$2"
@@ -839,6 +850,29 @@ choose_keep_intermediate_if_needed() {
   fi
 }
 
+simulator_runtime_available() {
+  local source_rc=0
+  set +u
+  source "${ROOT_DIR}/setup_environment" >/dev/null 2>&1
+  source_rc=$?
+  set -u
+  (( source_rc == 0 )) || return 1
+  [[ -n "${GPGPUSIM_CONFIG:-}" ]] || return 1
+  [[ -f "${ROOT_DIR}/lib/${GPGPUSIM_CONFIG}/libcudart.so" ]]
+}
+
+validate_skip_build_if_needed() {
+  if [[ "${SKIP_COMMON_BUILD}" != "1" ]]; then
+    return 0
+  fi
+  if simulator_runtime_available; then
+    return 0
+  fi
+  echo "=== Error: --skip-build was requested, but the GPGPU-Sim CUDA runtime library is missing. ===" >&2
+  echo "Run again without --skip-build, or use --keep-build on earlier runs that should preserve build artifacts." >&2
+  exit 2
+}
+
 reset_work_root_at_start() {
   local abs_work
   abs_work="$(realpath -m "${WORK_ROOT}")"
@@ -893,11 +927,11 @@ normalize_method() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --arch) ARCH="${2:-}"; shift 2 ;;
-    --method) METHOD="${2:-}"; shift 2 ;;
-    --app) APP="${2:-}"; shift 2 ;;
-    --runs) RUNS="${2:-}"; RUNS_SET=1; shift 2 ;;
-    --gerem-runs) GEREM_RUNS="${2:-}"; GEREM_RUNS_SET=1; shift 2 ;;
+    --arch) ARCH="$(require_option_value "$1" "${2:-}")"; shift 2 ;;
+    --method) METHOD="$(require_option_value "$1" "${2:-}")"; shift 2 ;;
+    --app) APP="$(require_option_value "$1" "${2:-}")"; shift 2 ;;
+    --runs) RUNS="$(require_option_value "$1" "${2:-}")"; RUNS_SET=1; shift 2 ;;
+    --gerem-runs) GEREM_RUNS="$(require_option_value "$1" "${2:-}")"; GEREM_RUNS_SET=1; shift 2 ;;
     --skip-build) SKIP_COMMON_BUILD=1; shift ;;
     --keep-intermediate) KEEP_INTERMEDIATE=1; KEEP_INTERMEDIATE_SET=1; KEEP_BUILD=1; shift ;;
     --discard-intermediate) KEEP_INTERMEDIATE=0; KEEP_INTERMEDIATE_SET=1; shift ;;
@@ -936,6 +970,7 @@ if [[ "${GEREM_RUNS,,}" != "all" && ! "${GEREM_RUNS}" =~ ^[0-9]+$ ]]; then
   echo "--gerem-runs must be a positive integer or all" >&2
   exit 2
 fi
+validate_skip_build_if_needed
 python3 "${ROOT_DIR}/script/common/sara_result_layout.py" --result-root "${RESULT_ROOT}" --init >/dev/null
 
 app_env_args=()

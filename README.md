@@ -1,85 +1,115 @@
 # SARA Artifact Runner
 
-This repository contains the artifact code for running the SARA, GEREM-all, and FI storage-fault experiments. The public entry point is `run_experiment.sh`; experiment outputs are written under `test_result/`, and temporary per-run scratch data is written under `.work/`.
+This repository contains the runnable artifact for **SARA: Semantic Backward Derivation for GPU Storage Resilience Assessment**. It provides one public entry point, `run_experiment.sh`, for running and comparing three storage-fault assessment paths:
+
+- **SARA**: semantic backward derivation over modeled GPU storage fault sites.
+- **GEREM-all**: the GEREM storage Early Fault Manifestation baseline over the full modeled campaign space.
+- **FI**: storage fault injection used as the reference outcome source.
+
+The evaluated storage components are the register file, shared memory, L1 data cache, and L2 cache. The runner supports the Turing RTX2060 and Ampere RTX3070 configurations and the benchmark applications under `test_apps/`.
 
 ## Repository layout
 
 - `run_experiment.sh` — interactive and non-interactive experiment runner.
-- `script/SARA/` — SARA analysis path and SARA app runner.
-- `script/GEREM/` — GEREM-all storage campaign path.
-- `script/FI/` — fault-injection campaign path.
-- `script/common/` — common result-layout and campaign helpers. Its output-oracle utilities are used by the SARA and FI paths. GEREM-all remains the relocated GEREM storage EFM baseline.
+- `script/SARA/` — SARA analysis and application runner.
+- `script/GEREM/` — GEREM-all storage campaign runner.
+- `script/FI/` — storage fault-injection runner.
+- `script/common/` — shared campaign, result-layout, and output-comparison utilities.
 - `test_apps/` — CUDA benchmark applications used by the experiments.
-- `configs/` — architecture configurations for Turing RTX2060 and Ampere RTX3070.
-- `test_result/` — current experiment results and run logs.
+- `configs/` — GPU architecture configurations used by the runner.
 
-## Outcome classification policy
+## Quick start
 
-SARA and FI use the same final outcome definitions:
-
-1. If an application-specific oracle is present, use it first.
-2. If no explicit oracle is present, compare recorded outputs exactly.
-3. Automatic tolerance-policy creation is not used.
-4. Timeout, runtime error, invalid execution, missing logs, or missing required outputs are `DUE`.
-5. A normal run whose oracle or exact output comparison differs from the golden run is `SDC`.
-6. A normal run whose oracle or exact output comparison matches the golden run is `Masked`.
-
-SARA may keep internal `Unknown` records for diagnosis, but `Unknown` is not folded into `Masked`, `SDC`, or `DUE`. GEREM-all is preserved as the GEREM storage EFM baseline after relocation to `script/GEREM/`; its EFM-to-outcome mapping follows the GEREM model rather than the SARA internal evidence rules.
-
-The public SARA CSV files report result-facing fields only: `benchmark`, `test_id`, `sara_semantics_profile`, and, for each component, denominator, Masked/SDC/DUE/Unknown counts, and Masked/SDC/DUE/Unknown rates. Detailed trace diagnostics remain in `.work/` when `--keep-intermediate` is selected.
-
-## Quick start in the CUDA container
-
-The repository provides a root-level `Dockerfile` for the experiment environment. It builds the same CUDA 11.8 development image expected by the runner examples below (`sdc-gerem:cuda11.8-dev`). If a prebuilt image has been published for your artifact package, pull it first:
+The runnable experiment image is built from this repository's Dockerfile. Docker cannot pull a final image directly from a Dockerfile; it can only pull images that have already been published to a registry. The commands below first pull the CUDA base image used by the Dockerfile and then build the local SARA experiment image.
 
 ```bash
-docker pull sdc-gerem:cuda11.8-dev
+BASE_IMAGE=nvidia/cuda:11.8.0-devel-ubuntu20.04
+IMAGE=sdc-gerem:cuda11.8-dev
+RESULT_ROOT="$PWD/../sara-results"
+
+mkdir -p "$RESULT_ROOT"
+docker pull "$BASE_IMAGE"
+docker build --pull -t "$IMAGE" .
 ```
 
-If the pull command cannot find the image, build it locally from this repository instead:
+If you later publish the SARA experiment image to Docker Hub or GHCR, replace `IMAGE` with that registry-qualified tag and use `docker pull "$IMAGE"` instead of the local build step.
 
-```bash
-docker build -t sdc-gerem:cuda11.8-dev .
-```
-
-Then start the interactive experiment runner from the repository root:
+Run SARA for all applications on both supported architectures:
 
 ```bash
 docker run --rm -it \
   --name "sara-run-$(date +%s)" \
-  -v "$(pwd):$(pwd)" \
-  -w "$(pwd)" \
-  sdc-gerem:cuda11.8-dev \
-  bash -lc 'bash ./run_experiment.sh'
+  -v "$PWD:$PWD" \
+  -w "$PWD" \
+  -e RESULT_ROOT="$RESULT_ROOT" \
+  "$IMAGE" \
+  bash -lc 'bash ./run_experiment.sh --arch both --method sara --app all --force --discard-intermediate'
 ```
 
-The runner opens an interactive menu for architecture, method, application, overwrite behavior, GEREM campaign size, and whether to retain `.work` scratch data after the run.
+Results are organized as:
 
-For a non-interactive smoke run that does not overwrite the existing repository results, use an isolated result root inside the same container image:
+```text
+$RESULT_ROOT/<architecture>/<method>/<application>/
+$RESULT_ROOT/<architecture>/compare/
+```
+
+For example, SARA results for AdamW on Turing are written under:
+
+```text
+$RESULT_ROOT/Turing-RTX2060/SARA/AdamW/
+```
+
+## Running the full experiment families
+
+Run FI for all applications on all supported architectures:
+
+```bash
+docker run --rm -it \
+  --name "fi-run-$(date +%s)" \
+  -v "$PWD:$PWD" \
+  -w "$PWD" \
+  -e RESULT_ROOT="$RESULT_ROOT" \
+  "$IMAGE" \
+  bash -lc 'bash ./run_experiment.sh --arch both --method fi --app all --runs 1000 --force --discard-intermediate'
+```
+
+Run GEREM-all for all applications on all supported architectures:
+
+```bash
+docker run --rm -it \
+  --name "gerem-run-$(date +%s)" \
+  -v "$PWD:$PWD" \
+  -w "$PWD" \
+  -e RESULT_ROOT="$RESULT_ROOT" \
+  "$IMAGE" \
+  bash -lc 'bash ./run_experiment.sh --arch both --method gerem-all --app all --gerem-runs all --force --discard-intermediate'
+```
+
+Run SARA, GEREM-all, and FI in one command:
+
+```bash
+docker run --rm -it \
+  --name "all-run-$(date +%s)" \
+  -v "$PWD:$PWD" \
+  -w "$PWD" \
+  -e RESULT_ROOT="$RESULT_ROOT" \
+  "$IMAGE" \
+  bash -lc 'bash ./run_experiment.sh --arch both --method all --app all --runs 1000 --gerem-runs all --force --discard-intermediate'
+```
+
+The full FI and GEREM-all campaigns can take a long time. For a quick functional check, run one SARA smoke test:
 
 ```bash
 docker run --rm -it \
   --name "sara-smoke-$(date +%s)" \
-  -v "$(pwd):$(pwd)" \
-  -w "$(pwd)" \
-  -e RESULT_ROOT="$(pwd)/.omx/tmp/smoke-test-result" \
-  -e WORK_ROOT="$(pwd)/.omx/tmp/smoke-work" \
-  sdc-gerem:cuda11.8-dev \
-  bash -lc 'bash ./run_experiment.sh --arch turing --method sara --app AdamW --smoke --discard-intermediate'
+  -v "$PWD:$PWD" \
+  -w "$PWD" \
+  -e RESULT_ROOT="$RESULT_ROOT" \
+  "$IMAGE" \
+  bash -lc 'bash ./run_experiment.sh --arch turing --method sara --app AdamW --smoke --force --discard-intermediate'
 ```
 
-For a full experiment run inside the container:
-
-```bash
-docker run --rm -it \
-  --name "sara-full-$(date +%s)" \
-  -v "$(pwd):$(pwd)" \
-  -w "$(pwd)" \
-  sdc-gerem:cuda11.8-dev \
-  bash -lc 'bash ./run_experiment.sh --arch both --method all --app all --runs 1000 --gerem-runs all --force'
-```
-
-## Useful runner options
+## Runner options
 
 ```text
 --arch turing|ampere|both
@@ -90,12 +120,15 @@ docker run --rm -it \
 --skip-build
 --keep-intermediate
 --discard-intermediate
+--keep-build
 --force
 --smoke
 ```
 
-Each invocation deletes `.work/` before starting so every run begins from a clean scratch directory. Final results are always written to `test_result/` unless `RESULT_ROOT` is explicitly set.
+Run `bash ./run_experiment.sh --help` inside the container for the complete option summary.
 
-Use `--keep-intermediate` to keep the current run's `.work/` scratch files for inspection. Use `--discard-intermediate` to remove the scratch files after the run finishes.
+## Output comparison policy
 
-Partial reruns are app-scoped. For example, `--app Attention --method sara --force` removes and recomputes only `test_result/<arch>/SARA/Attention`; other applications and other methods under `test_result/` are preserved. After every invocation, the runner refreshes the full-suite comparison report under `test_result/<arch>/compare/` from the current public result directories, so a small rerun updates the aggregate compare file while showing missing data as `-`.
+SARA, FI, and the public comparison reports use the same application output-equivalence policy. Floating-point result fields use the fixed benchmark tolerance implemented by the repository utilities, and integer or fixed-width result fields use exact equality. Runtime failures, timeouts, invalid executions, and missing required outputs are classified as Detected Unrecoverable Error outcomes.
+
+After each invocation, the runner refreshes comparison reports from the current result root. Partial reruns update only the selected application and method while preserving other existing results in the same result root.
