@@ -35,7 +35,7 @@ _EVENT_INT_FIELDS = {
     "warp_id",
     "control_const_offset",
 }
-_EVENT_KEEP_FIELDS = {
+_EVENT_KEEP_FIELDS = (
     "thread_id",
     "kind",
     "pc",
@@ -81,7 +81,7 @@ _EVENT_KEEP_FIELDS = {
     "fallthrough_pc",
     "branch_target_pc",
     "target_pc",
-}
+)
 
 
 def _compact_int_value(value: Any) -> Any:
@@ -117,7 +117,7 @@ def _compact_event_for_analyzer(event: Any) -> Any:
         return event
 
     out: Dict[str, Any] = {}
-    for key in sorted(_EVENT_KEEP_FIELDS):
+    for key in _EVENT_KEEP_FIELDS:
         if key not in event:
             continue
         value = event.get(key)
