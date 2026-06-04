@@ -673,7 +673,6 @@ write_final_reports() {
         --app "${TEST_APP_NAME}" \
         --test-id "${CURRENT_TEST_ID}" \
         --input-line "${CURRENT_SIZE_LINE}" \
-        --parallel-workers 0 \
         --step-times "${CURRENT_TIMING_LOG_PATH}" \
         --output "${simple_csv}"
     CURRENT_SIMPLE_SUMMARY_CSV="${simple_csv}"

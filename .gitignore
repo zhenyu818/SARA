@@ -75,6 +75,7 @@ setup
 .work/
 backup/
 test_result/*
+sara-results/*
 paper/
 
 

@@ -5,8 +5,6 @@ import argparse
 import csv
 import json
 import math
-import multiprocessing as mp
-import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -1220,7 +1218,7 @@ def _discover_batch_entries_from_dir(batch_dir: Path, run_log_name: str) -> List
     return out
 
 
-def _batch_worker(task: Dict[str, Any]) -> Dict[str, Any]:
+def _classify_batch_entry(task: Dict[str, Any]) -> Dict[str, Any]:
     run_id = str(task.get("run_id", ""))
     run_log = Path(str(task.get("run_log", "")))
     exit_status = task.get("exit_status")
@@ -1271,7 +1269,6 @@ def classify_fi_logs_batch(
     timeout_exit_statuses: Optional[Iterable[int]] = None,
     batch_dir: Optional[Path] = None,
     run_log_name: str = "tmp.out",
-    jobs: int = 1,
 ) -> Dict[str, Any]:
     timeout_set = (
         set(int(x) for x in timeout_exit_statuses)
@@ -1317,12 +1314,7 @@ def classify_fi_logs_batch(
             }
         )
 
-    workers = max(1, int(jobs))
-    if workers > 1 and len(tasks) > 1:
-        with mp.Pool(processes=workers) as pool:
-            results = list(pool.map(_batch_worker, tasks))
-    else:
-        results = [_batch_worker(task) for task in tasks]
+    results = [_classify_batch_entry(task) for task in tasks]
 
     class_counts = Counter(str(row.get("classification", "")).lower() for row in results)
     return {
@@ -1334,7 +1326,6 @@ def classify_fi_logs_batch(
                 "sdc": int(class_counts.get("sdc", 0)),
                 "due": int(class_counts.get("due", 0)),
             },
-            "jobs": int(workers),
             "golden_log": str(golden_log),
             "run_log_name": str(run_log_name),
         },
@@ -1421,12 +1412,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Default per-run log filename when resolving via --batch-dir",
     )
     p_batch.add_argument(
-        "--jobs",
-        type=int,
-        default=max(1, min(8, (os.cpu_count() or 1))),
-        help="Worker processes for batch classification",
-    )
-    p_batch.add_argument(
         "--timeout-exit-statuses",
         type=str,
         default="124:137",
@@ -1491,7 +1476,6 @@ def main() -> int:
             timeout_exit_statuses=_parse_timeout_statuses(args.timeout_exit_statuses),
             batch_dir=args.batch_dir,
             run_log_name=args.run_log_name,
-            jobs=max(1, int(args.jobs)),
         )
         if args.output_json is not None:
             args.output_json.parent.mkdir(parents=True, exist_ok=True)

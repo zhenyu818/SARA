@@ -49,6 +49,9 @@ MASKING_OPCODE_PREFIXES = ("max", "min")
 MASKING_EVENT_KINDS = {"branch", "loop_branch"}
 GEREM_STORAGE_CAMPAIGN_RUNS = campaign_runs_env("GEREM_STORAGE_CAMPAIGN_RUNS", 1000)
 _BUILTIN_INT = int
+_BUILTIN_ISINSTANCE = isinstance
+_BUILTIN_LEN = len
+_BUILTIN_TUPLE = tuple
 
 
 def _stable_campaign_seed(*parts: Any) -> int:
@@ -82,8 +85,15 @@ def _cycle_weight_from_sampler(
     start_cycle: int,
     end_cycle: int,
     _to_int: Any = _BUILTIN_INT,
+    _isinstance: Any = _BUILTIN_ISINSTANCE,
+    _len: Any = _BUILTIN_LEN,
+    _tuple: Any = _BUILTIN_TUPLE,
 ) -> int:
-    cycles, cumulative, _total = sampler if isinstance(sampler, tuple) and len(sampler) == 3 else ([0], [1], 1)
+    cycles, cumulative, _total = (
+        sampler
+        if _isinstance(sampler, _tuple) and _len(sampler) == 3
+        else ([0], [1], 1)
+    )
     return cycle_weight_between(
         [_to_int(cycle) for cycle in cycles],
         [0] + [_to_int(value) for value in cumulative],

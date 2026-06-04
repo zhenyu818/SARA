@@ -12,23 +12,13 @@ CACHE_LOGS_DIR="${CACHE_LOGS_DIR:-./cache_logs}"
 TMP_FILE=tmp.out
 # persistent list of invalid parameter combinations to skip
 INVALID_COMBOS_FILE=./invalid_param_combos.txt
-RUNS=1000
+RUNS=1
 COMPONENT_SET="6"
-CPU_COUNT="$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)"
-if ! [[ "${CPU_COUNT}" =~ ^[0-9]+$ ]] || (( CPU_COUNT < 1 )); then
-    CPU_COUNT=1
-fi
-DEFAULT_BATCH_RAW=$(( CPU_COUNT / 2 ))
-if (( DEFAULT_BATCH_RAW < 1 )); then DEFAULT_BATCH_RAW=1; fi
-if (( DEFAULT_BATCH_RAW > 8 )); then DEFAULT_BATCH_RAW=8; fi
-DEFAULT_BATCH="${DEFAULT_BATCH:-${DEFAULT_BATCH_RAW}}"
-BATCH="${DEFAULT_BATCH}"
 SIM_NICE="${SIM_NICE:-10}"
-SIM_LAUNCH_STAGGER_SEC="${SIM_LAUNCH_STAGGER_SEC:-0.2}"
 DELETE_LOGS="${DELETE_LOGS:-1}" # if 1 then all logs will be deleted at the end of the script
 INJECT_BIT_FLIP_COUNT=1
-THREAD_RAND_MAX=256
-WARP_RAND_MAX=8
+THREAD_RAND_MAX=512
+WARP_RAND_MAX=16
 BLOCK_RAND_MAX=1
 
 # Optional: specify PTX virtual register name(s) to inject (overrides index-based selection)
@@ -50,26 +40,26 @@ L2_SIZE_BITS=1
 # ---------------------------------------------- END PER GPGPU CARD PARAMETERS ------------------------------------------------
 
 # ---------------------------------------------- START PER KERNEL/APPLICATION PARAMETERS (+profile=1) ----------------------------------------------
-CUDA_UUT="./Attention 128 24"
+CUDA_UUT="./AdamW 128 4"
 # total cycles for all kernels
-CYCLES=46852
+CYCLES=6436
 # Get the exact cycles, max registers and SIMT cores used for each kernel with profile=1
 # fix cycles.txt with kernel execution cycles
 # (e.g. seq 1 10 >> cycles.txt, or multiple seq commands if a kernel has multiple executions)
 # use the following command from profiling execution for easier creation of cycles.txt file
 # e.g. grep "_Z12lud_diagonalPfii" cycles.in | awk  '{ system("seq " $12 " " $18 ">> cycles.txt")}'
 CYCLES_FILE=./cycles.txt
-MAX_REGISTERS_USED=40
-SHADER_USED="0 1"
+MAX_REGISTERS_USED=17
+SHADER_USED="0"
 SUCCESS_MSG='Fault Injection Test Success!'
 FAILED_MSG='Fault Injection Test Failed!'
-TIMEOUT_VAL=140s
-DATATYPE_SIZE=64
+TIMEOUT_VAL=20s
+DATATYPE_SIZE=32
 # lmem and smem values are taken from gpgpu-sim ptx output per kernel
 # e.g. GPGPU-Sim PTX: Kernel '_Z9vectorAddPKdS0_Pdi' : regs=8, lmem=0, smem=0, cmem=380
 # if 0 put a random value > 0
 LMEM_SIZE_BITS=1
-SMEM_SIZE_BITS=32
+SMEM_SIZE_BITS=224
 # ---------------------------------------------- END PER KERNEL/APPLICATION PARAMETERS (+profile=1) ------------------------------------------------
 
 FAULT_INJECTION_OCCURRED="Fault injection"
@@ -94,7 +84,6 @@ blocks=1
 
 if [[ -n "${CAMPAIGN_RUNS_OVERRIDE:-}" ]]; then RUNS="${CAMPAIGN_RUNS_OVERRIDE}"; fi
 if [[ -n "${CAMPAIGN_COMPONENT_SET_OVERRIDE:-}" ]]; then COMPONENT_SET="${CAMPAIGN_COMPONENT_SET_OVERRIDE}"; fi
-if [[ -n "${CAMPAIGN_BATCH_OVERRIDE:-}" ]]; then BATCH="${CAMPAIGN_BATCH_OVERRIDE}"; fi
 if [[ -n "${CAMPAIGN_CUDA_UUT_OVERRIDE:-}" ]]; then CUDA_UUT="${CAMPAIGN_CUDA_UUT_OVERRIDE}"; fi
 if [[ -n "${CAMPAIGN_CYCLES_OVERRIDE:-}" ]]; then CYCLES="${CAMPAIGN_CYCLES_OVERRIDE}"; fi
 if [[ -n "${CAMPAIGN_CYCLES_FILE_OVERRIDE:-}" ]]; then CYCLES_FILE="${CAMPAIGN_CYCLES_FILE_OVERRIDE}"; fi
@@ -179,34 +168,24 @@ choose_total_cycle_rand() {
     echo "0"
 }
 
-sanitize_parallel_settings() {
-    if ! [[ "${BATCH}" =~ ^[1-9][0-9]*$ ]]; then
-        BATCH=1
-    fi
+sanitize_run_settings() {
     if ! [[ "${SIM_NICE}" =~ ^-?[0-9]+$ ]]; then
         SIM_NICE=10
     fi
-    case "${SIM_LAUNCH_STAGGER_SEC}" in
-        ''|*[!0-9.]*)
-            SIM_LAUNCH_STAGGER_SEC="0.2"
-            ;;
-    esac
 }
 
 launch_uut_guarded() {
     local out_file="$1"
     local exit_file="$2"
-    (
-        if command -v nice >/dev/null 2>&1; then
-            nice -n "${SIM_NICE}" timeout "${TIMEOUT_VAL}" $CUDA_UUT > "${out_file}" 2>&1
-        else
-            timeout "${TIMEOUT_VAL}" $CUDA_UUT > "${out_file}" 2>&1
-        fi
-        echo $? > "${exit_file}"
-    ) &
-    if [[ "${SIM_LAUNCH_STAGGER_SEC}" != "0" && "${SIM_LAUNCH_STAGGER_SEC}" != "0.0" ]]; then
-        sleep "${SIM_LAUNCH_STAGGER_SEC}"
+    local rc=0
+    if command -v nice >/dev/null 2>&1; then
+        nice -n "${SIM_NICE}" timeout "${TIMEOUT_VAL}" $CUDA_UUT > "${out_file}" 2>&1
+        rc=$?
+    else
+        timeout "${TIMEOUT_VAL}" $CUDA_UUT > "${out_file}" 2>&1
+        rc=$?
     fi
+    echo "${rc}" > "${exit_file}"
 }
 
 csv_escape() {
@@ -933,29 +912,26 @@ gather_results() {
     done
 }
 
-parallel_execution() {
-    batch=$1
-    mkdir ${TMP_DIR}${2} > /dev/null 2>&1
-    for i in $( seq 1 $batch ); do
-        CURRENT_TRIAL_ID=$((FI_TRIAL_COUNTER + 1))
-        FI_TRIAL_COUNTER=${CURRENT_TRIAL_ID}
-        if [[ "${FI_SEED_BASE}" =~ ^-?[0-9]+$ ]]; then
-            CURRENT_TRIAL_SEED=$((FI_SEED_BASE + CURRENT_TRIAL_ID))
-        else
-            CURRENT_TRIAL_SEED="${CURRENT_TRIAL_ID}"
-        fi
-        initialize_config
-        # unique id for each run (trial + batch/local index)
-        set_config_opt "-run_uid" "t${CURRENT_TRIAL_ID}_r${2}b${i}"
-        cp ${CONFIG_FILE} ${TMP_DIR}${2}/${CONFIG_FILE}${i} # save state
-        echo "${CURRENT_TRIAL_ID}" > "${TMP_DIR}${2}/trial_id${i}"
-        launch_uut_guarded "${TMP_DIR}${2}/${TMP_FILE}${i}" "${TMP_DIR}${2}/exit_status${i}"
-    done
-    wait
-    gather_results $2
+serial_execution() {
+    local run_index="$1"
+    local local_index=1
+    mkdir "${TMP_DIR}${run_index}" > /dev/null 2>&1
+    CURRENT_TRIAL_ID=$((FI_TRIAL_COUNTER + 1))
+    FI_TRIAL_COUNTER=${CURRENT_TRIAL_ID}
+    if [[ "${FI_SEED_BASE}" =~ ^-?[0-9]+$ ]]; then
+        CURRENT_TRIAL_SEED=$((FI_SEED_BASE + CURRENT_TRIAL_ID))
+    else
+        CURRENT_TRIAL_SEED="${CURRENT_TRIAL_ID}"
+    fi
+    initialize_config
+    set_config_opt "-run_uid" "t${CURRENT_TRIAL_ID}_r${run_index}"
+    cp ${CONFIG_FILE} "${TMP_DIR}${run_index}/${CONFIG_FILE}${local_index}" # save state
+    echo "${CURRENT_TRIAL_ID}" > "${TMP_DIR}${run_index}/trial_id${local_index}"
+    launch_uut_guarded "${TMP_DIR}${run_index}/${TMP_FILE}${local_index}" "${TMP_DIR}${run_index}/exit_status${local_index}"
+    gather_results "${run_index}"
     if [[ "$DELETE_LOGS" -eq 1 ]]; then
         rm _ptx* _cuobjdump_* _app_cuda* *.ptx f_tempfile_ptx gpgpu_inst_stats.txt > /dev/null 2>&1
-        rm -r ${TMP_DIR}${2} > /dev/null 2>&1 # comment out to debug output
+        rm -r "${TMP_DIR}${run_index}" > /dev/null 2>&1 # comment out to debug output
     fi
     if [[ "$profile" -ne 1 ]]; then
         # clean intermediate logs anyway if profile != 1
@@ -966,8 +942,8 @@ parallel_execution() {
 trap cleanup_trial_logging EXIT
 
 main() {
-    sanitize_parallel_settings
-    echo "=== Campaign exec guarded settings: batch=${BATCH}, nice=${SIM_NICE}, launch_stagger=${SIM_LAUNCH_STAGGER_SEC}s ==="
+    sanitize_run_settings
+    echo "=== Campaign exec guarded settings: serial, nice=${SIM_NICE} ==="
     auto_detect_cache_size_bits
     init_trial_logging
     # Normalize existing invalid combos to reduced keys (idempotent)
@@ -1011,28 +987,14 @@ main() {
     do
         echo "runs left ${RUNS}" # DEBUG
         let MAX_RETRIES--
-        LOOP_START=${LOOP}
-        unset LAST_BATCH
-        if [ "$BATCH" -gt "$RUNS" ]; then
-            BATCH=${RUNS}
-            LOOP_END=$(($LOOP_START))
-        else
-            BATCH_RUNS=$(($RUNS/$BATCH))
-            if (( $RUNS % $BATCH )); then
-                LAST_BATCH=$(($RUNS-$BATCH_RUNS*$BATCH))
+        RUNS_THIS_PASS=${RUNS}
+        for i in $( seq 1 ${RUNS_THIS_PASS} ); do
+            if [[ $RUNS -le 0 ]]; then
+                break
             fi
-            LOOP_END=$(($LOOP_START+$BATCH_RUNS-1))
-        fi
-
-        for i in $( seq $LOOP_START $LOOP_END ); do
-            parallel_execution $BATCH $i
+            serial_execution "${LOOP}"
             let LOOP++
         done
-
-        if [[ ! -z ${LAST_BATCH+x} ]]; then
-            parallel_execution $LAST_BATCH $LOOP
-            let LOOP++
-        fi
     done
 
     if [[ $MAX_RETRIES -eq 0 ]]; then

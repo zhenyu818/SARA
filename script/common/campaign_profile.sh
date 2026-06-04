@@ -8,17 +8,7 @@ TMP_DIR=./logs
 CACHE_LOGS_DIR=./cache_logs
 TMP_FILE=tmp.out
 RUNS=10
-CPU_COUNT="$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)"
-if ! [[ "${CPU_COUNT}" =~ ^[0-9]+$ ]] || (( CPU_COUNT < 1 )); then
-    CPU_COUNT=1
-fi
-DEFAULT_BATCH_RAW=$(( CPU_COUNT / 2 ))
-if (( DEFAULT_BATCH_RAW < 1 )); then DEFAULT_BATCH_RAW=1; fi
-if (( DEFAULT_BATCH_RAW > 8 )); then DEFAULT_BATCH_RAW=8; fi
-DEFAULT_BATCH="${DEFAULT_BATCH:-${DEFAULT_BATCH_RAW}}"
-BATCH="${DEFAULT_BATCH}"
 SIM_NICE="${SIM_NICE:-10}"
-SIM_LAUNCH_STAGGER_SEC="${SIM_LAUNCH_STAGGER_SEC:-0.2}"
 DELETE_LOGS=0 # if 1 then all logs will be deleted at the end of the script
 # ---------------------------------------------- END ONE-TIME PARAMETERS ------------------------------------------------
 
@@ -32,7 +22,7 @@ L2_SIZE_BITS=24576057 # (nsets=64, line_size=128 bytes + 57 bits, assoc=16) x 24
 # ---------------------------------------------- END PER GPGPU CARD PARAMETERS ------------------------------------------------
 
 # ---------------------------------------------- START PER KERNEL/APPLICATION PARAMETERS (+profile=1) ----------------------------------------------
-CUDA_UUT="./Attention 128 24"
+CUDA_UUT="./AdamW 128 4"
 # total cycles for all kernels
 CYCLES=4040
 # Get the exact cycles, max registers and SIMT cores used for each kernel with profile=1
@@ -130,29 +120,18 @@ choose_total_cycle_rand() {
     echo "0"
 }
 
-sanitize_parallel_settings() {
-    if ! [[ "${BATCH}" =~ ^[1-9][0-9]*$ ]]; then
-        BATCH=1
-    fi
+sanitize_run_settings() {
     if ! [[ "${SIM_NICE}" =~ ^-?[0-9]+$ ]]; then
         SIM_NICE=10
     fi
-    case "${SIM_LAUNCH_STAGGER_SEC}" in
-        ''|*[!0-9.]*)
-            SIM_LAUNCH_STAGGER_SEC="0.2"
-            ;;
-    esac
 }
 
 launch_uut_guarded() {
     local out_file="$1"
     if command -v nice >/dev/null 2>&1; then
-        nice -n "${SIM_NICE}" timeout "${TIMEOUT_VAL}" $CUDA_UUT > "${out_file}" 2>&1 &
+        nice -n "${SIM_NICE}" timeout "${TIMEOUT_VAL}" $CUDA_UUT > "${out_file}" 2>&1
     else
-        timeout "${TIMEOUT_VAL}" $CUDA_UUT > "${out_file}" 2>&1 &
-    fi
-    if [[ "${SIM_LAUNCH_STAGGER_SEC}" != "0" && "${SIM_LAUNCH_STAGGER_SEC}" != "0.0" ]]; then
-        sleep "${SIM_LAUNCH_STAGGER_SEC}"
+        timeout "${TIMEOUT_VAL}" $CUDA_UUT > "${out_file}" 2>&1
     fi
 }
 
@@ -251,21 +230,19 @@ gather_results() {
     done
 }
 
-parallel_execution() {
-    batch=$1
-    mkdir ${TMP_DIR}${2} > /dev/null 2>&1
-    for i in $( seq 1 $batch ); do
-        initialize_config
-        # unique id for each run (e.g. r1b2: 1st run, 2nd execution on batch)
-        set_config_opt "-run_uid" "r${2}b${i}"
-        cp ${CONFIG_FILE} ${TMP_DIR}${2}/${CONFIG_FILE}${i} # save state
-        launch_uut_guarded "${TMP_DIR}${2}/${TMP_FILE}${i}"
-    done
-    wait
-    gather_results $2
+serial_execution() {
+    local run_index="$1"
+    local local_index=1
+
+    mkdir ${TMP_DIR}${run_index} > /dev/null 2>&1
+    initialize_config
+    set_config_opt "-run_uid" "r${run_index}"
+    cp ${CONFIG_FILE} ${TMP_DIR}${run_index}/${CONFIG_FILE}${local_index} # save state
+    launch_uut_guarded "${TMP_DIR}${run_index}/${TMP_FILE}${local_index}"
+    gather_results ${run_index}
     if [[ "$DELETE_LOGS" -eq 1 ]]; then
         rm _ptx* _cuobjdump_* _app_cuda* *.ptx f_tempfile_ptx gpgpu_inst_stats.txt > /dev/null 2>&1
-        rm -r ${TMP_DIR}${2} > /dev/null 2>&1 # comment out to debug output
+        rm -r ${TMP_DIR}${run_index} > /dev/null 2>&1 # comment out to debug output
     fi
     if [[ "$profile" -ne 1 ]]; then
         # clean intermediate logs anyway if profile != 1
@@ -276,8 +253,8 @@ parallel_execution() {
 main() {
     # Remove all directories whose names start with 'logs'
     find . -type d -name "logs*" -exec rm -rf {} + 2>/dev/null || true
-    sanitize_parallel_settings
-    echo "=== Campaign profile guarded settings: batch=${BATCH}, nice=${SIM_NICE}, launch_stagger=${SIM_LAUNCH_STAGGER_SEC}s ==="
+    sanitize_run_settings
+    echo "=== Campaign profile guarded settings: serial, nice=${SIM_NICE} ==="
 
     if [[ "$profile" -eq 1 ]] || [[ "$profile" -eq 2 ]] || [[ "$profile" -eq 3 ]]; then
         RUNS=1
@@ -291,28 +268,14 @@ main() {
     do
         echo "runs left ${RUNS}" # DEBUG
         let MAX_RETRIES--
-        LOOP_START=${LOOP}
-        unset LAST_BATCH
-        if [ "$BATCH" -gt "$RUNS" ]; then
-            BATCH=${RUNS}
-            LOOP_END=$(($LOOP_START))
-        else
-            BATCH_RUNS=$(($RUNS/$BATCH))
-            if (( $RUNS % $BATCH )); then
-                LAST_BATCH=$(($RUNS-$BATCH_RUNS*$BATCH))
+        RUNS_THIS_PASS=${RUNS}
+        for i in $( seq 1 ${RUNS_THIS_PASS} ); do
+            if [[ $RUNS -le 0 ]]; then
+                break
             fi
-            LOOP_END=$(($LOOP_START+$BATCH_RUNS-1))
-        fi
-
-        for i in $( seq $LOOP_START $LOOP_END ); do
-            parallel_execution $BATCH $i
+            serial_execution "${LOOP}"
             let LOOP++
         done
-
-        if [[ ! -z ${LAST_BATCH+x} ]]; then
-            parallel_execution $LAST_BATCH $LOOP
-            let LOOP++
-        fi
     done
 
     if [[ $MAX_RETRIES -eq 0 ]]; then

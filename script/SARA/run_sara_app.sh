@@ -170,32 +170,6 @@ PROFILE_DATATYPE_BITS=""
 PROFILE_SMEM_SIZE_BITS=""
 FAIR_TIMING_START_NS=""
 
-detect_exact_cpu_count() {
-    local cpu_count=""
-    cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
-    if [[ -z "${cpu_count}" || "${cpu_count}" -le 0 ]]; then
-        cpu_count="$(nproc 2>/dev/null || echo 1)"
-    fi
-    if [[ -z "${cpu_count}" || "${cpu_count}" -le 0 ]]; then
-        cpu_count=1
-    fi
-    echo "${cpu_count}"
-}
-
-default_exact_batch_component_workers() {
-    local cpu_count quarter workers
-    cpu_count="$(detect_exact_cpu_count)"
-    quarter=$(( cpu_count / 4 ))
-    if (( quarter < 1 )); then
-        quarter=1
-    fi
-    workers="${quarter}"
-    if (( workers > 4 )); then
-        workers=4
-    fi
-    echo "${workers}"
-}
-
 ANALYZER_LITE_OUTPUT="${ANALYZER_LITE_OUTPUT:-1}"
 ANALYZER_MASK_FORMAT="${ANALYZER_MASK_FORMAT:-int}"
 ANALYZER_ASSUME_SORTED_EVENTS="${ANALYZER_ASSUME_SORTED_EVENTS:-1}"
@@ -234,7 +208,6 @@ ALL_COMPONENTS="${ALL_COMPONENTS:-rf:smem_rf:l1d:l2}" # components for mode=all_
 ALL_COMPONENTS_TABLE_BASENAME="${ALL_COMPONENTS_TABLE_BASENAME:-all_components_rates.tsv}"
 ALL_COMPONENTS_COMPACT_OUTPUT="${ALL_COMPONENTS_COMPACT_OUTPUT:-1}" # 1 => print concise all-components report
 ALL_COMPONENTS_ALLOW_PARTIAL="${ALL_COMPONENTS_ALLOW_PARTIAL:-0}" # 1 => return success even if some components are unavailable
-EXACT_BATCH_COMPONENT_WORKERS="${EXACT_BATCH_COMPONENT_WORKERS:-$(default_exact_batch_component_workers)}"
 RESULT_DIR="${RESULT_DIR:-}"
 EXACT_RESULT_VARIANT="${EXACT_RESULT_VARIANT:-}"
 if [[ -z "${EXACT_RESULT_VARIANT}" && "${FAULT_COMPONENT}" == "gmem" ]]; then
@@ -5247,7 +5220,6 @@ run_all_components_mode_core() {
             "${batch_component_analyzer_args[@]}"
             --batch-components "${batch_components_csv}"
             --batch-output-dir "${batch_output_dir}"
-            --batch-workers "${EXACT_BATCH_COMPONENT_WORKERS}"
             --regfile-trace "${CURRENT_RUN_DIR}/regfile_trace.bin"
             --trace-template "${CURRENT_RUN_DIR}/analyzer_input.json"
             --cycles "${CURRENT_CYCLES_DOMAIN_FILE}"
@@ -5307,8 +5279,8 @@ run_all_components_mode_core() {
         for comp in "${active_components[@]}"; do
             batch_compute_outputs+=("${CURRENT_RUN_DIR}/exact_rates_${comp}.json")
         done
-        batch_compute_params_json="$(printf '{"exact_semantics_profile":"%s","components":"%s","batch_workers":%s,"thread_rand_max":%s,"block_rand_max":%s,"smem_size_bits":%s,"l1d_size_bits":%s,"l1d_tag_bits":%s,"l1d_include_tag_bits":%s,"l1d_line_size_bytes":%s,"l1d_shaders":"%s","l1d_shaders_arg":"%s","l1d_write_allocate":%s,"l2_size_bits":%s,"l2_tag_bits":%s,"l2_include_tag_bits":%s,"l2_line_size_bytes":%s,"l2_global_prefill":%s,"datatype_bits":%s,"addr_valid_ranges_path":"%s","rf_domain_total_bits":%s,"smem_rf_domain_total_bits":%s,"l1d_domain_total_bits":%s,"l2_domain_total_bits":%s,"storage_group_mode":"%s"}' \
-            "${EXACT_SEMANTICS_PROFILE}" "${batch_components_csv}" "${EXACT_BATCH_COMPONENT_WORKERS}" "${CURRENT_THREAD_RAND_MAX}" "${CURRENT_BLOCK_RAND_MAX}" "${CURRENT_SMEM_SIZE_BITS}" "${CURRENT_L1D_SIZE_BITS}" "${CURRENT_L1D_TAG_BITS}" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l1d_include_tag_bits" "1")" "${CURRENT_L1D_LINE_SIZE_BYTES}" "${CURRENT_L1D_SHADERS}" "${batch_l1d_shaders_arg}" "${CURRENT_L1D_WRITE_ALLOCATE}" "${CURRENT_L2_SIZE_BITS}" "${CURRENT_L2_TAG_BITS}" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l2_include_tag_bits" "1")" "${CURRENT_L2_LINE_SIZE_BYTES}" "${CURRENT_L2_GLOBAL_PREFILL}" "${CURRENT_DATATYPE_BITS}" "${ADDR_VALID_RANGES_PATH:-}" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "rf_domain_total_bits" "0")" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "smem_rf_domain_total_bits" "0")" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l1d_domain_total_bits" "0")" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l2_domain_total_bits" "0")" "${EXACT_STORAGE_GROUP_MODE}")"
+        batch_compute_params_json="$(printf '{"exact_semantics_profile":"%s","components":"%s","thread_rand_max":%s,"block_rand_max":%s,"smem_size_bits":%s,"l1d_size_bits":%s,"l1d_tag_bits":%s,"l1d_include_tag_bits":%s,"l1d_line_size_bytes":%s,"l1d_shaders":"%s","l1d_shaders_arg":"%s","l1d_write_allocate":%s,"l2_size_bits":%s,"l2_tag_bits":%s,"l2_include_tag_bits":%s,"l2_line_size_bytes":%s,"l2_global_prefill":%s,"datatype_bits":%s,"addr_valid_ranges_path":"%s","rf_domain_total_bits":%s,"smem_rf_domain_total_bits":%s,"l1d_domain_total_bits":%s,"l2_domain_total_bits":%s,"storage_group_mode":"%s"}' \
+            "${EXACT_SEMANTICS_PROFILE}" "${batch_components_csv}" "${CURRENT_THREAD_RAND_MAX}" "${CURRENT_BLOCK_RAND_MAX}" "${CURRENT_SMEM_SIZE_BITS}" "${CURRENT_L1D_SIZE_BITS}" "${CURRENT_L1D_TAG_BITS}" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l1d_include_tag_bits" "1")" "${CURRENT_L1D_LINE_SIZE_BYTES}" "${CURRENT_L1D_SHADERS}" "${batch_l1d_shaders_arg}" "${CURRENT_L1D_WRITE_ALLOCATE}" "${CURRENT_L2_SIZE_BITS}" "${CURRENT_L2_TAG_BITS}" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l2_include_tag_bits" "1")" "${CURRENT_L2_LINE_SIZE_BYTES}" "${CURRENT_L2_GLOBAL_PREFILL}" "${CURRENT_DATATYPE_BITS}" "${ADDR_VALID_RANGES_PATH:-}" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "rf_domain_total_bits" "0")" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "smem_rf_domain_total_bits" "0")" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l1d_domain_total_bits" "0")" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l2_domain_total_bits" "0")" "${EXACT_STORAGE_GROUP_MODE}")"
         batch_compute_sig="$(cache_compute_signature "analyzer_exact_compute_batch" "${batch_compute_params_json}" "${batch_compute_payload_tmp}" \
             "${batch_compute_sig_inputs[@]}" \
             "${CURRENT_RUN_DIR}/analyzer_input.json" \
@@ -5465,7 +5437,6 @@ run_all_components_mode_core() {
         else
             simple_summary_lines+=("Input: unavailable")
         fi
-        simple_summary_lines+=("Parallel Workers: ${EXACT_BATCH_COMPONENT_WORKERS}")
         simple_summary_lines+=("Inference Mode: canonical_proof")
 
         for comp in "${ordered_components[@]}"; do

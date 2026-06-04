@@ -211,7 +211,6 @@ def simple_summary_lines(
     app: str,
     test_id: str,
     input_line: str,
-    parallel_workers: int,
     step_times: Sequence[Tuple[str, float]],
 ) -> List[str]:
     total_time = sum(seconds for _label, seconds in step_times)
@@ -219,7 +218,6 @@ def simple_summary_lines(
         f"Application Name: {app}",
         f"Test ID: {test_id}",
         f"Input: {input_line}",
-        f"Parallel Workers: {parallel_workers}",
     ]
     campaign_modes: List[str] = []
     campaign_runs: List[str] = []
@@ -255,7 +253,6 @@ def write_simple_summary(
     app: str,
     test_id: str,
     input_line: str,
-    parallel_workers: int,
     step_times: Sequence[Tuple[str, float]],
     output: Path,
 ) -> None:
@@ -264,7 +261,6 @@ def write_simple_summary(
         app=app,
         test_id=test_id,
         input_line=input_line,
-        parallel_workers=parallel_workers,
         step_times=step_times,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -295,7 +291,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     simple.add_argument("--app", required=True)
     simple.add_argument("--test-id", required=True, dest="test_id")
     simple.add_argument("--input-line", required=True)
-    simple.add_argument("--parallel-workers", type=int, required=True, dest="parallel_workers")
     simple.add_argument("--step-times", type=Path, default=None, dest="step_times")
     simple.add_argument("--output", type=Path, required=True)
     return parser
@@ -314,7 +309,6 @@ def _legacy_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-line", required=True, dest="input_line")
     parser.add_argument("--timing-log", type=Path, required=False, default=None, dest="step_times")
     parser.add_argument("--total-time-seconds", type=float, required=False, default=None)
-    parser.add_argument("--parallel-workers", type=int, required=False, default=1, dest="parallel_workers")
     return parser
 
 
@@ -341,7 +335,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             app=args.app,
             test_id=args.test_id,
             input_line=args.input_line,
-            parallel_workers=args.parallel_workers,
             step_times=step_times,
             output=args.output,
         )
@@ -358,7 +351,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         app=args.app,
         test_id=args.test_id,
         input_line=args.input_line,
-        parallel_workers=args.parallel_workers,
         step_times=step_times,
         output=args.output_simple,
     )

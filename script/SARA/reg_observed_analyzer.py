@@ -56,7 +56,6 @@ _BUILTIN_MAX = _builtins.max
 _BUILTIN_MIN = _builtins.min
 _BUILTIN_TUPLE = _builtins.tuple
 
-import concurrent.futures
 import cProfile
 import gzip
 import hashlib
@@ -64,7 +63,6 @@ import inspect
 import io
 import json
 import math
-import multiprocessing as mp
 import os
 import pickle
 import pstats
@@ -540,11 +538,17 @@ META_DIAGNOSTIC_SAMPLE_FIELDS = (
     "output_oracle_spec_ranges",
 )
 
-def parse_int(value: Any) -> int:
-    if _BUILTIN_ISINSTANCE(value, _BUILTIN_INT):
+def parse_int(
+    value: Any,
+    _to_int: Any = _builtins.int,
+    _isinstance: Any = _builtins.isinstance,
+    _int_type: Any = _builtins.int,
+    _str_type: Any = _builtins.str,
+) -> int:
+    if _isinstance(value, _int_type):
         return value
-    if _BUILTIN_ISINSTANCE(value, str):
-        return _BUILTIN_INT(value, 0)
+    if _isinstance(value, _str_type):
+        return _to_int(value, 0)
     raise ValueError(f"Unsupported integer value: {value!r}")
 
 
@@ -561,7 +565,13 @@ def _linux_mem_available_bytes() -> Optional[int]:
     return None
 
 
-def coerce_width_bits(width_bits: Any, default: int = 64) -> int:
+def coerce_width_bits(
+    width_bits: Any,
+    default: int = 64,
+    _to_int: Any = _builtins.int,
+    _max: Any = _builtins.max,
+    _min: Any = _builtins.min,
+) -> int:
     """Return a safe 0..64 width for trace/read-record bit masks.
 
     Older/stale analyzer artifacts can contain explicit ``None`` width fields.
@@ -570,21 +580,25 @@ def coerce_width_bits(width_bits: Any, default: int = 64) -> int:
     """
 
     try:
-        fallback = _BUILTIN_INT(default)
+        fallback = _to_int(default)
     except Exception:
         fallback = 64
     if width_bits is None:
         w = fallback
     else:
         try:
-            w = _BUILTIN_INT(width_bits)
+            w = _to_int(width_bits)
         except (TypeError, ValueError, OverflowError):
             w = fallback
-    return _BUILTIN_MAX(0, _BUILTIN_MIN(64, w))
+    return _max(0, _min(64, w))
 
 
-def coerce_positive_width_bits(width_bits: Any, default: int = 32) -> int:
-    return _BUILTIN_MAX(1, coerce_width_bits(width_bits, default=default))
+def coerce_positive_width_bits(
+    width_bits: Any,
+    default: int = 32,
+    _max: Any = _builtins.max,
+) -> int:
+    return _max(1, coerce_width_bits(width_bits, default=default))
 
 
 def width_mask(width_bits: Any) -> int:
@@ -641,11 +655,16 @@ def parse_mask(mask: Any) -> int:
     return parse_int(mask) & UINT64_MASK
 
 
-def mask_as_int(mask: Any) -> int:
+def mask_as_int(
+    mask: Any,
+    _to_int: Any = _builtins.int,
+    _isinstance: Any = _builtins.isinstance,
+    _int_type: Any = _builtins.int,
+) -> int:
     if mask is None:
         return 0
-    if _BUILTIN_ISINSTANCE(mask, _BUILTIN_INT):
-        return _BUILTIN_INT(mask) & UINT64_MASK
+    if _isinstance(mask, _int_type):
+        return _to_int(mask) & UINT64_MASK
     return parse_mask(mask)
 
 
@@ -772,37 +791,38 @@ def build_internal_read_record(
     opcode: str = "",
     notes: Optional[Dict[str, Any]] = None,
     compact_compute: bool = False,
+    _to_int: Any = _builtins.int,
 ) -> Any:
     prof = str(profile).strip().lower()
-    cycle_i = None if cycle is None else _BUILTIN_INT(cycle)
+    cycle_i = None if cycle is None else _to_int(cycle)
     if compact_compute and prof == "compute":
         return (
-            _BUILTIN_INT(event_index),
-            _BUILTIN_INT(thread_id),
+            _to_int(event_index),
+            _to_int(thread_id),
             cycle_i,
             str(read_kind),
-            _BUILTIN_INT(src_index),
+            _to_int(src_index),
             str(src_reg),
-            _BUILTIN_INT(src_reg_uid),
+            _to_int(src_reg_uid),
             coerce_width_bits(src_width_bits, default=64),
-            _BUILTIN_INT(observed_mask_this_read) & UINT64_MASK,
-            _BUILTIN_INT(due_mask_this_read) & UINT64_MASK,
-            _BUILTIN_INT(addr_static_due_mask_this_read) & UINT64_MASK,
-            _BUILTIN_INT(trace_expanding_mask_this_read) & UINT64_MASK
+            _to_int(observed_mask_this_read) & UINT64_MASK,
+            _to_int(due_mask_this_read) & UINT64_MASK,
+            _to_int(addr_static_due_mask_this_read) & UINT64_MASK,
+            _to_int(trace_expanding_mask_this_read) & UINT64_MASK
         )
     rec: Dict[str, Any] = {
-        "event_index": _BUILTIN_INT(event_index),
-        "thread_id": _BUILTIN_INT(thread_id),
+        "event_index": _to_int(event_index),
+        "thread_id": _to_int(thread_id),
         "cycle": cycle_i,
         "read_kind": str(read_kind),
-        "src_index": _BUILTIN_INT(src_index),
+        "src_index": _to_int(src_index),
         "src_reg": str(src_reg),
-        "src_reg_uid": _BUILTIN_INT(src_reg_uid),
+        "src_reg_uid": _to_int(src_reg_uid),
         "src_width_bits": coerce_width_bits(src_width_bits, default=64),
-        "observed_mask_this_read": _BUILTIN_INT(observed_mask_this_read) & UINT64_MASK,
-        "due_mask_this_read": _BUILTIN_INT(due_mask_this_read) & UINT64_MASK,
-        ADDR_STATIC_DUE_MASK_FIELD: _BUILTIN_INT(addr_static_due_mask_this_read) & UINT64_MASK,
-        "trace_expanding_mask_this_read": _BUILTIN_INT(trace_expanding_mask_this_read)
+        "observed_mask_this_read": _to_int(observed_mask_this_read) & UINT64_MASK,
+        "due_mask_this_read": _to_int(due_mask_this_read) & UINT64_MASK,
+        ADDR_STATIC_DUE_MASK_FIELD: _to_int(addr_static_due_mask_this_read) & UINT64_MASK,
+        "trace_expanding_mask_this_read": _to_int(trace_expanding_mask_this_read)
         & UINT64_MASK,
     }
     if prof == "compat":
@@ -811,8 +831,8 @@ def build_internal_read_record(
         rec["warp_id"] = warp_id
         rec["pc"] = str(pc)
         rec["opcode"] = str(opcode)
-        rec["reg_observed_mask_at_read"] = _BUILTIN_INT(reg_observed_mask_at_read) & UINT64_MASK
-        rec["reg_due_mask_at_read"] = _BUILTIN_INT(reg_due_mask_at_read) & UINT64_MASK
+        rec["reg_observed_mask_at_read"] = _to_int(reg_observed_mask_at_read) & UINT64_MASK
+        rec["reg_due_mask_at_read"] = _to_int(reg_due_mask_at_read) & UINT64_MASK
         if notes:
             rec["notes"] = dict(notes)
     return rec
@@ -836,57 +856,58 @@ def build_internal_site_record(
     trace_expanding_mask_this_site: int,
     shared_store_escape_mask_this_site: int = 0,
     compact: bool = False,
+    _to_int: Any = _builtins.int,
 ) -> Any:
     family = str(site_family).strip().lower()
-    cycle_i = None if cycle is None else _BUILTIN_INT(cycle)
+    cycle_i = None if cycle is None else _to_int(cycle)
     if compact:
         if family == "smem":
             return (
                 str(site_kind),
-                _BUILTIN_INT(thread_id),
+                _to_int(thread_id),
                 sm_id,
                 cta_id,
-                _BUILTIN_INT(addr),
+                _to_int(addr),
                 cycle_i,
-                _BUILTIN_INT(event_index),
-                _BUILTIN_INT(observed_mask_this_site) & 0xFF,
-                _BUILTIN_INT(due_mask_this_site) & 0xFF,
-                _BUILTIN_INT(trace_expanding_mask_this_site) & 0xFF,
-                _BUILTIN_INT(shared_store_escape_mask_this_site) & 0xFF,
+                _to_int(event_index),
+                _to_int(observed_mask_this_site) & 0xFF,
+                _to_int(due_mask_this_site) & 0xFF,
+                _to_int(trace_expanding_mask_this_site) & 0xFF,
+                _to_int(shared_store_escape_mask_this_site) & 0xFF,
             )
         if family in ("l1d", "l2"):
             return (
                 str(site_kind),
                 str(mem_space or ""),
-                _BUILTIN_INT(thread_id),
+                _to_int(thread_id),
                 sm_id,
                 cta_id,
-                _BUILTIN_INT(addr),
+                _to_int(addr),
                 cycle_i,
-                _BUILTIN_INT(event_index),
-                _BUILTIN_INT(observed_mask_this_site) & 0xFF,
-                _BUILTIN_INT(due_mask_this_site) & 0xFF,
-                _BUILTIN_INT(trace_expanding_mask_this_site) & 0xFF,
+                _to_int(event_index),
+                _to_int(observed_mask_this_site) & 0xFF,
+                _to_int(due_mask_this_site) & 0xFF,
+                _to_int(trace_expanding_mask_this_site) & 0xFF,
             )
         raise ValueError(f"unsupported site_family: {site_family!r}")
 
     rec: Dict[str, Any] = {
         "site_kind": str(site_kind),
-        "thread_id": _BUILTIN_INT(thread_id),
+        "thread_id": _to_int(thread_id),
         "sm_id": sm_id,
         "cta_id": cta_id,
-        "addr": _BUILTIN_INT(addr),
+        "addr": _to_int(addr),
         "cycle": cycle_i,
-        "event_index": _BUILTIN_INT(event_index),
-        "width_bits": _BUILTIN_INT(width_bits),
-        "writer_event_index": _BUILTIN_INT(writer_event_index),
-        "observed_mask_this_site": _BUILTIN_INT(observed_mask_this_site) & 0xFF,
-        "due_mask_this_site": _BUILTIN_INT(due_mask_this_site) & 0xFF,
-        "trace_expanding_mask_this_site": _BUILTIN_INT(trace_expanding_mask_this_site) & 0xFF,
+        "event_index": _to_int(event_index),
+        "width_bits": _to_int(width_bits),
+        "writer_event_index": _to_int(writer_event_index),
+        "observed_mask_this_site": _to_int(observed_mask_this_site) & 0xFF,
+        "due_mask_this_site": _to_int(due_mask_this_site) & 0xFF,
+        "trace_expanding_mask_this_site": _to_int(trace_expanding_mask_this_site) & 0xFF,
     }
     if family == "smem":
         rec[SMEM_SHARED_STORE_ESCAPE_MASK_FIELD] = (
-            _BUILTIN_INT(shared_store_escape_mask_this_site) & 0xFF
+            _to_int(shared_store_escape_mask_this_site) & 0xFF
         )
     elif family in ("l1d", "l2"):
         rec["mem_space"] = str(mem_space or "")

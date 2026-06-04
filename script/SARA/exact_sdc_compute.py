@@ -3,17 +3,17 @@
 
 import argparse
 import bisect
-import concurrent.futures
 import gzip
 import hashlib
 import json
 import math
-import multiprocessing as mp
 import os
 import pickle
 import struct
 import re
+import subprocess
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from functools import lru_cache
 from pathlib import Path
@@ -7477,174 +7477,6 @@ def _parse_component_analyzer_mappings(entries: Sequence[str]) -> Dict[str, Path
     return out
 
 
-def _resolve_batch_worker_count(requested_workers: Any, component_count: int) -> int:
-    workers = int(requested_workers)
-    if workers < 0:
-        raise ValueError("batch_workers must be >= 0")
-    if component_count <= 1:
-        return 1
-    if workers == 0:
-        cpu_count = max(1, int(os.cpu_count() or 1))
-        auto_cap = max(1, min(4, cpu_count // 4 if cpu_count >= 4 else 1))
-        return max(1, min(component_count, auto_cap))
-    return max(1, min(component_count, workers))
-
-
-def _cap_batch_worker_count_for_risk(
-    analyzer_paths: Sequence[Path],
-    worker_count: int,
-) -> int:
-    resolved = int(max(1, worker_count))
-    for path in analyzer_paths:
-        meta = _load_analyzer_meta_sidecar_cached(_path_cache_key(Path(path)))
-        if not meta:
-            try:
-                payload = _json_load_path(Path(path))
-            except Exception:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            meta = payload.get("exact_meta", {})
-        if not isinstance(meta, dict):
-            continue
-        l1d_fault_site_count = int(meta.get("l1d_fault_site_count", 0) or 0)
-        trace_expanding_bits_total = int(
-            meta.get("trace_expanding_bits_total", 0) or 0
-        )
-        trace_expanding_mask_present_count = int(
-            meta.get("trace_expanding_mask_present_count", 0) or 0
-        )
-        if trace_expanding_bits_total >= 4_000_000:
-            return 1
-        if (
-            l1d_fault_site_count >= 500_000
-            or trace_expanding_bits_total >= 3_000_000
-            or trace_expanding_mask_present_count >= 2_000_000
-        ):
-            resolved = min(int(resolved), 2)
-    return int(max(1, resolved))
-
-
-def _prewarm_batch_component_inputs(
-    args: argparse.Namespace,
-    analyzer_paths: Sequence[Path],
-    components: Sequence[str],
-) -> None:
-    seen_analyzers: Set[str] = set()
-    component_set = {str(comp).strip().lower() for comp in components if str(comp).strip()}
-    normalize_trace_coverage = bool(getattr(args, "normalize_trace_coverage", False))
-    analyzer_payload_by_key: Dict[str, Dict[str, Any]] = {}
-    for path in analyzer_paths:
-        path_key = _path_cache_key(path)
-        if path_key in seen_analyzers:
-            continue
-        seen_analyzers.add(path_key)
-        _json_load_path(Path(path_key))
-        analyzer_payload = _load_analyzer_output_for_compute_cached(
-            path_key,
-            normalize_trace_coverage,
-        )
-        if isinstance(analyzer_payload, dict):
-            analyzer_payload_by_key[path_key] = analyzer_payload
-        _trace_expanding_stats_for_analyzer_path(path_key, normalize_trace_coverage)
-
-    if getattr(args, "trace_template", None) is not None:
-        parse_trace_template(Path(args.trace_template))
-    cycle_records: Optional[List[CycleRecord]] = None
-    if getattr(args, "cycles", None) is not None:
-        cycle_records, _cycle_records_meta = load_cycle_records_with_meta(
-            Path(args.cycles),
-            getattr(args, "active_threads_log", None),
-            bool(getattr(args, "allow_missing_active_threads", False)),
-            str(getattr(args, "missing_active_threads_policy", "empty")),
-        )
-    if getattr(args, "active_threads_log", None) is not None:
-        load_shared_scope_thread_ids_log(Path(args.active_threads_log))
-    if getattr(args, "fi_sampling_space_path", None) is not None:
-        _load_fi_sampling_space(Path(args.fi_sampling_space_path))
-
-    if "rf" in {str(comp).strip().lower() for comp in components}:
-        if getattr(args, "regfile_trace", None) is not None:
-            parse_regfile_accesses(Path(args.regfile_trace))
-        if getattr(args, "registers", None) is not None:
-            parse_register_list(str(args.registers))
-        if getattr(args, "trace_template", None) is not None:
-            trace_template_key = _path_cache_key(Path(args.trace_template))
-            parse_trace_template(Path(trace_template_key))
-            needs_addr_context = False
-            for path in analyzer_paths:
-                payload = analyzer_payload_by_key.get(_path_cache_key(path))
-                if isinstance(payload, dict) and _analyzer_rf_requires_addr_trace_context(payload):
-                    needs_addr_context = True
-                    break
-            if needs_addr_context:
-                _load_rf_addr_trace_context_cached(trace_template_key)
-            for path_key, payload in analyzer_payload_by_key.items():
-                if not isinstance(payload.get("read_events"), list):
-                    continue
-                _load_fast_rf_analyzer_indexes_cached(
-                    path_key,
-                    normalize_trace_coverage,
-                )
-                _load_fast_rf_consumer_indexes_cached(
-                    path_key,
-                    normalize_trace_coverage,
-                )
-    if cycle_records is not None and (
-        "rf" in component_set or "smem_rf" in component_set
-    ):
-        thread_rands = parse_spec_list(getattr(args, "thread_rands", None))
-        if thread_rands is not None and len(thread_rands) == 0:
-            thread_rands = None
-        thread_rand_max = None
-        if thread_rands is None:
-            try:
-                thread_rand_max = int(getattr(args, "thread_rand_max", 0))
-            except Exception:
-                thread_rand_max = 0
-            if thread_rand_max <= 0:
-                thread_rand_max = None
-        _thread_cycle_weights(cycle_records, thread_rands, thread_rand_max)
-    if getattr(args, "trace_template", None) is not None and (
-        "l1d" in component_set or "l2" in component_set
-    ):
-        trace_template_key = _path_cache_key(Path(args.trace_template))
-        _load_shared_cache_trace_views_cached(
-            trace_template_key,
-            int(getattr(args, "l1d_line_size_bytes", L1D_LINE_SIZE_BYTES_DEFAULT)),
-            bool(int(getattr(args, "l1d_write_allocate", 0))),
-            int(getattr(args, "l2_line_size_bytes", L2_LINE_SIZE_BYTES_DEFAULT)),
-            bool("l1d" in component_set),
-            bool("l2" in component_set),
-        )
-        trace_expanding_policy = str(getattr(args, "trace_expanding_policy", "masked"))
-        trace_uncovered_mode = str(getattr(args, "trace_uncovered_mode", "legacy_unknown"))
-        trace_expanding_resolution_mode = str(
-            getattr(args, "trace_expanding_resolution_mode", "legacy")
-        )
-        for comp in ("l1d", "l2"):
-            if comp not in component_set:
-                continue
-            field_name = _cache_fault_site_field_name(comp)
-            for path_key, payload in analyzer_payload_by_key.items():
-                if not isinstance(payload.get(field_name), list):
-                    continue
-                _load_filtered_cache_fault_sites_for_compute_cached(
-                    comp,
-                    path_key,
-                    trace_template_key,
-                    normalize_trace_coverage,
-                )
-                _load_cache_site_masks_for_compute_cached(
-                    comp,
-                    path_key,
-                    trace_template_key,
-                    normalize_trace_coverage,
-                    trace_expanding_policy,
-                    trace_uncovered_mode,
-                    trace_expanding_resolution_mode,
-                )
-
 
 def _compute_exact_batch_component(
     comp_args: argparse.Namespace,
@@ -7672,6 +7504,58 @@ def _compute_exact_batch_component(
     }
 
 
+def _run_pickled_batch_component(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--_component-args-pickle", type=Path, required=True)
+    parser.add_argument("--_component-result-json", type=Path, required=True)
+    args = parser.parse_args(list(argv))
+    with Path(args._component_args_pickle).open("rb") as handle:
+        comp_args = pickle.load(handle)
+    result = _compute_exact_batch_component(comp_args)
+    _json_dump_path(Path(args._component_result_json), result)
+    return 0
+
+
+def _compute_exact_batch_component_subprocess(
+    comp_args: argparse.Namespace,
+    *,
+    scratch_dir: Path,
+) -> Dict[str, Any]:
+    """Run one batch component in a fresh interpreter, sequentially.
+
+    The old batch path isolated component state in separate processes. Keep
+    that isolation without reintroducing concurrent component execution: the
+    parent starts exactly one child process,
+    waits for it, then moves to the next component.
+    """
+
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".exact_component_{getattr(comp_args, 'fault_component', 'component')}_",
+        dir=str(scratch_dir),
+    ) as tmp_dir_raw:
+        tmp_dir = Path(tmp_dir_raw)
+        args_pickle = tmp_dir / "args.pkl"
+        result_json = tmp_dir / "result.json"
+        with args_pickle.open("wb") as handle:
+            pickle.dump(comp_args, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--_component-args-pickle",
+                str(args_pickle),
+                "--_component-result-json",
+                str(result_json),
+            ],
+            check=True,
+        )
+        result = _json_load_path(result_json)
+    if not isinstance(result, dict):
+        raise ValueError("batch component subprocess returned non-object result")
+    return result
+
+
 def compute_exact_batch(args: argparse.Namespace) -> Dict[str, Any]:
     components = _normalize_fault_component_sequence(getattr(args, "batch_components", ""))
     analyzer_map = _parse_component_analyzer_mappings(
@@ -7687,8 +7571,6 @@ def compute_exact_batch(args: argparse.Namespace) -> Dict[str, Any]:
     component_payloads: Dict[str, Dict[str, Any]] = {}
     strict_failed_components: List[str] = []
     component_args: List[argparse.Namespace] = []
-    analyzer_paths: List[Path] = []
-
     for comp in components:
         comp_analyzer = analyzer_map.get(str(comp), default_analyzer)
         if comp_analyzer is None:
@@ -7710,50 +7592,16 @@ def compute_exact_batch(args: argparse.Namespace) -> Dict[str, Any]:
             _batch_active_components=tuple(components),
         )
         component_args.append(comp_args)
-        analyzer_paths.append(Path(comp_analyzer))
 
-    batch_workers_requested = int(getattr(args, "batch_workers", 0))
-    batch_workers_resolved = _resolve_batch_worker_count(
-        batch_workers_requested,
-        len(component_args),
-    )
-    if batch_workers_resolved > 1:
-        batch_workers_resolved = _cap_batch_worker_count_for_risk(
-            analyzer_paths,
-            batch_workers_resolved,
-        )
-
+    subprocess_scratch_dir = output_dir / ".exact_component_subprocess"
     results: List[Dict[str, Any]] = []
-    if batch_workers_resolved > 1 and len(component_args) > 1:
-        try:
-            mp_ctx = mp.get_context("fork")
-        except ValueError:
-            mp_ctx = None
-        if mp_ctx is None:
-            batch_workers_resolved = 1
-        else:
-            _prewarm_batch_component_inputs(args, analyzer_paths, components)
-            try:
-                with concurrent.futures.ProcessPoolExecutor(
-                    max_workers=batch_workers_resolved,
-                    mp_context=mp_ctx,
-                ) as executor:
-                    for row in executor.map(_compute_exact_batch_component, component_args):
-                        results.append(dict(row))
-            except Exception as exc:
-                print(
-                    "WARNING: parallel batch exact compute failed; retrying sequentially "
-                    "with 1 worker ({}: {})".format(type(exc).__name__, exc),
-                    file=sys.stderr,
-                )
-                results = []
-                batch_workers_resolved = 1
-
-    if batch_workers_resolved <= 1 or len(results) != len(component_args):
-        results = [
-            _compute_exact_batch_component(comp_args)
-            for comp_args in component_args
-        ]
+    for comp_args in component_args:
+        results.append(
+            _compute_exact_batch_component_subprocess(
+                comp_args,
+                scratch_dir=subprocess_scratch_dir,
+            )
+        )
 
     for row in results:
         comp = str(row.get("fault_component", "")).strip().lower()
@@ -7768,8 +7616,6 @@ def compute_exact_batch(args: argparse.Namespace) -> Dict[str, Any]:
         "components": component_payloads,
         "component_order": list(components),
         "output_dir": str(output_dir),
-        "batch_workers_requested": int(batch_workers_requested),
-        "batch_workers_resolved": int(batch_workers_resolved),
         "strict_failed_components": list(strict_failed_components),
     }
 
@@ -16181,15 +16027,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
-        "--batch-workers",
-        type=int,
-        default=0,
-        help=(
-            "Batch exact worker count. 0 auto-selects up to one worker per "
-            "requested component in --batch-components mode."
-        ),
-    )
-    p.add_argument(
         "--regfile-trace",
         type=Path,
         default=None,
@@ -16442,6 +16279,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     reject_removed_exact_semantic_overrides()
+    if len(sys.argv) > 1 and sys.argv[1] == "--_component-args-pickle":
+        return _run_pickled_batch_component(sys.argv[1:])
     args = build_arg_parser().parse_args()
     args = apply_canonical_exact_semantics(args)
     if getattr(args, "batch_components", None):
