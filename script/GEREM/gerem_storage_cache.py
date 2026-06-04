@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import builtins as _builtins
 import hashlib
 import random
 from collections.abc import MutableMapping
@@ -55,10 +56,11 @@ DATA_HINTS: Tuple[str, ...] = ("data", "payload", "byte")
 NOT_REUSED_HINTS: Tuple[str, ...] = ("never_reused", "not_used", "unused", "dead")
 GEREM_STORAGE_CAMPAIGN_RUNS = campaign_runs_env("GEREM_STORAGE_CAMPAIGN_RUNS", 1000)
 EXPERIMENT_RANDOM_SEED = 2026
-_BUILTIN_INT = int
-_BUILTIN_ISINSTANCE = isinstance
-_BUILTIN_LEN = len
-_BUILTIN_TUPLE = tuple
+_BUILTIN_INT = _builtins.int
+_INT_VALUE = int_value
+_BUILTIN_ISINSTANCE = _builtins.isinstance
+_BUILTIN_LEN = _builtins.len
+_BUILTIN_TUPLE = _builtins.tuple
 
 
 def _stable_campaign_seed(*parts: Any) -> int:
@@ -121,9 +123,9 @@ def _effective_entries(index: Any) -> Iterable[Tuple[Mapping[str, Any], int]]:
     for idx, entry in enumerate(entries):
         if not isinstance(entry, Mapping):
             continue
-        end_cycle = int_value(entry.get("end_cycle"), -1)
+        end_cycle = _INT_VALUE(entry.get("end_cycle"), -1)
         if idx + 1 < len(entries) and isinstance(entries[idx + 1], Mapping):
-            end_cycle = min(end_cycle, int_value(entries[idx + 1].get("start_cycle"), end_cycle))
+            end_cycle = min(end_cycle, _INT_VALUE(entries[idx + 1].get("start_cycle"), end_cycle))
         out.append((entry, int(end_cycle)))
     return out
 
@@ -151,7 +153,7 @@ def _lookup_interval(index: Optional[Mapping[str, Any]], cycle: int) -> Optional
     entry = entries[idx]
     if not isinstance(entry, Mapping):
         return None
-    if int(cycle) < int_value(entry.get("end_cycle"), -1):
+    if int(cycle) < _INT_VALUE(entry.get("end_cycle"), -1):
         return entry
     return None
 
@@ -160,12 +162,12 @@ def _build_interval_index(entries: Iterable[Mapping[str, Any]]) -> Dict[str, Any
     ordered = sorted(
         (dict(entry) for entry in entries if isinstance(entry, Mapping)),
         key=lambda entry: (
-            int_value(entry.get("start_cycle"), 0),
-            int_value(entry.get("end_cycle"), 0),
+            _INT_VALUE(entry.get("start_cycle"), 0),
+            _INT_VALUE(entry.get("end_cycle"), 0),
         ),
     )
     return {
-        "starts": [int_value(entry.get("start_cycle"), 0) for entry in ordered],
+        "starts": [_INT_VALUE(entry.get("start_cycle"), 0) for entry in ordered],
         "entries": ordered,
     }
 
@@ -198,7 +200,7 @@ def _bool_field(record: Mapping[str, Any], key: str) -> Optional[bool]:
 def _mask_union(record: Mapping[str, Any]) -> int:
     mask = 0
     for field in MASK_FIELD_CANDIDATES:
-        mask |= int_value(record.get(field, 0), 0)
+        mask |= _INT_VALUE(record.get(field, 0), 0)
     return mask
 
 
@@ -212,13 +214,13 @@ def _bit_count(value: int) -> int:
 
 def _selected_bits(record: Mapping[str, Any]) -> int:
     for key in ("selected_bits", "bit_count", "fault_bits", "num_bits"):
-        bits = int_value(record.get(key), -1)
+        bits = _INT_VALUE(record.get(key), -1)
         if bits > 0:
             return bits
     live_mask = _mask_union(record)
     if live_mask:
         return _bit_count(live_mask)
-    width_bits = int_value(record.get("width_bits"), 0)
+    width_bits = _INT_VALUE(record.get("width_bits"), 0)
     if width_bits > 0:
         return width_bits
     return 1
@@ -310,7 +312,7 @@ def _is_tag_site(record: Mapping[str, Any], data_bits_per_line: int) -> bool:
     for key in ("line_bit_index", "bit_index_in_line", "bit_offset_in_line", "bit_offset"):
         if key not in record:
             continue
-        bit_offset = int_value(record.get(key), -1)
+        bit_offset = _INT_VALUE(record.get(key), -1)
         if bit_offset >= 0:
             return bit_offset >= data_bits_per_line
     return False
@@ -357,21 +359,21 @@ def _trace_events(trace_template: Optional[Mapping[str, Any]]) -> List[Dict[str,
 
 
 def _event_cycle(record: Mapping[str, Any], fallback: int) -> int:
-    return int_value(record.get("cycle", fallback), fallback)
+    return _INT_VALUE(record.get("cycle", fallback), fallback)
 
 
 def _pred_true(record: Mapping[str, Any]) -> bool:
     pred = record.get("pred")
     if not isinstance(pred, Mapping):
         return True
-    return int_value(pred.get("val", 1), 1) != 0
+    return _INT_VALUE(pred.get("val", 1), 1) != 0
 
 
 def _line_chunks(raw: Mapping[str, Any], line_size_bytes: int) -> List[Tuple[int, Tuple[int, ...]]]:
     addr = raw.get("mem_addr", raw.get("base"))
     if addr is None:
         return []
-    base_addr = int_value(addr, 0)
+    base_addr = _INT_VALUE(addr, 0)
     size_bytes = max(1, access_size_bytes_for_raw_event(raw))
     out: List[Tuple[int, Tuple[int, ...]]] = []
     cur_addr = int(base_addr)
@@ -380,7 +382,7 @@ def _line_chunks(raw: Mapping[str, Any], line_size_bytes: int) -> List[Tuple[int
         line_addr = int(cur_addr // int(line_size_bytes))
         line_offset = int(cur_addr % int(line_size_bytes))
         chunk = min(int(remaining), int(line_size_bytes) - int(line_offset))
-        offsets = tuple(range(int(line_offset), int(line_offset + chunk)))
+        offsets = _BUILTIN_TUPLE(range(int(line_offset), int(line_offset + chunk)))
         out.append((int(line_addr), offsets))
         cur_addr += int(chunk)
         remaining -= int(chunk)
@@ -400,15 +402,15 @@ def _resolve_l1d_seed(sm_id: int, allowed_seeds: Sequence[int]) -> Optional[int]
 def _shader_seeds(component_row: Mapping[str, Any], events: Sequence[Mapping[str, Any]]) -> List[int]:
     shaders = component_row.get("shaders", [])
     if isinstance(shaders, list) and shaders:
-        return sorted({int_value(v, -1) for v in shaders if int_value(v, -1) >= 0})
-    shader_count = int_value(component_row.get("shader_count"), 0)
+        return sorted({_INT_VALUE(v, -1) for v in shaders if _INT_VALUE(v, -1) >= 0})
+    shader_count = _INT_VALUE(component_row.get("shader_count"), 0)
     if shader_count > 0:
         return list(range(shader_count))
     inferred = {
-        int_value(raw.get("sm_id"), -1)
+        _INT_VALUE(raw.get("sm_id"), -1)
         for raw in events
         if canonical_mem_space(raw.get("mem_space") or raw.get("space")) in {"global", "local"}
-        and int_value(raw.get("sm_id"), -1) >= 0
+        and _INT_VALUE(raw.get("sm_id"), -1) >= 0
     }
     return sorted(inferred)
 
@@ -421,10 +423,10 @@ def _simulate_cache_episodes(
     domain_end: int,
 ) -> List[Dict[str, Any]]:
     events = _trace_events(trace_template)
-    line_size_bytes = max(1, int_value(component_row.get("line_size_bytes"), 128))
-    nset = max(1, int_value(component_row.get("nset"), 1))
-    assoc = max(1, int_value(component_row.get("assoc"), 1))
-    write_allocate = int_value(component_row.get("write_allocate"), 1) != 0
+    line_size_bytes = max(1, _INT_VALUE(component_row.get("line_size_bytes"), 128))
+    nset = max(1, _INT_VALUE(component_row.get("nset"), 1))
+    assoc = max(1, _INT_VALUE(component_row.get("assoc"), 1))
+    write_allocate = _INT_VALUE(component_row.get("write_allocate"), 1) != 0
     allowed_seeds = _shader_seeds(component_row, events) if component == "l1d" else [0]
 
     episodes: List[MutableMapping[str, Any]] = []
@@ -543,14 +545,14 @@ def _simulate_cache_episodes(
             continue
 
         if component == "l1d":
-            sm_id = int_value(raw.get("sm_id"), -1)
+            sm_id = _INT_VALUE(raw.get("sm_id"), -1)
             seed = _resolve_l1d_seed(sm_id, allowed_seeds)
             if seed is None:
                 continue
         else:
             seed = 0
 
-        thread_id = int_value(raw.get("thread_id"), -1)
+        thread_id = _INT_VALUE(raw.get("thread_id"), -1)
         should_allocate = kind == "load" or component == "l2" or write_allocate
 
         for line_addr, offsets in chunks:
@@ -575,7 +577,7 @@ def _simulate_cache_episodes(
 
             way_idx = -1
             if episode is not None:
-                way_idx = int_value(episode.get("way_idx"), -1)
+                way_idx = _INT_VALUE(episode.get("way_idx"), -1)
                 if way_idx < 0:
                     for idx, slot_key in enumerate(slots):
                         if slot_key == line_key:
@@ -657,9 +659,9 @@ def _prepare_cache_campaign_state(
     den = max(0.0, _float_value(row.get("domain_total_bits"), 0.0))
     if den <= 0.0:
         raise ValueError("missing component domain for {}".format(component))
-    tag_bits = max(0, int_value(row.get("tag_bits"), 0))
-    include_tag_bits = int_value(row.get("include_tag_bits"), 1) != 0
-    line_size_bytes = max(1, int_value(row.get("line_size_bytes"), 128))
+    tag_bits = max(0, _INT_VALUE(row.get("tag_bits"), 0))
+    include_tag_bits = _INT_VALUE(row.get("include_tag_bits"), 1) != 0
+    line_size_bytes = max(1, _INT_VALUE(row.get("line_size_bytes"), 128))
     cycle_rows = load_cycle_rows(fi_sampling_space, trace_template)
     episodes = _simulate_cache_episodes(
         component=component,
@@ -671,9 +673,9 @@ def _prepare_cache_campaign_state(
     touched_data_offsets = 0
     for episode in episodes:
         slot_key = (
-            int_value(episode.get("seed"), -1),
-            int_value(episode.get("set_idx"), -1),
-            int_value(episode.get("way_idx"), -1),
+            _INT_VALUE(episode.get("seed"), -1),
+            _INT_VALUE(episode.get("set_idx"), -1),
+            _INT_VALUE(episode.get("way_idx"), -1),
         )
         episodes_by_slot.setdefault(slot_key, []).append(dict(episode))
         byte_versions = episode.get("byte_versions", {})
@@ -695,19 +697,19 @@ def _prepare_cache_campaign_state(
             for offset, version_list in byte_versions.items():
                 if not isinstance(version_list, list):
                     continue
-                version_lookup[int_value(offset, -1)] = _build_interval_index(version_list)
+                version_lookup[_INT_VALUE(offset, -1)] = _build_interval_index(version_list)
             episode["byte_version_index"] = version_lookup
     seed_choices = _shader_seeds(row, _trace_events(trace_template)) if component == "l1d" else [0]
     return {
         "denominator": float(den),
         "cycle_sampler": _build_cycle_sampler(cycle_rows),
         "seed_choices": list(seed_choices or [0]),
-        "domain_bits_per_seed": max(1, int_value(row.get("domain_bits_per_seed"), 1)),
+        "domain_bits_per_seed": max(1, _INT_VALUE(row.get("domain_bits_per_seed"), 1)),
         "line_size_bytes": int(line_size_bytes),
         "data_bits_per_line": int(line_size_bytes * 8),
         "tag_bits_per_line": int(tag_bits if include_tag_bits else 0),
-        "nset": max(1, int_value(row.get("nset"), 1)),
-        "assoc": max(1, int_value(row.get("assoc"), 1)),
+        "nset": max(1, _INT_VALUE(row.get("nset"), 1)),
+        "assoc": max(1, _INT_VALUE(row.get("assoc"), 1)),
         "slot_lookup": slot_lookup,
         "episode_count": len(episodes),
         "touched_data_offsets": int(touched_data_offsets),
@@ -722,15 +724,15 @@ def _classify_cache_fault(
     seed: int,
     bit_index: int,
 ) -> str:
-    data_bits = max(1, int_value(state.get("data_bits_per_line"), 8))
-    tag_bits = max(0, int_value(state.get("tag_bits_per_line"), 0))
+    data_bits = max(1, _INT_VALUE(state.get("data_bits_per_line"), 8))
+    tag_bits = max(0, _INT_VALUE(state.get("tag_bits_per_line"), 0))
     line_bits = int(data_bits + tag_bits)
     if line_bits <= 0:
         return "benign"
     slot_index = int(bit_index) // int(line_bits)
-    set_idx = slot_index // max(1, int_value(state.get("assoc"), 1))
-    way_idx = slot_index % max(1, int_value(state.get("assoc"), 1))
-    if set_idx < 0 or set_idx >= max(1, int_value(state.get("nset"), 1)):
+    set_idx = slot_index // max(1, _INT_VALUE(state.get("assoc"), 1))
+    way_idx = slot_index % max(1, _INT_VALUE(state.get("assoc"), 1))
+    if set_idx < 0 or set_idx >= max(1, _INT_VALUE(state.get("nset"), 1)):
         return "benign"
     episode = _lookup_interval(state.get("slot_lookup", {}).get((int(seed), int(set_idx), int(way_idx))), int(cycle))
     if episode is None:
@@ -745,13 +747,13 @@ def _classify_cache_fault(
     version = _lookup_interval(version_index.get(int(byte_offset)), int(cycle))
     if version is None:
         return "benign"
-    version_start = int_value(version.get("start_cycle"), 0)
-    is_dirty = int_value(version.get("dirty"), 0) != 0
+    version_start = _INT_VALUE(version.get("start_cycle"), 0)
+    is_dirty = _INT_VALUE(version.get("dirty"), 0) != 0
     end_reason = str(version.get("end_reason", "")).strip().lower()
     if is_dirty and end_reason == "evict":
-        dcr_end = int_value(version.get("end_cycle"), version_start)
+        dcr_end = _INT_VALUE(version.get("end_cycle"), version_start)
     else:
-        dcr_end = int_value(version.get("last_load_cycle"), -1)
+        dcr_end = _INT_VALUE(version.get("last_load_cycle"), -1)
     return "dcr" if int(cycle) < int(dcr_end) and int(cycle) >= int(version_start) else "benign"
 
 
@@ -767,7 +769,7 @@ def _run_cache_campaign(
     seed_choices = state.get("seed_choices", [0])
     if not isinstance(seed_choices, list) or not seed_choices:
         seed_choices = [0]
-    per_seed_bits = max(1, int_value(state.get("domain_bits_per_seed"), 1))
+    per_seed_bits = max(1, _INT_VALUE(state.get("domain_bits_per_seed"), 1))
     for _ in range(max(1, int(campaign_runs))):
         cycle = _sample_cycle(rng, list(cycles), list(cumulative), int(total))
         seed = int(seed_choices[rng.randrange(len(seed_choices))])
@@ -781,10 +783,10 @@ def _run_cache_all_fault_points(state: Mapping[str, Any]) -> Dict[str, Any]:
     seed_choices = state.get("seed_choices", [0])
     if not isinstance(seed_choices, list) or not seed_choices:
         seed_choices = [0]
-    per_seed_bits = max(1, int_value(state.get("domain_bits_per_seed"), 1))
+    per_seed_bits = max(1, _INT_VALUE(state.get("domain_bits_per_seed"), 1))
     domain_points = int(cycle_total) * len(seed_choices) * int(per_seed_bits)
-    data_bits = max(1, int_value(state.get("data_bits_per_line"), 8))
-    tag_bits = max(0, int_value(state.get("tag_bits_per_line"), 0))
+    data_bits = max(1, _INT_VALUE(state.get("data_bits_per_line"), 8))
+    tag_bits = max(0, _INT_VALUE(state.get("tag_bits_per_line"), 0))
 
     dcr_bits = 0
     ebc_bits = 0
@@ -792,24 +794,24 @@ def _run_cache_all_fault_points(state: Mapping[str, Any]) -> Dict[str, Any]:
     if isinstance(slot_lookup, Mapping):
         for episode_index in slot_lookup.values():
             for episode, episode_end in _effective_entries(episode_index):
-                episode_start = int_value(episode.get("start_cycle"), 0)
+                episode_start = _INT_VALUE(episode.get("start_cycle"), 0)
                 if tag_bits > 0 and episode_end > episode_start:
                     ebc_bits += _cycle_weight_from_sampler(state.get("cycle_sampler"), episode_start, episode_end) * tag_bits
                 version_lookup = episode.get("byte_version_index", {})
                 if not isinstance(version_lookup, Mapping):
                     continue
                 for byte_offset, version_index in version_lookup.items():
-                    bits_in_byte = _valid_bits_for_byte(int_value(byte_offset, -1), data_bits)
+                    bits_in_byte = _valid_bits_for_byte(_INT_VALUE(byte_offset, -1), data_bits)
                     if bits_in_byte <= 0:
                         continue
                     for version, version_end in _effective_entries(version_index):
-                        version_start = int_value(version.get("start_cycle"), 0)
-                        is_dirty = int_value(version.get("dirty"), 0) != 0
+                        version_start = _INT_VALUE(version.get("start_cycle"), 0)
+                        is_dirty = _INT_VALUE(version.get("dirty"), 0) != 0
                         end_reason = str(version.get("end_reason", "")).strip().lower()
                         if is_dirty and end_reason == "evict":
-                            dcr_end = int_value(version.get("end_cycle"), version_start)
+                            dcr_end = _INT_VALUE(version.get("end_cycle"), version_start)
                         else:
-                            dcr_end = int_value(version.get("last_load_cycle"), -1)
+                            dcr_end = _INT_VALUE(version.get("last_load_cycle"), -1)
                         start_cycle = max(version_start, episode_start)
                         end_cycle = min(int(version_end), int(episode_end), int(dcr_end))
                         if end_cycle <= start_cycle:
@@ -899,8 +901,8 @@ def _predict_cache_fallback(
 ) -> Dict[str, Any]:
     row = _component_domain(fi_sampling_space, component)
     den = max(0.0, _float_value(row.get("domain_total_bits"), 0.0))
-    tag_bits = max(0, int_value(row.get("tag_bits"), 0))
-    line_size_bytes = max(1, int_value(row.get("line_size_bytes"), 128))
+    tag_bits = max(0, _INT_VALUE(row.get("tag_bits"), 0))
+    line_size_bytes = max(1, _INT_VALUE(row.get("line_size_bytes"), 128))
     data_bits_per_line = line_size_bytes * 8
     sites = _site_list(analyzer_output, component)
 
