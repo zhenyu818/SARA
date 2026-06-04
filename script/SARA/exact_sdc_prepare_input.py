@@ -116,11 +116,16 @@ def _compact_event_for_analyzer(event: Any) -> Any:
     if not isinstance(event, dict):
         return event
 
+    # Trace capture can attach internal metadata using non-string keys (for example
+    # tuple keys). Analyzer input is a JSON-like public schema, so compacting must
+    # ignore those internal keys and must not sort heterogeneous key types.
+    string_event = {key: value for key, value in event.items() if isinstance(key, str)}
+
     out: Dict[str, Any] = {}
     for key in _EVENT_KEEP_FIELDS:
-        if key not in event:
+        if key not in string_event:
             continue
-        value = event.get(key)
+        value = string_event.get(key)
         if value is None:
             continue
         if key in _EVENT_INT_FIELDS:
