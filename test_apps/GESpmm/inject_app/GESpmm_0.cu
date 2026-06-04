@@ -10,7 +10,7 @@
 #include <time.h>
 #include <vector>
 
-#define SEED 42
+#define SEED 2026
 #define TILE_ROW 4
 
 #define checkCudaError(a)                                                                                              \

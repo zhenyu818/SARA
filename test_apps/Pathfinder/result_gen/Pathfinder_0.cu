@@ -19,7 +19,7 @@ float init_time = 0, mem_alloc_time = 0, h2d_time = 0, kernel_time = 0, d2h_time
 #define DEVICE 0
 #define HALO 1 // halo width along one direction when advancing to the next iteration
 
-#define M_SEED 3415
+#define M_SEED 2026
 
 //#define BENCH_PRINT
 

@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define D_SEED 1357
+#define D_SEED 2026
 #define BLOCK_SIZE 256
 
 #define CUDA_CHECK(call)                                                                                               \

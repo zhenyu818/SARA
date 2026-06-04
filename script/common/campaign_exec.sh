@@ -101,7 +101,10 @@ FI_ANALYZER_OUTPUT="${FI_ANALYZER_OUTPUT:-}"
 FI_RF_FAULT_MODEL="${FI_RF_FAULT_MODEL:-persistent}"
 FI_ADDR_DUE_MODE="${FI_ADDR_DUE_MODE:-none}"
 FI_TRACE_EXPANDING_POLICY="${FI_TRACE_EXPANDING_POLICY:-masked}"
-FI_SEED_BASE="${FI_SEED_BASE:-0}"
+# Public artifact reproducibility seed. Keep fixed: do not derive it from
+# wall-clock time, shell random state, OS entropy, or user-provided environment.
+EXPERIMENT_RANDOM_SEED=2026
+FI_SEED_BASE=2026
 FI_GOLDEN_LOG="${FI_GOLDEN_LOG:-}"
 FI_OUTPUT_SPEC="${FI_OUTPUT_SPEC:-}"
 FI_OUTPUT_ORACLE_TOL_POLICY="${FI_OUTPUT_ORACLE_TOL_POLICY:-{}}"
@@ -111,8 +114,106 @@ FI_OUTPUT_ORACLE_MODE="${FI_OUTPUT_ORACLE_MODE:-single}" # single|off
 FI_TRIAL_COUNTER=0
 CURRENT_TRIAL_ID=0
 CURRENT_TRIAL_SEED=0
+PRNG_STATE=${EXPERIMENT_RANDOM_SEED}
+RAND_VALUE=""
 FI_ACTIVE_THREADS_INDEX=""
 FI_REG_UID_MAP_FILE=""
+
+init_deterministic_prng() {
+    local seed="${1:-2026}"
+    local stream="${2:-0}"
+    if ! [[ "${seed}" =~ ^-?[0-9]+$ ]]; then
+        seed=2026
+    fi
+    if ! [[ "${stream}" =~ ^-?[0-9]+$ ]]; then
+        stream=0
+    fi
+    PRNG_STATE=$(( (seed + stream * 1000003 + 0x9e3779b9) & 0x7fffffff ))
+    if (( PRNG_STATE <= 0 )); then
+        PRNG_STATE=2026
+    fi
+}
+
+rand_next() {
+    PRNG_STATE=$(( (1103515245 * PRNG_STATE + 12345) & 0x7fffffff ))
+    if (( PRNG_STATE <= 0 )); then
+        PRNG_STATE=2026
+    fi
+    RAND_VALUE="${PRNG_STATE}"
+}
+
+rand_range() {
+    local min_v="$1"
+    local max_v="$2"
+    local span raw
+    if ! [[ "${min_v}" =~ ^-?[0-9]+$ && "${max_v}" =~ ^-?[0-9]+$ ]]; then
+        RAND_VALUE="0"
+        return
+    fi
+    if (( max_v < min_v )); then
+        RAND_VALUE="${min_v}"
+        return
+    fi
+    span=$(( max_v - min_v + 1 ))
+    rand_next
+    raw="${RAND_VALUE}"
+    RAND_VALUE=$(( min_v + (raw % span) ))
+}
+
+rand_unique_range_colon() {
+    local min_v="$1"
+    local max_v="$2"
+    local count="$3"
+    local span pick
+    local -a out=()
+    local -A seen=()
+    if ! [[ "${count}" =~ ^[0-9]+$ ]] || (( count <= 0 )); then
+        count=1
+    fi
+    if ! [[ "${min_v}" =~ ^-?[0-9]+$ && "${max_v}" =~ ^-?[0-9]+$ ]] || (( max_v < min_v )); then
+        RAND_VALUE="${min_v}"
+        return
+    fi
+    span=$(( max_v - min_v + 1 ))
+    if (( count > span )); then
+        count="${span}"
+    fi
+    while (( ${#out[@]} < count )); do
+        rand_range "${min_v}" "${max_v}"
+        pick="${RAND_VALUE}"
+        if [[ -z "${seen[${pick}]+x}" ]]; then
+            seen["${pick}"]=1
+            out+=("${pick}")
+        fi
+    done
+    local IFS=:
+    RAND_VALUE="${out[*]}"
+}
+
+rand_choose_words() {
+    local -a items=("$@")
+    local idx
+    if (( ${#items[@]} == 0 )); then
+        RAND_VALUE=""
+        return
+    fi
+    rand_range 0 $((${#items[@]} - 1))
+    idx="${RAND_VALUE}"
+    RAND_VALUE="${items[${idx}]}"
+}
+
+rand_nonempty_file_line() {
+    local file="$1"
+    local count target
+    count="$(awk 'NF {n++} END {print n+0}' "${file}" 2>/dev/null)"
+    if ! [[ "${count}" =~ ^[0-9]+$ ]] || (( count <= 0 )); then
+        RAND_VALUE=""
+        return
+    fi
+    rand_range 1 "${count}"
+    target="${RAND_VALUE}"
+    RAND_VALUE="$(awk -v target="${target}" 'NF {n++; if (n == target) {print; exit}}' "${file}" | tr -d '\r')"
+}
 
 set_config_opt() {
     local opt="$1"
@@ -154,18 +255,18 @@ set_config_opt() {
 
 choose_total_cycle_rand() {
     if [[ "$profile" -eq 1 ]] || [[ "$profile" -eq 2 ]] || [[ "$profile" -eq 3 ]]; then
-        echo "-1"
+        RAND_VALUE="-1"
         return 0
     fi
     if [[ -f "${CYCLES_FILE}" && -s "${CYCLES_FILE}" ]]; then
-        shuf "${CYCLES_FILE}" -n 1
+        rand_nonempty_file_line "${CYCLES_FILE}"
         return 0
     fi
     if [[ "${CYCLES}" =~ ^[0-9]+$ ]] && [[ "${CYCLES}" -gt 0 ]]; then
-        shuf -i 0-"${CYCLES}" -n 1
+        rand_range 0 "${CYCLES}"
         return 0
     fi
-    echo "0"
+    RAND_VALUE="0"
 }
 
 sanitize_run_settings() {
@@ -636,35 +737,42 @@ initialize_config() {
     # 0:RF, 1:local_mem, 2:shared_mem, 3:L1D_cache, 4:L1C_cache, 5:L1T_cache, 6:L2_cache, 11:gmem
     # random component to flip from COMPONENT_SET
     while true; do
-        components_to_flip=$(shuf -e ${COMPONENT_SET} -n 1)
+        rand_choose_words ${COMPONENT_SET}
+        components_to_flip="${RAND_VALUE}"
         # random number for choosing a random thread after thread_rand % #threads operation in gpgpu-sim
         tmax=${THREAD_RAND_MAX}
         if (( tmax <= 0 )); then tmax=6000; fi
         tmax=$(( tmax > 0 ? tmax - 1 : 0 ))
-        thread_rand=$(shuf -i 0-${tmax} -n 1)
+        rand_range 0 "${tmax}"
+        thread_rand="${RAND_VALUE}"
         # random number for choosing a random warp after warp_rand % #warp operation in gpgpu-sim
         wmax=${WARP_RAND_MAX}
         if (( wmax <= 0 )); then wmax=6000; fi
         wmax=$(( wmax > 0 ? wmax - 1 : 0 ))
-        warp_rand=$(shuf -i 0-${wmax} -n 1)
+        rand_range 0 "${wmax}"
+        warp_rand="${RAND_VALUE}"
         # random cycle for fault injection
-        total_cycle_rand="$(choose_total_cycle_rand)"
+        choose_total_cycle_rand
+        total_cycle_rand="${RAND_VALUE}"
         # Randomize REGISTER_NAME per injection if register list is available
         if [[ -f "register_used.txt" && -s "register_used.txt" ]]; then
-            REGISTER_NAME=$(shuf -n 1 register_used.txt | tr -d '\r')
+            rand_nonempty_file_line register_used.txt
+            REGISTER_NAME="${RAND_VALUE}"
         fi
         # in which registers to inject the bit flip
-        # register_rand_n="$(shuf -i 1-${MAX_REGISTERS_USED} -n 1)"; register_rand_n="${register_rand_n//$'\n'/:}"
+        # Register index is fixed when REGISTER_NAME is selected from register_used.txt.
         register_rand_n=1
         # example: if -i 1-32 -n 2 then the two commands below will create a value with 2 random numbers, between [1,32] like 3:21. Meaning it will flip 3 and 21 bits.
         bitflip_width="$(component_bitflip_width "${components_to_flip}")"
         if ! [[ "${bitflip_width}" =~ ^[0-9]+$ ]] || (( bitflip_width <= 0 )); then
             bitflip_width=32
         fi
-        reg_bitflip_rand_n=$(shuf -i 1-${bitflip_width} -n ${INJECT_BIT_FLIP_COUNT} | paste -sd:)
+        rand_unique_range_colon 1 "${bitflip_width}" "${INJECT_BIT_FLIP_COUNT}"
+        reg_bitflip_rand_n="${RAND_VALUE}"
         # same format like reg_bitflip_rand_n but for local memory bit flips
         if (( LMEM_SIZE_BITS > 0 )); then
-            local_mem_bitflip_rand_n=$(shuf -i 1-${LMEM_SIZE_BITS} -n ${INJECT_BIT_FLIP_COUNT} | paste -sd:)
+            rand_unique_range_colon 1 "${LMEM_SIZE_BITS}" "${INJECT_BIT_FLIP_COUNT}"
+            local_mem_bitflip_rand_n="${RAND_VALUE}"
         else
             local_mem_bitflip_rand_n=1
         fi
@@ -672,28 +780,30 @@ initialize_config() {
         bmax=${BLOCK_RAND_MAX}
         if (( bmax <= 0 )); then bmax=6000; fi
         bmax=$(( bmax > 0 ? bmax - 1 : 0 ))
-        block_rand=$(shuf -i 0-${bmax} -n 1)
+        rand_range 0 "${bmax}"
+        block_rand="${RAND_VALUE}"
         # same format like reg_bitflip_rand_n but for shared memory bit flips
         if (( SMEM_SIZE_BITS > 0 )); then
-            shared_mem_bitflip_rand_n=$(shuf -i 1-${SMEM_SIZE_BITS} -n ${INJECT_BIT_FLIP_COUNT} | paste -sd:)
+            rand_unique_range_colon 1 "${SMEM_SIZE_BITS}" "${INJECT_BIT_FLIP_COUNT}"
+            shared_mem_bitflip_rand_n="${RAND_VALUE}"
         else
             shared_mem_bitflip_rand_n=1
         fi
         # randomly select one or more shaders for L1 data cache fault injections
-        l1d_shader_rand_n="$(shuf -e ${SHADER_USED} -n 1)"; l1d_shader_rand_n="${l1d_shader_rand_n//$'\n'/:}"
+        rand_choose_words ${SHADER_USED}; l1d_shader_rand_n="${RAND_VALUE//$'\n'/:}"
         # same format like reg_bitflip_rand_n but for L1 data cache bit flips
-        l1d_cache_bitflip_rand_n=$(shuf -i 1-${L1D_SIZE_BITS} -n 1 | paste -sd:)
+        rand_unique_range_colon 1 "${L1D_SIZE_BITS}" 1; l1d_cache_bitflip_rand_n="${RAND_VALUE}"
         # randomly select one or more shaders for L1 constant cache fault injections
-        l1c_shader_rand_n="$(shuf -e ${SHADER_USED} -n 1)"; l1c_shader_rand_n="${l1c_shader_rand_n//$'\n'/:}"
+        rand_choose_words ${SHADER_USED}; l1c_shader_rand_n="${RAND_VALUE//$'\n'/:}"
         # same format like reg_bitflip_rand_n but for L1 constant cache bit flips
-        l1c_cache_bitflip_rand_n=$(shuf -i 1-${L1C_SIZE_BITS} -n 1 | paste -sd:)
+        rand_unique_range_colon 1 "${L1C_SIZE_BITS}" 1; l1c_cache_bitflip_rand_n="${RAND_VALUE}"
         # randomly select one or more shaders for L1 texture cache fault injections
-        l1t_shader_rand_n="$(shuf -e ${SHADER_USED} -n 1)"; l1t_shader_rand_n="${l1t_shader_rand_n//$'\n'/:}"
+        rand_choose_words ${SHADER_USED}; l1t_shader_rand_n="${RAND_VALUE//$'\n'/:}"
         # same format like reg_bitflip_rand_n but for L1 texture cache bit flips
-        l1t_cache_bitflip_rand_n=$(shuf -i 1-${L1T_SIZE_BITS} -n 1 | paste -sd:)
+        rand_unique_range_colon 1 "${L1T_SIZE_BITS}" 1; l1t_cache_bitflip_rand_n="${RAND_VALUE}"
         # same format like reg_bitflip_rand_n but for L2 cache bit flips
-        l2_cache_bitflip_rand_n=$(shuf -i 1-${L2_SIZE_BITS} -n 1 | paste -sd:)
-        gmem_byte_seed=$(shuf -i 0-2147483646 -n 1)
+        rand_unique_range_colon 1 "${L2_SIZE_BITS}" 1; l2_cache_bitflip_rand_n="${RAND_VALUE}"
+        rand_range 0 2147483646; gmem_byte_seed="${RAND_VALUE}"
         gmem_target_addr=18446744073709551615
         if [[ "${components_to_flip}" == "11" && -n "${FI_ANALYZER_OUTPUT}" && -f "${FI_ANALYZER_OUTPUT}" ]]; then
             gmem_target_addr="$(
@@ -918,11 +1028,8 @@ serial_execution() {
     mkdir "${TMP_DIR}${run_index}" > /dev/null 2>&1
     CURRENT_TRIAL_ID=$((FI_TRIAL_COUNTER + 1))
     FI_TRIAL_COUNTER=${CURRENT_TRIAL_ID}
-    if [[ "${FI_SEED_BASE}" =~ ^-?[0-9]+$ ]]; then
-        CURRENT_TRIAL_SEED=$((FI_SEED_BASE + CURRENT_TRIAL_ID))
-    else
-        CURRENT_TRIAL_SEED="${CURRENT_TRIAL_ID}"
-    fi
+    CURRENT_TRIAL_SEED="${FI_SEED_BASE}"
+    init_deterministic_prng "${CURRENT_TRIAL_SEED}" "${CURRENT_TRIAL_ID}"
     initialize_config
     set_config_opt "-run_uid" "t${CURRENT_TRIAL_ID}_r${run_index}"
     cp ${CONFIG_FILE} "${TMP_DIR}${run_index}/${CONFIG_FILE}${local_index}" # save state

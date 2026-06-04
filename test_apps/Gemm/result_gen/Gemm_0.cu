@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#define GEMM_SEED 6432
+#define GEMM_SEED 2026
 
 #define CUDA_CHECK(call)                                                                                               \
     do {                                                                                                               \

@@ -228,6 +228,7 @@ def write_summary_csv(
     output_root=None,
 ):
     root = output_root or os.environ.get("TEST_RESULT_ROOT") or "test_result"
+    fi_seed = "2026"
     out_dir = os.path.join(root, app)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(
@@ -244,9 +245,10 @@ def write_summary_csv(
             if injection_time_seconds is not None
             else ""
         ),
+        "FI Seed": fi_seed,
     }
 
-    fieldnames = ["Masked", "SDC", "DUE", "Injection Time (s)"]
+    fieldnames = ["Masked", "SDC", "DUE", "Injection Time (s)", "FI Seed"]
     out_path_tmp = out_path + ".tmp"
     with open(out_path_tmp, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)

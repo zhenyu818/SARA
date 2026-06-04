@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define M_SEED 1745
+#define M_SEED 2026
 
 #define CUDA_CHECK(call)                                                                                               \
     do {                                                                                                               \

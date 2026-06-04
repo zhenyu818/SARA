@@ -6,7 +6,7 @@
 #include <random>
 #include <vector>
 
-#define HOST_RANDOM_SEED 4124
+#define HOST_RANDOM_SEED 2026
 #define LATENT_FACTORS 8
 #define BLOCK_SIZE 256
 

@@ -8,7 +8,7 @@
 #include <vector>
 
 #define BLOCK_SIZE 32
-#define M_SEED 9927
+#define M_SEED 2026
 
 #define CUDA_CHECK(call)                                                                                               \
     do {                                                                                                               \

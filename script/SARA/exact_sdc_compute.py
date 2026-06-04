@@ -861,8 +861,7 @@ def parse_register_list(spec: str) -> List[str]:
         vals = [line.strip() for line in p.read_text().splitlines() if line.strip()]
     else:
         vals = [tok.strip() for tok in spec.replace(",", ":").split(":") if tok.strip()]
-    # Keep duplicates to mirror FI's line-sampling semantics:
-    # `shuf -n 1 register_used.txt` samples rows, so duplicate rows carry weight.
+    # Keep duplicates to mirror FI's row-weighted register selection semantics.
     return list(vals)
 
 

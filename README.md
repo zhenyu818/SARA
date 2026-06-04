@@ -130,6 +130,12 @@ Environment variables used by the README examples:
 | `RESULT_ROOT` | Final result root. The README Docker commands set it to `$PWD/sara-results`, so results are saved inside the repository. |
 | `WORK_ROOT` | Temporary scratch root for the current invocation. If omitted, the runner uses `.work/` under the repository and cleans it according to `--keep-intermediate` / `--discard-intermediate`. |
 
+Reproducibility seed policy: all experiment randomness is fixed to the public
+seed `2026`. This includes benchmark input generation, FI injection-point
+selection, SARA analyzer validation sampling, and GEREM sample-campaign
+selection. The seed is fixed in the artifact rather than selected per benchmark
+or per method.
+
 ## Interactive mode
 
 To use the interactive menu, run `run_experiment.sh` from an interactive terminal and omit `--arch` and `--method`:

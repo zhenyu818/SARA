@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define M_SEED 1463
+#define M_SEED 2026
 #define BLOCK_SIZE 256
 
 // kernel1: dot product

@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define M_SEED 4525
+#define M_SEED 2026
 #define BLOCK_SIZE 256
 #define MAX_MASK_WIDTH 10
 #define TILE_SIZE BLOCK_SIZE

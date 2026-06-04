@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 
-#define M_SEED 2243
+#define M_SEED 2026
 #define M_BLOCK_SIZE 1024
 
 /*

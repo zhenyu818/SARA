@@ -55,6 +55,7 @@ _BUILTIN_LIST = _builtins.list
 _BUILTIN_MAX = _builtins.max
 _BUILTIN_MIN = _builtins.min
 _BUILTIN_TUPLE = _builtins.tuple
+EXPERIMENT_RANDOM_SEED = 2026
 
 import cProfile
 import gzip
@@ -66,7 +67,6 @@ import math
 import os
 import pickle
 import pstats
-import random
 import re
 import struct
 import sys
@@ -563,6 +563,18 @@ def _linux_mem_available_bytes() -> Optional[int]:
     except Exception:
         return None
     return None
+
+
+def deterministic_seeded_index(length: int, *parts: Any) -> int:
+    if length <= 0:
+        return 0
+    digest = hashlib.blake2b(digest_size=8)
+    digest.update(str(EXPERIMENT_RANDOM_SEED).encode("utf-8"))
+    digest.update(b"\0")
+    for part in parts:
+        digest.update(str(part).encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+    return int.from_bytes(digest.digest(), byteorder="big", signed=False) % int(length)
 
 
 def coerce_width_bits(
@@ -6884,7 +6896,17 @@ def propagate_control_taint_backward(
         dedup_valid = True
         if thread_dedup_validate and group_tids[1:]:
             thread_dedup_validate_checks += 1
-            sampled_tid = int(random.choice(group_tids[1:]))
+            sampled_candidates = group_tids[1:]
+            sampled_tid = int(
+                sampled_candidates[
+                    deterministic_seeded_index(
+                        len(sampled_candidates),
+                        "thread_dedup_validate",
+                        thread_dedup_validate_checks,
+                        tuple(group_tids),
+                    )
+                ]
+            )
             sampled_events = events_by_thread[sampled_tid]
             sampled_snapshot = _build_thread_rec_map_snapshot(sampled_events, rec_map)
             (

@@ -6,7 +6,7 @@
 
 #define RADIUS 7
 #define BLOCK_SIZE 256
-#define M_SEED 3031
+#define M_SEED 2026
 
 __global__ void stencil_1d(const int *__restrict__ in, int *__restrict__ out, int length) {
     __shared__ int temp[BLOCK_SIZE + 2 * RADIUS];

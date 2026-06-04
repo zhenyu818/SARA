@@ -1,4 +1,4 @@
-#define SEED 4364
+#define SEED 2026
 
 #include <cuda_runtime.h>
 #include <math.h>

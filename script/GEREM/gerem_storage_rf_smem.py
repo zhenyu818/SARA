@@ -48,6 +48,7 @@ except ImportError:
 MASKING_OPCODE_PREFIXES = ("max", "min")
 MASKING_EVENT_KINDS = {"branch", "loop_branch"}
 GEREM_STORAGE_CAMPAIGN_RUNS = campaign_runs_env("GEREM_STORAGE_CAMPAIGN_RUNS", 1000)
+EXPERIMENT_RANDOM_SEED = 2026
 _BUILTIN_INT = int
 _BUILTIN_ISINSTANCE = isinstance
 _BUILTIN_LEN = len
@@ -56,6 +57,8 @@ _BUILTIN_TUPLE = tuple
 
 def _stable_campaign_seed(*parts: Any) -> int:
     digest = hashlib.blake2b(digest_size=8)
+    digest.update(str(EXPERIMENT_RANDOM_SEED).encode("utf-8"))
+    digest.update(b"\0")
     for part in parts:
         digest.update(str(part).encode("utf-8", errors="replace"))
         digest.update(b"\0")

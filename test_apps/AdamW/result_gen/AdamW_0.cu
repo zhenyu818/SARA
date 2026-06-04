@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define RANDOM_SEED 12345
+#define RANDOM_SEED 2026
 
 void cudaCheck(cudaError_t err) {
     if (err != cudaSuccess) {

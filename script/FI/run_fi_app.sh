@@ -36,10 +36,11 @@ GPU_ARCH="${GPU_ARCH:-auto}" # auto | sm_XX
 RF_FAULT_MODEL="${RF_FAULT_MODEL:-persistent}"
 ANALYZER_ADDR_DUE_MODE="${ANALYZER_ADDR_DUE_MODE:-none}"
 TRACE_EXPANDING_POLICY="${TRACE_EXPANDING_POLICY:-masked}"
-FI_SEED_BASE="${FI_SEED_BASE:-0}"
+# Public artifact reproducibility seed. Keep fixed across run_experiment.sh runs.
+FI_SEED_BASE=2026
 FI_LOG_ROOT="${FI_LOG_ROOT:-exact_sdc_runs}"
 FI_COMPARE_INPUT_ROOT="${FI_COMPARE_INPUT_ROOT:-exact_sdc_runs_all}"
-CAMPAIGN_EXEC_SCRIPT="${CAMPAIGN_EXEC_SCRIPT:-${COMMON_DIR}/campaign_exec.sh}"
+CAMPAIGN_EXEC_TEMPLATE="${CAMPAIGN_EXEC_SCRIPT:-${COMMON_DIR}/campaign_exec.sh}"
 OUTPUT_ORACLE_TOL_POLICY="${OUTPUT_ORACLE_TOL_POLICY:-{}}"
 OUTPUT_ORACLE_TOL_POLICY_BASE="${OUTPUT_ORACLE_TOL_POLICY}"
 OUTPUT_ORACLE_TIMEOUT_EXIT_STATUSES="${OUTPUT_ORACLE_TIMEOUT_EXIT_STATUSES:-124:137}"
@@ -866,11 +867,15 @@ main() {
 
 
         # Read campaign_exec.sh contents into a variable
-        campaign_file="${CAMPAIGN_EXEC_SCRIPT}"
-        if [[ ! -f "$campaign_file" ]]; then
-            echo "Error: campaign_exec.sh not found: $campaign_file" >&2
+        campaign_template="${CAMPAIGN_EXEC_TEMPLATE}"
+        if [[ ! -f "$campaign_template" ]]; then
+            echo "Error: campaign_exec.sh not found: $campaign_template" >&2
             exit 1
         fi
+        campaign_file="${FI_LOG_ROOT}/${TEST_APP_NAME}/campaign_exec_${COMPONENT_SET}.sh"
+        mkdir -p "$(dirname "${campaign_file}")"
+        cp -f "${campaign_template}" "${campaign_file}"
+        chmod +x "${campaign_file}"
         bash "${COMMON_DIR}/generate_cycles.sh" $GLOBAL_CYCLES $GLOBAL_CYCLES
         if [ $? -ne 0 ]; then
             echo "Error: generate_cycles.sh failed." >&2
@@ -1014,7 +1019,7 @@ main() {
         # Run in background; do not print logs to console
         injection_start_ns="$(date +%s%N)"
         : > inst_exec.log
-        bash "${CAMPAIGN_EXEC_SCRIPT}" > inst_exec.log 2>&1 &
+        bash "${campaign_file}" > inst_exec.log 2>&1 &
         CMD_PID=$!
 
         trap cleanup INT

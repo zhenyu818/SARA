@@ -7,7 +7,7 @@
 #include <vector>
 
 #ifndef RNG_SEED
-#define RNG_SEED 4837
+#define RNG_SEED 2026
 #endif
 
 #define CUDA_CHECK(call)                                                                                               \
