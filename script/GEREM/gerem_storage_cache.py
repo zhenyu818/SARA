@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import bisect
 import builtins as _builtins
-import hashlib
 import random
 from collections.abc import MutableMapping
 from pathlib import Path
@@ -18,10 +17,8 @@ try:
         build_component_payload,
         canonical_mem_space,
         campaign_runs_env,
-        cycle_weight_between,
         cycle_domain_bounds,
         int_value,
-        is_all_campaign_runs,
         load_cycle_rows,
         load_json,
         write_json,
@@ -32,10 +29,8 @@ except ImportError:
         build_component_payload,
         canonical_mem_space,
         campaign_runs_env,
-        cycle_weight_between,
         cycle_domain_bounds,
         int_value,
-        is_all_campaign_runs,
         load_cycle_rows,
         load_json,
         write_json,
@@ -58,19 +53,11 @@ GEREM_STORAGE_CAMPAIGN_RUNS = campaign_runs_env("GEREM_STORAGE_CAMPAIGN_RUNS", 1
 EXPERIMENT_RANDOM_SEED = 2026
 _BUILTIN_INT = _builtins.int
 _INT_VALUE = int_value
-_BUILTIN_ISINSTANCE = _builtins.isinstance
-_BUILTIN_LEN = _builtins.len
-_BUILTIN_TUPLE = _builtins.tuple
 
 
-def _stable_campaign_seed(*parts: Any) -> int:
-    digest = hashlib.blake2b(digest_size=8)
-    digest.update(str(EXPERIMENT_RANDOM_SEED).encode("utf-8"))
-    digest.update(b"\0")
-    for part in parts:
-        digest.update(str(part).encode("utf-8", errors="replace"))
-        digest.update(b"\0")
-    return int.from_bytes(digest.digest(), byteorder="big", signed=False)
+def _stable_campaign_seed(*_parts: Any) -> int:
+    """Return the fixed GEREM campaign seed required for reproducible runs."""
+    return _BUILTIN_INT(EXPERIMENT_RANDOM_SEED)
 
 
 def _build_cycle_sampler(cycle_rows: Iterable[Tuple[int, int]]) -> Tuple[List[int], List[int], int]:
@@ -78,98 +65,23 @@ def _build_cycle_sampler(cycle_rows: Iterable[Tuple[int, int]]) -> Tuple[List[in
     cumulative: List[int] = []
     total = 0
     for cycle, multiplicity in cycle_rows:
-        mult = max(0, int(multiplicity))
+        mult = max(0, _BUILTIN_INT(multiplicity))
         if mult <= 0:
             continue
         total += mult
-        cycles.append(int(cycle))
-        cumulative.append(int(total))
+        cycles.append(_BUILTIN_INT(cycle))
+        cumulative.append(_BUILTIN_INT(total))
     if not cycles:
         cycles = [0]
         cumulative = [1]
         total = 1
-    return cycles, cumulative, int(total)
+    return cycles, cumulative, _BUILTIN_INT(total)
 
-
-def _cycle_weight_from_sampler(
-    sampler: Any,
-    start_cycle: int,
-    end_cycle: int,
-    _to_int: Any = _BUILTIN_INT,
-    _isinstance: Any = _BUILTIN_ISINSTANCE,
-    _len: Any = _BUILTIN_LEN,
-    _tuple: Any = _BUILTIN_TUPLE,
-) -> int:
-    cycles, cumulative, _total = (
-        sampler
-        if _isinstance(sampler, _tuple) and _len(sampler) == 3
-        else ([0], [1], 1)
-    )
-    return cycle_weight_between(
-        [_to_int(cycle) for cycle in cycles],
-        [0] + [_to_int(value) for value in cumulative],
-        _to_int(start_cycle),
-        _to_int(end_cycle),
-    )
-
-
-def _effective_entries(index: Any) -> Iterable[Tuple[Mapping[str, Any], int]]:
-    if not isinstance(index, Mapping):
-        return []
-    entries = index.get("entries", [])
-    if not isinstance(entries, list):
-        return []
-    out: List[Tuple[Mapping[str, Any], int]] = []
-    for idx, entry in enumerate(entries):
-        if not isinstance(entry, Mapping):
-            continue
-        end_cycle = _INT_VALUE(entry.get("end_cycle"), -1)
-        if idx + 1 < len(entries) and isinstance(entries[idx + 1], Mapping):
-            end_cycle = min(end_cycle, _INT_VALUE(entries[idx + 1].get("start_cycle"), end_cycle))
-        out.append((entry, int(end_cycle)))
-    return out
-
-
-def _valid_bits_for_byte(byte_offset: int, data_bits_per_line: int) -> int:
-    bit_start = int(byte_offset) * 8
-    return max(0, min(8, int(data_bits_per_line) - bit_start))
 
 
 def _sample_cycle(rng: random.Random, cycles: List[int], cumulative: List[int], total: int) -> int:
-    pick = rng.randrange(max(1, int(total)))
-    return int(cycles[bisect.bisect_right(cumulative, pick)])
-
-
-def _lookup_interval(index: Optional[Mapping[str, Any]], cycle: int) -> Optional[Mapping[str, Any]]:
-    if not isinstance(index, Mapping):
-        return None
-    starts = index.get("starts", [])
-    entries = index.get("entries", [])
-    if not isinstance(starts, list) or not isinstance(entries, list) or not starts:
-        return None
-    idx = bisect.bisect_right(starts, int(cycle)) - 1
-    if idx < 0 or idx >= len(entries):
-        return None
-    entry = entries[idx]
-    if not isinstance(entry, Mapping):
-        return None
-    if int(cycle) < _INT_VALUE(entry.get("end_cycle"), -1):
-        return entry
-    return None
-
-
-def _build_interval_index(entries: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
-    ordered = sorted(
-        (dict(entry) for entry in entries if isinstance(entry, Mapping)),
-        key=lambda entry: (
-            _INT_VALUE(entry.get("start_cycle"), 0),
-            _INT_VALUE(entry.get("end_cycle"), 0),
-        ),
-    )
-    return {
-        "starts": [_INT_VALUE(entry.get("start_cycle"), 0) for entry in ordered],
-        "entries": ordered,
-    }
+    pick = rng.randrange(max(1, _BUILTIN_INT(total)))
+    return _BUILTIN_INT(cycles[bisect.bisect_right(cumulative, pick)])
 
 
 def _float_value(value: Any, default: float = 0.0) -> float:
@@ -205,7 +117,7 @@ def _mask_union(record: Mapping[str, Any]) -> int:
 
 
 def _bit_count(value: int) -> int:
-    value_i = int(value)
+    value_i = _BUILTIN_INT(value)
     try:
         return value_i.bit_count()
     except AttributeError:
@@ -353,7 +265,7 @@ def _trace_events(trace_template: Optional[Mapping[str, Any]]) -> List[Dict[str,
         if not isinstance(record, Mapping):
             continue
         row = dict(record)
-        row.setdefault("event_index", int(event_index))
+        row.setdefault("event_index", _BUILTIN_INT(event_index))
         out.append(row)
     return out
 
@@ -376,26 +288,26 @@ def _line_chunks(raw: Mapping[str, Any], line_size_bytes: int) -> List[Tuple[int
     base_addr = _INT_VALUE(addr, 0)
     size_bytes = max(1, access_size_bytes_for_raw_event(raw))
     out: List[Tuple[int, Tuple[int, ...]]] = []
-    cur_addr = int(base_addr)
-    remaining = int(size_bytes)
+    cur_addr = _BUILTIN_INT(base_addr)
+    remaining = _BUILTIN_INT(size_bytes)
     while remaining > 0:
-        line_addr = int(cur_addr // int(line_size_bytes))
-        line_offset = int(cur_addr % int(line_size_bytes))
-        chunk = min(int(remaining), int(line_size_bytes) - int(line_offset))
-        offsets = _BUILTIN_TUPLE(range(int(line_offset), int(line_offset + chunk)))
-        out.append((int(line_addr), offsets))
-        cur_addr += int(chunk)
-        remaining -= int(chunk)
+        line_addr = _BUILTIN_INT(cur_addr // _BUILTIN_INT(line_size_bytes))
+        line_offset = _BUILTIN_INT(cur_addr % _BUILTIN_INT(line_size_bytes))
+        chunk = min(_BUILTIN_INT(remaining), _BUILTIN_INT(line_size_bytes) - _BUILTIN_INT(line_offset))
+        offsets = tuple(range(_BUILTIN_INT(line_offset), _BUILTIN_INT(line_offset + chunk)))
+        out.append((_BUILTIN_INT(line_addr), offsets))
+        cur_addr += _BUILTIN_INT(chunk)
+        remaining -= _BUILTIN_INT(chunk)
     return out
 
 
 def _resolve_l1d_seed(sm_id: int, allowed_seeds: Sequence[int]) -> Optional[int]:
     if sm_id >= 0:
         if not allowed_seeds or sm_id in allowed_seeds:
-            return int(sm_id)
+            return _BUILTIN_INT(sm_id)
         return None
     if len(allowed_seeds) == 1:
-        return int(allowed_seeds[0])
+        return _BUILTIN_INT(allowed_seeds[0])
     return None
 
 
@@ -441,7 +353,7 @@ def _simulate_cache_episodes(
     ) -> None:
         if version.get("end_cycle") is not None:
             return
-        version["end_cycle"] = int(end_cycle)
+        version["end_cycle"] = _BUILTIN_INT(end_cycle)
         version["end_reason"] = str(end_reason)
 
     def finalize_episode(
@@ -451,17 +363,17 @@ def _simulate_cache_episodes(
         end_reason: str,
     ) -> None:
         if episode.get("end_cycle") is None:
-            episode["end_cycle"] = int(end_cycle)
+            episode["end_cycle"] = _BUILTIN_INT(end_cycle)
         active_versions = episode.get("active_versions_by_offset", {})
         if not isinstance(active_versions, MutableMapping):
             return
         for version in active_versions.values():
             if isinstance(version, MutableMapping):
-                finalize_version(version, end_cycle=int(end_cycle), end_reason=end_reason)
+                finalize_version(version, end_cycle=_BUILTIN_INT(end_cycle), end_reason=end_reason)
 
     def make_clean_version(start_cycle: int) -> Dict[str, Any]:
         return {
-            "start_cycle": int(start_cycle),
+            "start_cycle": _BUILTIN_INT(start_cycle),
             "end_cycle": None,
             "end_reason": None,
             "dirty": False,
@@ -470,7 +382,7 @@ def _simulate_cache_episodes(
 
     def make_dirty_version(start_cycle: int) -> Dict[str, Any]:
         return {
-            "start_cycle": int(start_cycle),
+            "start_cycle": _BUILTIN_INT(start_cycle),
             "end_cycle": None,
             "end_reason": None,
             "dirty": True,
@@ -490,35 +402,35 @@ def _simulate_cache_episodes(
         byte_versions: Dict[int, List[Dict[str, Any]]] = {}
         active_versions_by_offset: Dict[int, Dict[str, Any]] = {}
         for offset in range(line_size_bytes):
-            version = make_clean_version(int(cycle))
-            byte_versions[int(offset)] = [version]
-            active_versions_by_offset[int(offset)] = version
+            version = make_clean_version(_BUILTIN_INT(cycle))
+            byte_versions[_BUILTIN_INT(offset)] = [version]
+            active_versions_by_offset[_BUILTIN_INT(offset)] = version
         episode: MutableMapping[str, Any] = {
-            "seed": int(seed),
+            "seed": _BUILTIN_INT(seed),
             "mem_space": str(mem_space),
             "line_key": list(line_key),
-            "line_addr": int(line_addr),
-            "set_idx": int(set_idx),
-            "way_idx": int(way_idx),
-            "start_cycle": int(cycle),
+            "line_addr": _BUILTIN_INT(line_addr),
+            "set_idx": _BUILTIN_INT(set_idx),
+            "way_idx": _BUILTIN_INT(way_idx),
+            "start_cycle": _BUILTIN_INT(cycle),
             "end_cycle": None,
             "byte_versions": byte_versions,
             "active_versions_by_offset": active_versions_by_offset,
         }
         episodes.append(episode)
-        active[(int(seed), line_key)] = episode
+        active[(_BUILTIN_INT(seed), line_key)] = episode
         return episode
 
     def set_state(seed: int, set_idx: int) -> MutableMapping[str, Any]:
-        per_seed_sets = cache_sets.setdefault(int(seed), {})
-        state = per_seed_sets.get(int(set_idx))
+        per_seed_sets = cache_sets.setdefault(_BUILTIN_INT(seed), {})
+        state = per_seed_sets.get(_BUILTIN_INT(set_idx))
         if isinstance(state, MutableMapping):
             return state
         state = {
             "slots": [None for _ in range(assoc)],
             "lru": list(range(assoc)),
         }
-        per_seed_sets[int(set_idx)] = state
+        per_seed_sets[_BUILTIN_INT(set_idx)] = state
         return state
 
     def touch_lru(state: MutableMapping[str, Any], way_idx: int) -> None:
@@ -526,9 +438,9 @@ def _simulate_cache_episodes(
         if not isinstance(lru, list):
             lru = []
             state["lru"] = lru
-        if int(way_idx) in lru:
-            lru.remove(int(way_idx))
-        lru.insert(0, int(way_idx))
+        if _BUILTIN_INT(way_idx) in lru:
+            lru.remove(_BUILTIN_INT(way_idx))
+        lru.insert(0, _BUILTIN_INT(way_idx))
 
     for event_index, raw in enumerate(events):
         if not _pred_true(raw):
@@ -556,8 +468,8 @@ def _simulate_cache_episodes(
         should_allocate = kind == "load" or component == "l2" or write_allocate
 
         for line_addr, offsets in chunks:
-            set_idx = int(line_addr % int(nset))
-            state = set_state(int(seed), int(set_idx))
+            set_idx = _BUILTIN_INT(line_addr % _BUILTIN_INT(nset))
+            state = set_state(_BUILTIN_INT(seed), _BUILTIN_INT(set_idx))
             slots = state.get("slots", [])
             if not isinstance(slots, list):
                 slots = [None for _ in range(assoc)]
@@ -565,11 +477,11 @@ def _simulate_cache_episodes(
             if mem_space == "local":
                 if thread_id < 0:
                     continue
-                line_key = (str(mem_space), int(thread_id), int(line_addr))
+                line_key = (str(mem_space), _BUILTIN_INT(thread_id), _BUILTIN_INT(line_addr))
             else:
-                line_key = (str(mem_space), int(line_addr))
+                line_key = (str(mem_space), _BUILTIN_INT(line_addr))
 
-            active_key = (int(seed), line_key)
+            active_key = (_BUILTIN_INT(seed), line_key)
             episode = active.get(active_key)
 
             if episode is None and not should_allocate:
@@ -581,38 +493,38 @@ def _simulate_cache_episodes(
                 if way_idx < 0:
                     for idx, slot_key in enumerate(slots):
                         if slot_key == line_key:
-                            way_idx = int(idx)
+                            way_idx = _BUILTIN_INT(idx)
                             break
                 if way_idx >= 0:
-                    touch_lru(state, int(way_idx))
+                    touch_lru(state, _BUILTIN_INT(way_idx))
             else:
                 for idx, slot_key in enumerate(slots):
                     if slot_key is None:
-                        way_idx = int(idx)
+                        way_idx = _BUILTIN_INT(idx)
                         break
                 if way_idx < 0:
                     lru = state.get("lru", [])
                     if not isinstance(lru, list) or not lru:
                         lru = list(range(assoc))
                         state["lru"] = lru
-                    way_idx = int(lru[-1])
+                    way_idx = _BUILTIN_INT(lru[-1])
                     victim_key = slots[way_idx]
                     if victim_key is not None:
-                        victim = active.pop((int(seed), victim_key), None)
+                        victim = active.pop((_BUILTIN_INT(seed), victim_key), None)
                         if victim is not None:
-                            finalize_episode(victim, end_cycle=int(cycle), end_reason="evict")
+                            finalize_episode(victim, end_cycle=_BUILTIN_INT(cycle), end_reason="evict")
                     slots[way_idx] = None
                 episode = create_episode(
-                    seed=int(seed),
+                    seed=_BUILTIN_INT(seed),
                     mem_space=str(mem_space),
                     line_key=line_key,
-                    line_addr=int(line_addr),
-                    set_idx=int(set_idx),
-                    way_idx=int(way_idx),
-                    cycle=int(cycle),
+                    line_addr=_BUILTIN_INT(line_addr),
+                    set_idx=_BUILTIN_INT(set_idx),
+                    way_idx=_BUILTIN_INT(way_idx),
+                    cycle=_BUILTIN_INT(cycle),
                 )
                 slots[way_idx] = line_key
-                touch_lru(state, int(way_idx))
+                touch_lru(state, _BUILTIN_INT(way_idx))
 
             byte_versions = episode.setdefault("byte_versions", {})
             if not isinstance(byte_versions, MutableMapping):
@@ -625,17 +537,17 @@ def _simulate_cache_episodes(
 
             if kind == "load":
                 for offset in offsets:
-                    current = active_versions.get(int(offset))
+                    current = active_versions.get(_BUILTIN_INT(offset))
                     if isinstance(current, MutableMapping):
-                        current["last_load_cycle"] = int(cycle)
+                        current["last_load_cycle"] = _BUILTIN_INT(cycle)
                 continue
 
             for offset in offsets:
-                offset_i = int(offset)
+                offset_i = _BUILTIN_INT(offset)
                 current = active_versions.get(offset_i)
                 if isinstance(current, MutableMapping):
-                    finalize_version(current, end_cycle=int(cycle), end_reason="overwrite")
-                new_version = make_dirty_version(int(cycle))
+                    finalize_version(current, end_cycle=_BUILTIN_INT(cycle), end_reason="overwrite")
+                new_version = make_dirty_version(_BUILTIN_INT(cycle))
                 version_list = byte_versions.setdefault(offset_i, [])
                 if not isinstance(version_list, list):
                     version_list = []
@@ -644,7 +556,7 @@ def _simulate_cache_episodes(
                 active_versions[offset_i] = new_version
 
     for episode in active.values():
-        finalize_episode(episode, end_cycle=int(domain_end), end_reason="evict")
+        finalize_episode(episode, end_cycle=_BUILTIN_INT(domain_end), end_reason="evict")
     return [dict(episode) for episode in episodes]
 
 
@@ -669,50 +581,25 @@ def _prepare_cache_campaign_state(
         component_row=row,
         domain_end=cycle_domain_bounds(cycle_rows)[1],
     )
-    episodes_by_slot: Dict[Tuple[int, int, int], List[Dict[str, Any]]] = {}
     touched_data_offsets = 0
     for episode in episodes:
-        slot_key = (
-            _INT_VALUE(episode.get("seed"), -1),
-            _INT_VALUE(episode.get("set_idx"), -1),
-            _INT_VALUE(episode.get("way_idx"), -1),
-        )
-        episodes_by_slot.setdefault(slot_key, []).append(dict(episode))
         byte_versions = episode.get("byte_versions", {})
         if isinstance(byte_versions, Mapping):
             touched_data_offsets += sum(1 for _offset in byte_versions.keys())
-    slot_lookup = {
-        key: _build_interval_index(entries)
-        for key, entries in episodes_by_slot.items()
-    }
-    for episode_index in slot_lookup.values():
-        for episode in episode_index.get("entries", []):
-            if not isinstance(episode, MutableMapping):
-                continue
-            byte_versions = episode.get("byte_versions", {})
-            if not isinstance(byte_versions, Mapping):
-                episode["byte_versions"] = {}
-                continue
-            version_lookup: Dict[int, Dict[str, Any]] = {}
-            for offset, version_list in byte_versions.items():
-                if not isinstance(version_list, list):
-                    continue
-                version_lookup[_INT_VALUE(offset, -1)] = _build_interval_index(version_list)
-            episode["byte_version_index"] = version_lookup
     seed_choices = _shader_seeds(row, _trace_events(trace_template)) if component == "l1d" else [0]
     return {
         "denominator": float(den),
         "cycle_sampler": _build_cycle_sampler(cycle_rows),
         "seed_choices": list(seed_choices or [0]),
         "domain_bits_per_seed": max(1, _INT_VALUE(row.get("domain_bits_per_seed"), 1)),
-        "line_size_bytes": int(line_size_bytes),
-        "data_bits_per_line": int(line_size_bytes * 8),
-        "tag_bits_per_line": int(tag_bits if include_tag_bits else 0),
+        "line_size_bytes": _BUILTIN_INT(line_size_bytes),
+        "data_bits_per_line": _BUILTIN_INT(line_size_bytes * 8),
+        "tag_bits_per_line": _BUILTIN_INT(tag_bits if include_tag_bits else 0),
         "nset": max(1, _INT_VALUE(row.get("nset"), 1)),
         "assoc": max(1, _INT_VALUE(row.get("assoc"), 1)),
-        "slot_lookup": slot_lookup,
+        "episodes": list(episodes),
         "episode_count": len(episodes),
-        "touched_data_offsets": int(touched_data_offsets),
+        "touched_data_offsets": _BUILTIN_INT(touched_data_offsets),
         "observed_site_count": len(_site_list(analyzer_output, component)),
     }
 
@@ -726,35 +613,59 @@ def _classify_cache_fault(
 ) -> str:
     data_bits = max(1, _INT_VALUE(state.get("data_bits_per_line"), 8))
     tag_bits = max(0, _INT_VALUE(state.get("tag_bits_per_line"), 0))
-    line_bits = int(data_bits + tag_bits)
+    line_bits = _BUILTIN_INT(data_bits + tag_bits)
     if line_bits <= 0:
         return "benign"
-    slot_index = int(bit_index) // int(line_bits)
+    slot_index = _BUILTIN_INT(bit_index) // _BUILTIN_INT(line_bits)
     set_idx = slot_index // max(1, _INT_VALUE(state.get("assoc"), 1))
     way_idx = slot_index % max(1, _INT_VALUE(state.get("assoc"), 1))
     if set_idx < 0 or set_idx >= max(1, _INT_VALUE(state.get("nset"), 1)):
         return "benign"
-    episode = _lookup_interval(state.get("slot_lookup", {}).get((int(seed), int(set_idx), int(way_idx))), int(cycle))
-    if episode is None:
+    episodes = state.get("episodes", [])
+    if not isinstance(episodes, list):
         return "benign"
-    bit_in_line = int(bit_index) % int(line_bits)
-    if tag_bits > 0 and bit_in_line >= data_bits:
-        return "ebc"
-    byte_offset = bit_in_line // 8
-    version_index = episode.get("byte_version_index", {})
-    if not isinstance(version_index, Mapping):
+    cycle_i = _BUILTIN_INT(cycle)
+    bit_in_line = _BUILTIN_INT(bit_index) % _BUILTIN_INT(line_bits)
+    for episode in episodes:
+        if not isinstance(episode, Mapping):
+            continue
+        if _INT_VALUE(episode.get("seed"), -1) != _BUILTIN_INT(seed):
+            continue
+        if _INT_VALUE(episode.get("set_idx"), -1) != _BUILTIN_INT(set_idx):
+            continue
+        if _INT_VALUE(episode.get("way_idx"), -1) != _BUILTIN_INT(way_idx):
+            continue
+        episode_start = _INT_VALUE(episode.get("start_cycle"), 0)
+        episode_end = _INT_VALUE(episode.get("end_cycle"), episode_start)
+        if not (episode_start <= cycle_i < episode_end):
+            continue
+        if tag_bits > 0 and bit_in_line >= data_bits:
+            return "ebc"
+        byte_offset = bit_in_line // 8
+        byte_versions = episode.get("byte_versions", {})
+        if not isinstance(byte_versions, Mapping):
+            return "benign"
+        version_list = byte_versions.get(_BUILTIN_INT(byte_offset))
+        if version_list is None:
+            version_list = byte_versions.get(str(_BUILTIN_INT(byte_offset)))
+        if not isinstance(version_list, list):
+            return "benign"
+        for version in version_list:
+            if not isinstance(version, Mapping):
+                continue
+            version_start = _INT_VALUE(version.get("start_cycle"), 0)
+            version_end = _INT_VALUE(version.get("end_cycle"), version_start)
+            if not (version_start <= cycle_i < version_end):
+                continue
+            is_dirty = _INT_VALUE(version.get("dirty"), 0) != 0
+            end_reason = str(version.get("end_reason", "")).strip().lower()
+            if is_dirty and end_reason == "evict":
+                dcr_end = _INT_VALUE(version.get("end_cycle"), version_start)
+            else:
+                dcr_end = _INT_VALUE(version.get("last_load_cycle"), -1)
+            return "dcr" if cycle_i < _BUILTIN_INT(dcr_end) and cycle_i >= _BUILTIN_INT(version_start) else "benign"
         return "benign"
-    version = _lookup_interval(version_index.get(int(byte_offset)), int(cycle))
-    if version is None:
-        return "benign"
-    version_start = _INT_VALUE(version.get("start_cycle"), 0)
-    is_dirty = _INT_VALUE(version.get("dirty"), 0) != 0
-    end_reason = str(version.get("end_reason", "")).strip().lower()
-    if is_dirty and end_reason == "evict":
-        dcr_end = _INT_VALUE(version.get("end_cycle"), version_start)
-    else:
-        dcr_end = _INT_VALUE(version.get("last_load_cycle"), -1)
-    return "dcr" if int(cycle) < int(dcr_end) and int(cycle) >= int(version_start) else "benign"
+    return "benign"
 
 
 def _run_cache_campaign(
@@ -764,70 +675,18 @@ def _run_cache_campaign(
     rng_seed: int,
 ) -> Dict[str, Any]:
     cycles, cumulative, total = state.get("cycle_sampler", ([0], [1], 1))
-    rng = random.Random(int(rng_seed))
+    rng = random.Random(_BUILTIN_INT(rng_seed))
     counts = {"benign": 0, "dcr": 0, "ebc": 0}
     seed_choices = state.get("seed_choices", [0])
     if not isinstance(seed_choices, list) or not seed_choices:
         seed_choices = [0]
     per_seed_bits = max(1, _INT_VALUE(state.get("domain_bits_per_seed"), 1))
-    for _ in range(max(1, int(campaign_runs))):
-        cycle = _sample_cycle(rng, list(cycles), list(cumulative), int(total))
-        seed = int(seed_choices[rng.randrange(len(seed_choices))])
+    for _ in range(max(1, _BUILTIN_INT(campaign_runs))):
+        cycle = _sample_cycle(rng, list(cycles), list(cumulative), _BUILTIN_INT(total))
+        seed = _BUILTIN_INT(seed_choices[rng.randrange(len(seed_choices))])
         bit_index = rng.randrange(per_seed_bits)
         counts[_classify_cache_fault(state, cycle=cycle, seed=seed, bit_index=bit_index)] += 1
     return {"counts": counts}
-
-
-def _run_cache_all_fault_points(state: Mapping[str, Any]) -> Dict[str, Any]:
-    _cycles, _cumulative, cycle_total = state.get("cycle_sampler", ([0], [1], 1))
-    seed_choices = state.get("seed_choices", [0])
-    if not isinstance(seed_choices, list) or not seed_choices:
-        seed_choices = [0]
-    per_seed_bits = max(1, _INT_VALUE(state.get("domain_bits_per_seed"), 1))
-    domain_points = int(cycle_total) * len(seed_choices) * int(per_seed_bits)
-    data_bits = max(1, _INT_VALUE(state.get("data_bits_per_line"), 8))
-    tag_bits = max(0, _INT_VALUE(state.get("tag_bits_per_line"), 0))
-
-    dcr_bits = 0
-    ebc_bits = 0
-    slot_lookup = state.get("slot_lookup", {})
-    if isinstance(slot_lookup, Mapping):
-        for episode_index in slot_lookup.values():
-            for episode, episode_end in _effective_entries(episode_index):
-                episode_start = _INT_VALUE(episode.get("start_cycle"), 0)
-                if tag_bits > 0 and episode_end > episode_start:
-                    ebc_bits += _cycle_weight_from_sampler(state.get("cycle_sampler"), episode_start, episode_end) * tag_bits
-                version_lookup = episode.get("byte_version_index", {})
-                if not isinstance(version_lookup, Mapping):
-                    continue
-                for byte_offset, version_index in version_lookup.items():
-                    bits_in_byte = _valid_bits_for_byte(_INT_VALUE(byte_offset, -1), data_bits)
-                    if bits_in_byte <= 0:
-                        continue
-                    for version, version_end in _effective_entries(version_index):
-                        version_start = _INT_VALUE(version.get("start_cycle"), 0)
-                        is_dirty = _INT_VALUE(version.get("dirty"), 0) != 0
-                        end_reason = str(version.get("end_reason", "")).strip().lower()
-                        if is_dirty and end_reason == "evict":
-                            dcr_end = _INT_VALUE(version.get("end_cycle"), version_start)
-                        else:
-                            dcr_end = _INT_VALUE(version.get("last_load_cycle"), -1)
-                        start_cycle = max(version_start, episode_start)
-                        end_cycle = min(int(version_end), int(episode_end), int(dcr_end))
-                        if end_cycle <= start_cycle:
-                            continue
-                        dcr_bits += _cycle_weight_from_sampler(state.get("cycle_sampler"), start_cycle, end_cycle) * bits_in_byte
-
-    dcr_bits = min(max(0, int(dcr_bits)), int(domain_points))
-    ebc_bits = min(max(0, int(ebc_bits)), int(domain_points - dcr_bits))
-    return {
-        "counts": {
-            "benign": int(domain_points - dcr_bits - ebc_bits),
-            "dcr": int(dcr_bits),
-            "ebc": int(ebc_bits),
-        },
-        "domain_points": int(domain_points),
-    }
 
 
 def _predict_cache_from_trace(
@@ -846,18 +705,13 @@ def _predict_cache_from_trace(
         component=component,
     )
     campaign_seed = _stable_campaign_seed(benchmark, test_id, component)
-    if is_all_campaign_runs(GEREM_STORAGE_CAMPAIGN_RUNS):
-        campaign = _run_cache_all_fault_points(state)
-        campaign_runs = int(campaign["domain_points"])
-        campaign_mode = "all"
-    else:
-        campaign = _run_cache_campaign(
-            state,
-            campaign_runs=int(GEREM_STORAGE_CAMPAIGN_RUNS),
-            rng_seed=campaign_seed,
-        )
-        campaign_runs = max(1, int(GEREM_STORAGE_CAMPAIGN_RUNS))
-        campaign_mode = "sample"
+    campaign = _run_cache_campaign(
+        state,
+        campaign_runs=_BUILTIN_INT(GEREM_STORAGE_CAMPAIGN_RUNS),
+        rng_seed=campaign_seed,
+    )
+    campaign_runs = max(1, _BUILTIN_INT(GEREM_STORAGE_CAMPAIGN_RUNS))
+    campaign_mode = "sample"
     counts = campaign["counts"]
     efm_rates = {
         "benign": float(counts["benign"]) / float(campaign_runs),
@@ -877,15 +731,15 @@ def _predict_cache_from_trace(
         efm_rates=efm_rates,
         final_rates=final_rates,
         meta={
-            "observed_site_count": int(state["observed_site_count"]),
-            "episode_count": int(state["episode_count"]),
-            "touched_data_offsets": int(state["touched_data_offsets"]),
-            "line_size_bytes": int(state["line_size_bytes"]),
-            "tag_bits_per_line": int(state["tag_bits_per_line"]),
-            "campaign_runs": int(campaign_runs),
+            "observed_site_count": _BUILTIN_INT(state["observed_site_count"]),
+            "episode_count": _BUILTIN_INT(state["episode_count"]),
+            "touched_data_offsets": _BUILTIN_INT(state["touched_data_offsets"]),
+            "line_size_bytes": _BUILTIN_INT(state["line_size_bytes"]),
+            "tag_bits_per_line": _BUILTIN_INT(state["tag_bits_per_line"]),
+            "campaign_runs": _BUILTIN_INT(campaign_runs),
             "campaign_mode": campaign_mode,
-            "campaign_seed": int(campaign_seed),
-            "rule": "cache_per_run_trace_efm_direct",
+            "campaign_seed": _BUILTIN_INT(campaign_seed),
+            "rule": "cache_random_sample_storage_efm_trace_scan",
             "crash_policy": "due_forced_zero",
         },
     )

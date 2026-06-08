@@ -3,6 +3,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+
+static int exact_equal_float(float a, float b) {
+    uint32_t ai = 0;
+    uint32_t bi = 0;
+    memcpy(&ai, &a, sizeof(ai));
+    memcpy(&bi, &b, sizeof(bi));
+    return ai == bi;
+}
 
 #define RANDOM_SEED 2026
 
@@ -175,25 +184,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Compare
+    // Exact-output SDC oracle: any output-bit mismatch is SDC.
     bool match = true;
-    const float tolerance = 1e-5f;
     for (long i = 0; i < total_elements; i++) {
-        float a = new_results[i];
-        float b = ref_results[i];
-
-        if (isnan(a) && isnan(b)) {
-            continue; // Both NaN: match
-        } else if (isinf(a) && isinf(b) && signbit(a) == signbit(b)) {
-            continue; // Both inf or -inf with same sign: match
-        } else if (!isnan(a) && !isnan(b) && !isinf(a) && !isinf(b)) {
-            float diff = fabs(a - b);
-            if (diff > tolerance) {
-                match = false;
-                break;
-            }
-        } else {
-            // One is NaN/inf and the other isn't, or mismatched inf signs
+        if (!exact_equal_float(new_results[i], ref_results[i])) {
             match = false;
             break;
         }

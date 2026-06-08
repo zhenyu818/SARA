@@ -134,7 +134,7 @@ int main(int argc, char **argv) {
         cudaMemcpy(h_updatingShortestDistances, d_updatingShortestDistances, sizeof(float) * V, cudaMemcpyDeviceToHost));
 
     for (int i = 0; i < V; ++i) {
-        printf("%.6f%c", h_updatingShortestDistances[i], (i == V - 1) ? '\n' : ' ');
+        printf("%.9g%c", h_updatingShortestDistances[i], (i == V - 1) ? '\n' : ' ');
     }
 
     free(h_vertexArray);

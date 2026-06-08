@@ -5,6 +5,14 @@
 #include <string.h>
 #include <stdint.h>
 
+static int exact_equal_float(float a, float b) {
+    uint32_t ai = 0;
+    uint32_t bi = 0;
+    memcpy(&ai, &a, sizeof(ai));
+    memcpy(&bi, &b, sizeof(bi));
+    return ai == bi;
+}
+
 #define M_SEED 2026
 #define M_BLOCK_SIZE 1024
 
@@ -131,11 +139,10 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // ==== 逐项比较 ====
+    // Exact-output SDC oracle: any output-bit mismatch is SDC.
     bool match = true;
-    const float eps = 1e-5f; // 容许误差
     for (size_t i = 0; i < src_size; i++) {
-        if (fabs(output[i] - expected[i]) > eps) {
+        if (!exact_equal_float(output[i], expected[i])) {
             match = false;
             break;
         }

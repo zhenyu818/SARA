@@ -3,6 +3,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+
+static int exact_equal_float(float a, float b) {
+    uint32_t ai = 0;
+    uint32_t bi = 0;
+    memcpy(&ai, &a, sizeof(ai));
+    memcpy(&bi, &b, sizeof(bi));
+    return ai == bi;
+}
 
 #define M_SEED 2026
 
@@ -103,24 +112,8 @@ static int matrix_multiply(int wA, int hA, int wB, int hB) {
     fclose(file);
 
     bool match = (count == size_C);
-    const float eps = 1e-5f;
     for (int i = 0; match && i < size_C; ++i) {
-        float actual = h_C[i];
-        float expected_val = expected[i];
-
-        if (isnan(actual) && isnan(expected_val))
-            continue;
-        if (isnan(actual) || isnan(expected_val)) {
-            match = false;
-            break;
-        }
-        if (isinf(actual) && isinf(expected_val)) {
-            if (signbit(actual) != signbit(expected_val)) {
-                match = false;
-            }
-            continue;
-        }
-        if (isinf(actual) || isinf(expected_val) || fabsf(actual - expected_val) > eps) {
+        if (!exact_equal_float(h_C[i], expected[i])) {
             match = false;
             break;
         }

@@ -1,7 +1,8 @@
 #!/bin/bash
 
-CAMPAIGN_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CAMPAIGN_ROOT_DIR="$(cd "${CAMPAIGN_COMMON_DIR}/../.." && pwd)"
+CAMPAIGN_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CAMPAIGN_COMMON_DIR="${CAMPAIGN_COMMON_DIR_OVERRIDE:-${CAMPAIGN_SCRIPT_DIR}}"
+CAMPAIGN_ROOT_DIR="${CAMPAIGN_ROOT_DIR_OVERRIDE:-$(cd "${CAMPAIGN_COMMON_DIR}/../.." && pwd)}"
 
 # ---------------------------------------------- START ONE-TIME PARAMETERS ----------------------------------------------
 # needed by gpgpu-sim for real register usage on PTXPlus mode
@@ -13,6 +14,7 @@ TMP_FILE=tmp.out
 # persistent list of invalid parameter combinations to skip
 INVALID_COMBOS_FILE=./invalid_param_combos.txt
 RUNS=1
+FI_PARALLEL_JOBS="${FI_PARALLEL_JOBS:-8}"
 COMPONENT_SET="6"
 SIM_NICE="${SIM_NICE:-10}"
 DELETE_LOGS="${DELETE_LOGS:-1}" # if 1 then all logs will be deleted at the end of the script
@@ -529,6 +531,37 @@ cleanup_trial_logging() {
     fi
 }
 
+canonicalize_optional_file_var() {
+    local name="$1"
+    local value="${!name:-}"
+    if [[ -n "${value}" && "${value}" != /* ]]; then
+        printf -v "${name}" '%s/%s' "${CAMPAIGN_ORIGINAL_CWD:-$(pwd)}" "${value}"
+    fi
+}
+
+normalize_parallel_jobs() {
+    if ! [[ "${FI_PARALLEL_JOBS}" =~ ^[0-9]+$ ]] || (( FI_PARALLEL_JOBS <= 0 )); then
+        FI_PARALLEL_JOBS=8
+    fi
+    if [[ "${profile}" -eq 1 ]] || [[ "${profile}" -eq 2 ]] || [[ "${profile}" -eq 3 ]]; then
+        FI_PARALLEL_JOBS=1
+    fi
+}
+
+append_line_locked() {
+    local path="$1"
+    local line="$2"
+    [[ -n "${path}" ]] || return 0
+    if command -v flock >/dev/null 2>&1; then
+        {
+            flock 9
+            printf '%s\n' "${line}" >> "${path}"
+        } 9>> "${path}.lock"
+    else
+        printf '%s\n' "${line}" >> "${path}"
+    fi
+}
+
 lookup_active_entry() {
     local cycle="$1"
     if [[ -z "${FI_ACTIVE_THREADS_INDEX}" || ! -f "${FI_ACTIVE_THREADS_INDEX}" ]]; then
@@ -570,7 +603,8 @@ log_fi_injection_point() {
     bit_for_log="$(echo "${reg_bitflip_rand_n}" | cut -d':' -f1)"
     reg_uid_for_log="$(lookup_reg_uid_set "${REGISTER_NAME}")"
 
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    local csv_line
+    csv_line="$(printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s' \
         "$(csv_escape "${CURRENT_TRIAL_ID}")" \
         "$(csv_escape "${total_cycle_rand}")" \
         "$(csv_escape "${active_size}")" \
@@ -599,8 +633,8 @@ log_fi_injection_point() {
         "$(csv_escape "${l1t_cache_bitflip_rand_n}")" \
         "$(csv_escape "${l2_cache_bitflip_rand_n}")" \
         "$(csv_escape "${gmem_byte_seed}")" \
-        "$(csv_escape "${gmem_target_addr}")" \
-        >> "${FI_INJECTION_POINTS_FILE}"
+        "$(csv_escape "${gmem_target_addr}")")"
+    append_line_locked "${FI_INJECTION_POINTS_FILE}" "${csv_line}"
 }
 
 classify_due_reason() {
@@ -702,14 +736,15 @@ log_fi_outcome() {
     local run_batch="$5"
     local tmp_name="$6"
     [[ -n "${FI_OUTCOMES_FILE}" ]] || return
-    printf '%s,%s,%s,%s,%s,%s\n' \
+    local csv_line
+    csv_line="$(printf '%s,%s,%s,%s,%s,%s' \
         "$(csv_escape "${trial}")" \
         "$(csv_escape "${outcome}")" \
         "$(csv_escape "${due_reason}")" \
         "$(csv_escape "${exit_status}")" \
         "$(csv_escape "${run_batch}")" \
-        "$(csv_escape "${tmp_name}")" \
-        >> "${FI_OUTCOMES_FILE}"
+        "$(csv_escape "${tmp_name}")")"
+    append_line_locked "${FI_OUTCOMES_FILE}" "${csv_line}"
 }
 
 build_combo_key_from_vars() {
@@ -1026,8 +1061,12 @@ serial_execution() {
     local run_index="$1"
     local local_index=1
     mkdir "${TMP_DIR}${run_index}" > /dev/null 2>&1
-    CURRENT_TRIAL_ID=$((FI_TRIAL_COUNTER + 1))
-    FI_TRIAL_COUNTER=${CURRENT_TRIAL_ID}
+    if [[ -n "${FI_FORCE_TRIAL_ID:-}" ]]; then
+        CURRENT_TRIAL_ID="${FI_FORCE_TRIAL_ID}"
+    else
+        CURRENT_TRIAL_ID=$((FI_TRIAL_COUNTER + 1))
+        FI_TRIAL_COUNTER=${CURRENT_TRIAL_ID}
+    fi
     CURRENT_TRIAL_SEED="${FI_SEED_BASE}"
     init_deterministic_prng "${CURRENT_TRIAL_SEED}" "${CURRENT_TRIAL_ID}"
     initialize_config
@@ -1044,13 +1083,277 @@ serial_execution() {
         # clean intermediate logs anyway if profile != 1
         rm _ptx* _cuobjdump_* _app_cuda* *.ptx f_tempfile_ptx gpgpu_inst_stats.txt > /dev/null 2>&1
     fi
+    return 0
 }
 
-trap cleanup_trial_logging EXIT
+prepare_parallel_trial_workspace() {
+    local trial_dir="$1"
+    local uut_exe uut_src uut_base
+
+    if ! rm -rf "${trial_dir}"; then
+        echo "=== Error: failed to remove stale FI trial workspace: ${trial_dir} ===" >&2
+        return 1
+    fi
+    if ! mkdir -p "${trial_dir}"; then
+        echo "=== Error: failed to create FI trial workspace: ${trial_dir} ===" >&2
+        return 1
+    fi
+
+    if ! cp -f "${CONFIG_FILE}" "${trial_dir}/gpgpusim.config"; then
+        echo "=== Error: failed to copy gpgpu-sim config into FI trial workspace: ${CONFIG_FILE} -> ${trial_dir}/gpgpusim.config ===" >&2
+        return 1
+    fi
+    if [[ -f "${CYCLES_FILE}" ]]; then
+        if ! cp -f "${CYCLES_FILE}" "${trial_dir}/cycles.txt"; then
+            echo "=== Error: failed to copy FI cycles file into trial workspace: ${CYCLES_FILE} -> ${trial_dir}/cycles.txt ===" >&2
+            return 1
+        fi
+    fi
+    if [[ -f "${INVALID_COMBOS_FILE}" ]]; then
+        if ! cp -f "${INVALID_COMBOS_FILE}" "${trial_dir}/invalid_param_combos.txt"; then
+            echo "=== Error: failed to copy FI invalid-combos file into trial workspace: ${INVALID_COMBOS_FILE} -> ${trial_dir}/invalid_param_combos.txt ===" >&2
+            return 1
+        fi
+    fi
+    if [[ -f "result.txt" ]]; then
+        if ! cp -f "result.txt" "${trial_dir}/result.txt"; then
+            echo "=== Error: failed to copy FI golden result into trial workspace: result.txt -> ${trial_dir}/result.txt ===" >&2
+            return 1
+        fi
+    fi
+    if [[ -f "register_used.txt" ]]; then
+        if ! cp -f "register_used.txt" "${trial_dir}/register_used.txt"; then
+            echo "=== Error: failed to copy FI register list into trial workspace: register_used.txt -> ${trial_dir}/register_used.txt ===" >&2
+            return 1
+        fi
+    fi
+
+    uut_exe="${CUDA_UUT%% *}"
+    if [[ "${uut_exe}" == ./* ]]; then
+        uut_src="${uut_exe#./}"
+        uut_base="$(basename "${uut_src}")"
+        if ! cp -f "${uut_src}" "${trial_dir}/${uut_base}"; then
+            echo "=== Error: failed to copy FI executable into trial workspace: ${uut_src} -> ${trial_dir}/${uut_base} ===" >&2
+            return 1
+        fi
+        chmod +x "${trial_dir}/${uut_base}" 2>/dev/null || true
+        if [[ -f "${uut_src}.ptx" ]]; then
+            if ! cp -f "${uut_src}.ptx" "${trial_dir}/${uut_base}.ptx"; then
+                echo "=== Error: failed to copy FI PTX into trial workspace: ${uut_src}.ptx -> ${trial_dir}/${uut_base}.ptx ===" >&2
+                return 1
+            fi
+        fi
+        if [[ -f "${uut_src}.1.${GPU_ARCH:-sm_75}.ptx" ]]; then
+            if ! cp -f "${uut_src}.1.${GPU_ARCH:-sm_75}.ptx" "${trial_dir}/${uut_base}.1.${GPU_ARCH:-sm_75}.ptx"; then
+                echo "=== Error: failed to copy FI architecture PTX into trial workspace: ${uut_src}.1.${GPU_ARCH:-sm_75}.ptx -> ${trial_dir}/${uut_base}.1.${GPU_ARCH:-sm_75}.ptx ===" >&2
+                return 1
+            fi
+        fi
+    fi
+}
+
+parallel_trial_execution() {
+    local run_index="$1"
+    local trial_dir="$2"
+
+    if ! prepare_parallel_trial_workspace "${trial_dir}"; then
+        echo "=== Error: failed to prepare FI parallel trial workspace for run ${run_index}: ${trial_dir} ===" >&2
+        return 1
+    fi
+    (
+        if ! cd "${trial_dir}"; then
+            echo "=== Error: failed to enter FI parallel trial workspace for run ${run_index}: ${trial_dir} ===" >&2
+            exit 1
+        fi
+        CONFIG_FILE="./gpgpusim.config"
+        TMP_DIR="./logs"
+        CACHE_LOGS_DIR="./cache_logs"
+        INVALID_COMBOS_FILE="./invalid_param_combos.txt"
+        if [[ -f "./cycles.txt" ]]; then
+            CYCLES_FILE="./cycles.txt"
+        fi
+        FI_FORCE_TRIAL_ID="${run_index}"
+        serial_execution "${run_index}"
+    )
+}
+
+PARALLEL_CHILD_PIDS=()
+PARALLEL_CHILD_LOGS=()
+PARALLEL_CHILD_STATUS=()
+
+terminate_parallel_jobs() {
+    local pid
+    for pid in "${PARALLEL_CHILD_PIDS[@]:-}"; do
+        if [[ -n "${pid}" ]]; then
+            kill "${pid}" 2>/dev/null || true
+        fi
+    done
+    for pid in "${PARALLEL_CHILD_PIDS[@]:-}"; do
+        if [[ -n "${pid}" ]]; then
+            wait "${pid}" 2>/dev/null || true
+        fi
+    done
+    PARALLEL_CHILD_PIDS=()
+    PARALLEL_CHILD_LOGS=()
+    PARALLEL_CHILD_STATUS=()
+}
+
+campaign_cleanup() {
+    terminate_parallel_jobs
+    cleanup_trial_logging
+}
+
+start_parallel_job() {
+    local run_index="$1"
+    local parallel_root="$2"
+    local trial_dir="${parallel_root}/trial_${run_index}"
+    local log_file="${parallel_root}/job_logs/run_${run_index}.log"
+    local status_file="${parallel_root}/job_logs/run_${run_index}.status"
+
+    (
+        (
+            parallel_trial_execution "${run_index}" "${trial_dir}"
+        )
+        rc=$?
+        printf '%s\n' "${rc}" > "${status_file}"
+        exit "${rc}"
+    ) > "${log_file}" 2>&1 &
+
+    PARALLEL_CHILD_PIDS+=("$!")
+    PARALLEL_CHILD_LOGS+=("${log_file}")
+    PARALLEL_CHILD_STATUS+=("${status_file}")
+}
+
+reap_completed_parallel_jobs() {
+    local blocking="${1:-0}"
+    local had_completion status pid log_file status_file i
+    local -a next_pids=()
+    local -a next_logs=()
+    local -a next_status=()
+
+    while true; do
+        had_completion=0
+        next_pids=()
+        next_logs=()
+        next_status=()
+        for i in "${!PARALLEL_CHILD_PIDS[@]}"; do
+            pid="${PARALLEL_CHILD_PIDS[$i]}"
+            log_file="${PARALLEL_CHILD_LOGS[$i]}"
+            status_file="${PARALLEL_CHILD_STATUS[$i]}"
+            if [[ -f "${status_file}" ]]; then
+                status="$(tr -d '[:space:]' < "${status_file}")"
+                wait "${pid}" 2>/dev/null || true
+                cat "${log_file}"
+                had_completion=1
+                if ! [[ "${status}" =~ ^[0-9]+$ ]] || (( status != 0 )); then
+                    echo "=== Error: FI parallel trial failed: pid=${pid}, status=${status:-missing}, log=${log_file} ===" >&2
+                    return 1
+                fi
+            elif ! kill -0 "${pid}" 2>/dev/null; then
+                wait "${pid}" 2>/dev/null || true
+                cat "${log_file}" 2>/dev/null || true
+                had_completion=1
+                echo "=== Error: FI parallel trial exited without a status file: pid=${pid}, status_file=${status_file}, log=${log_file} ===" >&2
+                return 1
+            else
+                next_pids+=("${pid}")
+                next_logs+=("${log_file}")
+                next_status+=("${status_file}")
+            fi
+        done
+        PARALLEL_CHILD_PIDS=("${next_pids[@]}")
+        PARALLEL_CHILD_LOGS=("${next_logs[@]}")
+        PARALLEL_CHILD_STATUS=("${next_status[@]}")
+
+        if (( had_completion == 1 )); then
+            return 0
+        fi
+        if (( blocking == 0 || ${#PARALLEL_CHILD_PIDS[@]} == 0 )); then
+            return 0
+        fi
+        sleep 0.2
+    done
+}
+
+print_parallel_summary_from_logs() {
+    local log_dir="$1"
+    awk '
+        /^\[Run[[:space:]]+[0-9]+\][[:space:]]+tmp\.out[0-9]+:[[:space:]]+Masked/ {
+            masked++
+            if ($0 ~ /with performance impact/) performance++
+            next
+        }
+        /^\[Run[[:space:]]+[0-9]+\][[:space:]]+tmp\.out[0-9]+:[[:space:]]+SDC/ {
+            sdc++
+            next
+        }
+        /^\[Run[[:space:]]+[0-9]+\][[:space:]]+tmp\.out[0-9]+:[[:space:]]+DUE/ {
+            due++
+            next
+        }
+        END {
+            printf "Masked: %d (performance = %d)\n", masked + 0, performance + 0
+            printf "SDCs: %d\n", sdc + 0
+            printf "DUEs: %d\n", due + 0
+        }
+    ' "${log_dir}"/run_*.log 2>/dev/null
+}
+
+parallel_execution() {
+    local total_runs="$1"
+    local parallel_jobs="${FI_PARALLEL_JOBS}"
+    local parallel_root="${TMP_DIR}.parallel.$$"
+    local next_run=1
+
+    if (( total_runs <= 0 )); then
+        return 0
+    fi
+    if (( parallel_jobs > total_runs )); then
+        parallel_jobs="${total_runs}"
+    fi
+    mkdir -p "${parallel_root}/job_logs"
+    echo "=== Campaign exec guarded settings: app/component serial, trial parallel_jobs=${parallel_jobs} ==="
+
+    while (( next_run <= total_runs )); do
+        start_parallel_job "${next_run}" "${parallel_root}"
+        next_run=$((next_run + 1))
+        while (( ${#PARALLEL_CHILD_PIDS[@]} >= parallel_jobs )); do
+            if ! reap_completed_parallel_jobs 1; then
+                terminate_parallel_jobs
+                return 1
+            fi
+        done
+    done
+
+    while (( ${#PARALLEL_CHILD_PIDS[@]} > 0 )); do
+        if ! reap_completed_parallel_jobs 1; then
+            terminate_parallel_jobs
+            return 1
+        fi
+    done
+
+    print_parallel_summary_from_logs "${parallel_root}/job_logs"
+    RUNS=0
+    if [[ "$DELETE_LOGS" -eq 1 ]]; then
+        rm -rf "${parallel_root}" > /dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+trap campaign_cleanup EXIT
 
 main() {
     sanitize_run_settings
-    echo "=== Campaign exec guarded settings: serial, nice=${SIM_NICE} ==="
+    CAMPAIGN_ORIGINAL_CWD="$(pwd)"
+    canonicalize_optional_file_var FI_INJECTION_POINTS_FILE
+    canonicalize_optional_file_var FI_OUTCOMES_FILE
+    canonicalize_optional_file_var FI_ACTIVE_THREADS_LOG
+    canonicalize_optional_file_var FI_ANALYZER_OUTPUT
+    canonicalize_optional_file_var FI_GOLDEN_LOG
+    canonicalize_optional_file_var FI_OUTPUT_SPEC
+    canonicalize_optional_file_var CYCLES_FILE
+    normalize_parallel_jobs
+    echo "=== Campaign exec guarded settings: app/component serial, trial_parallel_jobs=${FI_PARALLEL_JOBS}, nice=${SIM_NICE} ==="
     auto_detect_cache_size_bits
     init_trial_logging
     # Normalize existing invalid combos to reduced keys (idempotent)
@@ -1084,6 +1387,18 @@ main() {
 
     if [[ "$profile" -eq 1 ]] || [[ "$profile" -eq 2 ]] || [[ "$profile" -eq 3 ]]; then
         RUNS=1
+    fi
+    if (( FI_PARALLEL_JOBS > 1 )); then
+        local total_parallel_runs
+        total_parallel_runs="${RUNS}"
+        if ! parallel_execution "${total_parallel_runs}"; then
+            echo "Parallel FI campaign failed." >&2
+            exit 1
+        fi
+        if [[ "$DELETE_LOGS" -eq 1 ]]; then
+            rm -r ${CACHE_LOGS_DIR} > /dev/null 2>&1 # comment out to debug cache logs
+        fi
+        return 0
     fi
     # MAX_RETRIES to avoid flooding the system storage with logs infinitely if the user
     # has wrong configuration and only Unclassified errors are returned

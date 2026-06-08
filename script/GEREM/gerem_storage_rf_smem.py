@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import bisect
 import builtins as _builtins
-import hashlib
 import random
 import sys
 from pathlib import Path
@@ -20,10 +19,8 @@ try:
         campaign_runs_env,
         component_domain,
         component_denominator,
-        cycle_weight_between,
         cycle_domain_bounds,
         int_value,
-        is_all_campaign_runs,
         load_json,
         load_cycle_rows,
         write_json,
@@ -36,10 +33,8 @@ except ImportError:
         campaign_runs_env,
         component_domain,
         component_denominator,
-        cycle_weight_between,
         cycle_domain_bounds,
         int_value,
-        is_all_campaign_runs,
         load_json,
         load_cycle_rows,
         write_json,
@@ -52,19 +47,11 @@ GEREM_STORAGE_CAMPAIGN_RUNS = campaign_runs_env("GEREM_STORAGE_CAMPAIGN_RUNS", 1
 EXPERIMENT_RANDOM_SEED = 2026
 _BUILTIN_INT = _builtins.int
 _INT_VALUE = int_value
-_BUILTIN_ISINSTANCE = _builtins.isinstance
-_BUILTIN_LEN = _builtins.len
-_BUILTIN_TUPLE = _builtins.tuple
 
 
-def _stable_campaign_seed(*parts: Any) -> int:
-    digest = hashlib.blake2b(digest_size=8)
-    digest.update(str(EXPERIMENT_RANDOM_SEED).encode("utf-8"))
-    digest.update(b"\0")
-    for part in parts:
-        digest.update(str(part).encode("utf-8", errors="replace"))
-        digest.update(b"\0")
-    return int.from_bytes(digest.digest(), byteorder="big", signed=False)
+def _stable_campaign_seed(*_parts: Any) -> int:
+    """Return the fixed GEREM campaign seed required for reproducible runs."""
+    return _BUILTIN_INT(EXPERIMENT_RANDOM_SEED)
 
 
 def _build_cycle_sampler(cycle_rows: Iterable[Tuple[int, int]]) -> Tuple[List[int], List[int], int]:
@@ -72,98 +59,23 @@ def _build_cycle_sampler(cycle_rows: Iterable[Tuple[int, int]]) -> Tuple[List[in
     cumulative: List[int] = []
     total = 0
     for cycle, multiplicity in cycle_rows:
-        mult = max(0, int(multiplicity))
+        mult = max(0, _BUILTIN_INT(multiplicity))
         if mult <= 0:
             continue
         total += mult
-        cycles.append(int(cycle))
-        cumulative.append(int(total))
+        cycles.append(_BUILTIN_INT(cycle))
+        cumulative.append(_BUILTIN_INT(total))
     if not cycles:
         cycles = [0]
         cumulative = [1]
         total = 1
-    return cycles, cumulative, int(total)
+    return cycles, cumulative, _BUILTIN_INT(total)
 
-
-def _cycle_weight_from_sampler(
-    sampler: Any,
-    start_cycle: int,
-    end_cycle: int,
-    _to_int: Any = _BUILTIN_INT,
-    _isinstance: Any = _BUILTIN_ISINSTANCE,
-    _len: Any = _BUILTIN_LEN,
-    _tuple: Any = _BUILTIN_TUPLE,
-) -> int:
-    cycles, cumulative, _total = (
-        sampler
-        if _isinstance(sampler, _tuple) and _len(sampler) == 3
-        else ([0], [1], 1)
-    )
-    return cycle_weight_between(
-        [_to_int(cycle) for cycle in cycles],
-        [0] + [_to_int(value) for value in cumulative],
-        _to_int(start_cycle),
-        _to_int(end_cycle),
-    )
-
-
-def _effective_entries(index: Any) -> Iterable[Tuple[Mapping[str, Any], int]]:
-    if not isinstance(index, Mapping):
-        return []
-    entries = index.get("entries", [])
-    if not isinstance(entries, list):
-        return []
-    out: List[Tuple[Mapping[str, Any], int]] = []
-    for idx, entry in enumerate(entries):
-        if not isinstance(entry, Mapping):
-            continue
-        end_cycle = _INT_VALUE(entry.get("end_cycle"), -1)
-        if idx + 1 < len(entries) and isinstance(entries[idx + 1], Mapping):
-            end_cycle = min(end_cycle, _INT_VALUE(entries[idx + 1].get("start_cycle"), end_cycle))
-        out.append((entry, int(end_cycle)))
-    return out
-
-
-def _valid_bits_for_byte(byte_addr: int, total_bits: int) -> int:
-    bit_start = int(byte_addr) * 8
-    return max(0, min(8, int(total_bits) - bit_start))
 
 
 def _sample_cycle(rng: random.Random, cycles: List[int], cumulative: List[int], total: int) -> int:
-    pick = rng.randrange(max(1, int(total)))
-    return int(cycles[bisect.bisect_right(cumulative, pick)])
-
-
-def _lookup_interval(index: Optional[Mapping[str, Any]], cycle: int) -> Optional[Mapping[str, Any]]:
-    if not isinstance(index, Mapping):
-        return None
-    starts = index.get("starts", [])
-    entries = index.get("entries", [])
-    if not isinstance(starts, list) or not isinstance(entries, list) or not starts:
-        return None
-    idx = bisect.bisect_right(starts, int(cycle)) - 1
-    if idx < 0 or idx >= len(entries):
-        return None
-    entry = entries[idx]
-    if not isinstance(entry, Mapping):
-        return None
-    if int(cycle) < _INT_VALUE(entry.get("end_cycle"), -1):
-        return entry
-    return None
-
-
-def _build_interval_index(entries: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
-    ordered = sorted(
-        (dict(entry) for entry in entries if isinstance(entry, Mapping)),
-        key=lambda entry: (
-            _INT_VALUE(entry.get("start_cycle"), 0),
-            _INT_VALUE(entry.get("end_cycle"), 0),
-        ),
-    )
-    return {
-        "starts": [_INT_VALUE(entry.get("start_cycle"), 0) for entry in ordered],
-        "entries": ordered,
-    }
+    pick = rng.randrange(max(1, _BUILTIN_INT(total)))
+    return _BUILTIN_INT(cycles[bisect.bisect_right(cumulative, pick)])
 
 
 def _component_name(raw_component: str) -> str:
@@ -305,7 +217,7 @@ def _prepare_trace_programs(trace_template: Mapping[str, Any]) -> Dict[str, Dict
         programs[entry_pc] = {
             "entry_pc": entry_pc,
             "instructions": instructions,
-            "max_steps": int(max_steps),
+            "max_steps": _BUILTIN_INT(max_steps),
         }
     return programs
 
@@ -338,7 +250,7 @@ def _program_sic_values(
     pcs = [str(pc) for pc in instructions.keys()]
     if not pcs:
         return {}
-    steps = max(0, int(max_steps) - 1)
+    steps = max(0, _BUILTIN_INT(max_steps) - 1)
     if steps <= 0:
         return {pc: 1.0 for pc in pcs}
 
@@ -434,7 +346,7 @@ def compute_smem_sic(
     program_values_cache: Dict[Tuple[str, int], Dict[str, float]] = {}
     site_probability_cache: Dict[Tuple[str, str], float] = {}
     for site, weight in dcr_sites:
-        weight_int = max(0, int(weight))
+        weight_int = max(0, _BUILTIN_INT(weight))
         if weight_int <= 0:
             continue
         pc = _canonical_pc(site.get("pc"))
@@ -442,10 +354,10 @@ def compute_smem_sic(
             raise ValueError("smem DCR site missing pc for SIC computation")
         program = _resolve_program_for_pc(programs, pc)
         max_steps = max(1, _INT_VALUE(program.get("max_steps", 256), 256))
-        program_key = (str(program.get("entry_pc", "")), int(max_steps))
+        program_key = (str(program.get("entry_pc", "")), _BUILTIN_INT(max_steps))
         values = program_values_cache.get(program_key)
         if values is None:
-            values = _program_sic_values(program, int(max_steps))
+            values = _program_sic_values(program, _BUILTIN_INT(max_steps))
             program_values_cache[program_key] = values
         site_key = (program_key[0], str(pc))
         probability = site_probability_cache.get(site_key)
@@ -470,7 +382,7 @@ def _trace_events(trace_template: Optional[Mapping[str, Any]]) -> List[Dict[str,
         if not isinstance(record, Mapping):
             continue
         row = dict(record)
-        row.setdefault("event_index", int(event_index))
+        row.setdefault("event_index", _BUILTIN_INT(event_index))
         out.append(row)
     return out
 
@@ -537,7 +449,7 @@ def _build_rf_versions(
         current = active.pop(key, None)
         if current is None:
             return
-        current["end_cycle"] = int(end_cycle)
+        current["end_cycle"] = _BUILTIN_INT(end_cycle)
         versions.append(dict(current))
 
     for event_index, raw in enumerate(events):
@@ -561,38 +473,38 @@ def _build_rf_versions(
             )
             if ident is None:
                 continue
-            key = (int(tid), ident)
+            key = (_BUILTIN_INT(tid), ident)
             current = active.get(key)
             if current is None:
                 current = {
-                    "thread_id": int(tid),
+                    "thread_id": _BUILTIN_INT(tid),
                     "register": str(reg_name),
                     "identity": list(ident),
-                    "start_cycle": int(domain_start),
+                    "start_cycle": _BUILTIN_INT(domain_start),
                     "read_cycles": [],
                 }
                 active[key] = current
             read_cycles = current.setdefault("read_cycles", [])
             if isinstance(read_cycles, list):
-                read_cycles.append(int(cycle))
+                read_cycles.append(_BUILTIN_INT(cycle))
 
         ident = _register_identity(raw.get("dst_reg"), raw.get("dst_reg_uid", -1))
         if ident is None:
             continue
-        key = (int(tid), ident)
-        finalize(key, int(cycle))
+        key = (_BUILTIN_INT(tid), ident)
+        finalize(key, _BUILTIN_INT(cycle))
         active[key] = {
-            "thread_id": int(tid),
+            "thread_id": _BUILTIN_INT(tid),
             "register": str(raw.get("dst_reg", "")),
             "identity": list(ident),
-            "start_cycle": int(cycle),
+            "start_cycle": _BUILTIN_INT(cycle),
             "read_cycles": [],
         }
 
     for key in list(active.keys()):
-        finalize(key, int(domain_end))
+        finalize(key, _BUILTIN_INT(domain_end))
 
-    return versions, int(domain_end)
+    return versions, _BUILTIN_INT(domain_end)
 
 
 def _build_smem_versions(
@@ -611,7 +523,7 @@ def _build_smem_versions(
         current = active.pop(key, None)
         if current is None:
             return
-        current["end_cycle"] = int(end_cycle)
+        current["end_cycle"] = _BUILTIN_INT(end_cycle)
         versions.append(dict(current))
 
     for event_index, raw in enumerate(events):
@@ -631,15 +543,15 @@ def _build_smem_versions(
         base_addr = _INT_VALUE(addr, 0)
         size_bytes = max(1, access_size_bytes_for_raw_event(raw))
         for byte_index in range(size_bytes):
-            byte_addr = int(base_addr + byte_index)
-            key = (int(sm_id), int(cta_id), int(byte_addr))
+            byte_addr = _BUILTIN_INT(base_addr + byte_index)
+            key = (_BUILTIN_INT(sm_id), _BUILTIN_INT(cta_id), _BUILTIN_INT(byte_addr))
             if kind == "store":
-                finalize(key, int(cycle))
+                finalize(key, _BUILTIN_INT(cycle))
                 active[key] = {
-                    "sm_id": int(sm_id),
-                    "cta_id": int(cta_id),
-                    "addr": int(byte_addr),
-                    "start_cycle": int(cycle),
+                    "sm_id": _BUILTIN_INT(sm_id),
+                    "cta_id": _BUILTIN_INT(cta_id),
+                    "addr": _BUILTIN_INT(byte_addr),
+                    "start_cycle": _BUILTIN_INT(cycle),
                     "load_sites": [],
                 }
                 continue
@@ -648,15 +560,15 @@ def _build_smem_versions(
             if current is None:
                 continue
             site = {
-                "sm_id": int(sm_id),
-                "cta_id": int(cta_id),
+                "sm_id": _BUILTIN_INT(sm_id),
+                "cta_id": _BUILTIN_INT(cta_id),
                 "thread_id": _INT_VALUE(raw.get("thread_id"), -1),
-                "cycle": int(cycle),
-                "event_index": int(event_index),
+                "cycle": _BUILTIN_INT(cycle),
+                "event_index": _BUILTIN_INT(event_index),
                 "pc": raw.get("pc"),
                 "kind": str(raw.get("kind", "")),
                 "opcode": str(raw.get("opcode", "")),
-                "addr": int(byte_addr),
+                "addr": _BUILTIN_INT(byte_addr),
             }
             load_sites.append(site)
             cur_loads = current.setdefault("load_sites", [])
@@ -664,30 +576,27 @@ def _build_smem_versions(
                 cur_loads.append(site)
 
     for key in list(active.keys()):
-        finalize(key, int(domain_end))
+        finalize(key, _BUILTIN_INT(domain_end))
 
-    return versions, int(domain_end), load_sites
+    return versions, _BUILTIN_INT(domain_end), load_sites
 
 
-def _smem_site_probability_lookup(trace_template: Mapping[str, Any], sites: Iterable[Mapping[str, Any]]) -> Dict[str, float]:
-    programs = _prepare_trace_programs(trace_template)
-    program_values_cache: Dict[Tuple[str, int], Dict[str, float]] = {}
-    probability_by_pc: Dict[str, float] = {}
-    for site in sites:
-        if not isinstance(site, Mapping):
-            continue
-        pc = _canonical_pc(site.get("pc"))
-        if pc is None or pc in probability_by_pc:
-            continue
-        program = _resolve_program_for_pc(programs, pc)
-        max_steps = max(1, _INT_VALUE(program.get("max_steps", 256), 256))
-        program_key = (str(program.get("entry_pc", "")), int(max_steps))
-        values = program_values_cache.get(program_key)
-        if values is None:
-            values = _program_sic_values(program, int(max_steps))
-            program_values_cache[program_key] = values
-        probability_by_pc[pc] = float(_site_sic_probability(site, program, values))
-    return probability_by_pc
+def _smem_sample_sic_probability(
+    programs: Mapping[str, Mapping[str, Any]],
+    site: Mapping[str, Any],
+) -> float:
+    """Compute the GEREM shared-memory SIC probability for one sampled DCR.
+
+    The sampled fault's trace/program context determines the masking
+    instructions considered by the storage-EFM SIC rule.
+    """
+    pc = _canonical_pc(site.get("pc"))
+    if pc is None:
+        raise ValueError("smem DCR site missing pc for SIC computation")
+    program = _resolve_program_for_pc(programs, pc)
+    max_steps = max(1, _INT_VALUE(program.get("max_steps", 256), 256))
+    values = _program_sic_values(program, _BUILTIN_INT(max_steps))
+    return float(_site_sic_probability(site, program, values))
 
 
 def _prepare_rf_campaign_state(
@@ -698,7 +607,7 @@ def _prepare_rf_campaign_state(
     row = _component_row_required(fi_sampling_space, "rf")
     cycle_rows = load_cycle_rows(fi_sampling_space, trace_template)
     versions, _domain_end = _build_rf_versions(trace_template, fi_sampling_space=fi_sampling_space)
-    versions_by_key: Dict[Tuple[int, str], List[Dict[str, Any]]] = {}
+    scan_versions: List[Dict[str, Any]] = []
     for version in versions:
         tid = _INT_VALUE(version.get("thread_id"), -1)
         reg_name = str(version.get("register", "")).strip()
@@ -710,26 +619,25 @@ def _prepare_rf_campaign_state(
             if _INT_VALUE(raw_cycle, -1) >= 0
         )
         dcr_end = max(read_cycles) if read_cycles else _INT_VALUE(version.get("start_cycle"), 0)
-        versions_by_key.setdefault((int(tid), reg_name), []).append(
+        scan_versions.append(
             {
+                "thread_id": _BUILTIN_INT(tid),
+                "register": reg_name,
                 "start_cycle": _INT_VALUE(version.get("start_cycle"), 0),
                 "end_cycle": _INT_VALUE(version.get("end_cycle"), 0),
-                "dcr_end_cycle": int(dcr_end),
+                "dcr_end_cycle": _BUILTIN_INT(dcr_end),
             }
         )
     register_rows = _load_register_rows(fi_sampling_space)
     return {
         "cycle_sampler": _build_cycle_sampler(cycle_rows),
         "register_rows": list(register_rows),
-        "datatype_bits": int(_datatype_bits(fi_sampling_space)),
+        "datatype_bits": _BUILTIN_INT(_datatype_bits(fi_sampling_space)),
         "seed_domain_size": max(1, _INT_VALUE(row.get("seed_domain_size"), _INT_VALUE(fi_sampling_space.get("thread_rand_max"), 1))),
         "domain_bits_per_seed": max(1, _INT_VALUE(row.get("domain_bits_per_seed"), len(register_rows) * _datatype_bits(fi_sampling_space))),
         "denominator": float(component_denominator(fi_sampling_space, "rf", fallback=0.0)),
         "version_count": len(versions),
-        "lookup": {
-            key: _build_interval_index(entries)
-            for key, entries in versions_by_key.items()
-        },
+        "versions": scan_versions,
     }
 
 
@@ -744,14 +652,26 @@ def _classify_rf_fault(
     reg_rows = state.get("register_rows", [])
     if not isinstance(reg_rows, list) or not reg_rows:
         return "benign"
-    reg_slot = int(bit_index) // int(datatype_bits)
+    reg_slot = _BUILTIN_INT(bit_index) // _BUILTIN_INT(datatype_bits)
     if reg_slot < 0 or reg_slot >= len(reg_rows):
         return "benign"
     reg_name = str(reg_rows[reg_slot]).strip()
-    interval = _lookup_interval(state.get("lookup", {}).get((int(thread_seed), reg_name)), int(cycle))
-    if interval is None:
+    versions = state.get("versions", [])
+    if not isinstance(versions, list):
         return "benign"
-    return "dcr" if int(cycle) < _INT_VALUE(interval.get("dcr_end_cycle"), -1) else "benign"
+    cycle_i = _BUILTIN_INT(cycle)
+    for version in versions:
+        if not isinstance(version, Mapping):
+            continue
+        if _INT_VALUE(version.get("thread_id"), -1) != _BUILTIN_INT(thread_seed):
+            continue
+        if str(version.get("register", "")).strip() != reg_name:
+            continue
+        start_cycle = _INT_VALUE(version.get("start_cycle"), 0)
+        end_cycle = _INT_VALUE(version.get("end_cycle"), start_cycle)
+        if start_cycle <= cycle_i < end_cycle:
+            return "dcr" if cycle_i < _INT_VALUE(version.get("dcr_end_cycle"), -1) else "benign"
+    return "benign"
 
 
 def _run_rf_campaign(
@@ -761,47 +681,16 @@ def _run_rf_campaign(
     rng_seed: int,
 ) -> Dict[str, float]:
     cycles, cumulative, total = state.get("cycle_sampler", ([0], [1], 1))
-    rng = random.Random(int(rng_seed))
+    rng = random.Random(_BUILTIN_INT(rng_seed))
     counts = {"benign": 0, "dcr": 0, "ebc": 0}
     seed_domain_size = max(1, _INT_VALUE(state.get("seed_domain_size"), 1))
     per_seed_bits = max(1, _INT_VALUE(state.get("domain_bits_per_seed"), 1))
-    for _ in range(max(1, int(campaign_runs))):
-        cycle = _sample_cycle(rng, list(cycles), list(cumulative), int(total))
+    for _ in range(max(1, _BUILTIN_INT(campaign_runs))):
+        cycle = _sample_cycle(rng, list(cycles), list(cumulative), _BUILTIN_INT(total))
         thread_seed = rng.randrange(seed_domain_size)
         bit_index = rng.randrange(per_seed_bits)
         counts[_classify_rf_fault(state, cycle=cycle, thread_seed=thread_seed, bit_index=bit_index)] += 1
     return {"counts": counts}
-
-
-def _run_rf_all_fault_points(state: Mapping[str, Any]) -> Dict[str, Any]:
-    _cycles, _cumulative, cycle_total = state.get("cycle_sampler", ([0], [1], 1))
-    seed_domain_size = max(1, _INT_VALUE(state.get("seed_domain_size"), 1))
-    per_seed_bits = max(1, _INT_VALUE(state.get("domain_bits_per_seed"), 1))
-    domain_points = int(cycle_total) * int(seed_domain_size) * int(per_seed_bits)
-    datatype_bits = max(1, _INT_VALUE(state.get("datatype_bits"), 32))
-    register_rows = {str(row).strip() for row in state.get("register_rows", []) if str(row).strip()}
-
-    dcr_bits = 0
-    lookup = state.get("lookup", {})
-    if isinstance(lookup, Mapping):
-        for key, index in lookup.items():
-            if not isinstance(key, tuple) or len(key) != 2:
-                continue
-            reg_name = str(key[1]).strip()
-            if reg_name not in register_rows:
-                continue
-            for interval, effective_end in _effective_entries(index):
-                start_cycle = _INT_VALUE(interval.get("start_cycle"), 0)
-                dcr_end = min(_INT_VALUE(interval.get("dcr_end_cycle"), start_cycle), int(effective_end))
-                if dcr_end <= start_cycle:
-                    continue
-                dcr_bits += _cycle_weight_from_sampler(state.get("cycle_sampler"), start_cycle, dcr_end) * datatype_bits
-
-    dcr_bits = min(max(0, int(dcr_bits)), int(domain_points))
-    return {
-        "counts": {"benign": int(domain_points - dcr_bits), "dcr": int(dcr_bits), "ebc": 0},
-        "domain_points": int(domain_points),
-    }
 
 
 def _prepare_smem_campaign_state(
@@ -815,8 +704,8 @@ def _prepare_smem_campaign_state(
         trace_template,
         fi_sampling_space=fi_sampling_space,
     )
-    site_sic_by_pc = _smem_site_probability_lookup(trace_template, trace_load_sites)
-    versions_by_key: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+    programs = _prepare_trace_programs(trace_template)
+    scan_versions: List[Dict[str, Any]] = []
     for version in versions:
         cta_id = _INT_VALUE(version.get("cta_id"), -1)
         addr = _INT_VALUE(version.get("addr"), -1)
@@ -833,28 +722,13 @@ def _prepare_smem_campaign_state(
                 _INT_VALUE(site.get("event_index"), 0),
             )
         )
-        segments: List[Dict[str, Any]] = []
-        segment_start = _INT_VALUE(version.get("start_cycle"), 0)
-        for site in load_sites:
-            load_cycle = _INT_VALUE(site.get("cycle"), segment_start)
-            if load_cycle > segment_start:
-                pc = _canonical_pc(site.get("pc"))
-                if pc is None or pc not in site_sic_by_pc:
-                    raise ValueError("smem DCR site missing trace pc for SIC computation")
-                segments.append(
-                    {
-                        "start_cycle": int(segment_start),
-                        "end_cycle": int(load_cycle),
-                        "sic": float(site_sic_by_pc[pc]),
-                    }
-                )
-            segment_start = int(load_cycle)
-        versions_by_key.setdefault((int(cta_id), int(addr)), []).append(
+        scan_versions.append(
             {
+                "cta_id": _BUILTIN_INT(cta_id),
+                "addr": _BUILTIN_INT(addr),
                 "start_cycle": _INT_VALUE(version.get("start_cycle"), 0),
                 "end_cycle": _INT_VALUE(version.get("end_cycle"), 0),
-                "segments": segments,
-                "segment_index": _build_interval_index(segments),
+                "load_sites": load_sites,
             }
         )
     return {
@@ -864,10 +738,8 @@ def _prepare_smem_campaign_state(
         "denominator": float(component_denominator(fi_sampling_space, "smem_rf", fallback=0.0)),
         "version_count": len(versions),
         "trace_load_site_count": len(trace_load_sites),
-        "lookup": {
-            key: _build_interval_index(entries)
-            for key, entries in versions_by_key.items()
-        },
+        "versions": scan_versions,
+        "programs": programs,
     }
 
 
@@ -878,14 +750,36 @@ def _classify_smem_fault(
     block_seed: int,
     bit_index: int,
 ) -> Tuple[str, float]:
-    byte_addr = int(bit_index) // 8
-    interval = _lookup_interval(state.get("lookup", {}).get((int(block_seed), int(byte_addr))), int(cycle))
-    if interval is None:
+    byte_addr = _BUILTIN_INT(bit_index) // 8
+    versions = state.get("versions", [])
+    if not isinstance(versions, list):
         return ("benign", 1.0)
-    segment = _lookup_interval(interval.get("segment_index"), int(cycle))
-    if segment is None:
+    cycle_i = _BUILTIN_INT(cycle)
+    for version in versions:
+        if not isinstance(version, Mapping):
+            continue
+        if _INT_VALUE(version.get("cta_id"), -1) != _BUILTIN_INT(block_seed):
+            continue
+        if _INT_VALUE(version.get("addr"), -1) != _BUILTIN_INT(byte_addr):
+            continue
+        start_cycle = _INT_VALUE(version.get("start_cycle"), 0)
+        end_cycle = _INT_VALUE(version.get("end_cycle"), start_cycle)
+        if not (start_cycle <= cycle_i < end_cycle):
+            continue
+        load_sites = version.get("load_sites", [])
+        if not isinstance(load_sites, list):
+            return ("benign", 1.0)
+        for site in load_sites:
+            if not isinstance(site, Mapping):
+                continue
+            load_cycle = _INT_VALUE(site.get("cycle"), start_cycle)
+            if cycle_i < load_cycle:
+                programs = state.get("programs", {})
+                if not isinstance(programs, Mapping):
+                    raise ValueError("smem SIC requires trace program context")
+                return ("dcr", _smem_sample_sic_probability(programs, site))
         return ("benign", 1.0)
-    return ("dcr", float(segment.get("sic", 1.0)))
+    return ("benign", 1.0)
 
 
 def _run_smem_campaign(
@@ -895,13 +789,13 @@ def _run_smem_campaign(
     rng_seed: int,
 ) -> Dict[str, Any]:
     cycles, cumulative, total = state.get("cycle_sampler", ([0], [1], 1))
-    rng = random.Random(int(rng_seed))
+    rng = random.Random(_BUILTIN_INT(rng_seed))
     counts = {"benign": 0, "dcr": 0, "ebc": 0}
     seed_domain_size = max(1, _INT_VALUE(state.get("seed_domain_size"), 1))
     per_seed_bits = max(1, _INT_VALUE(state.get("domain_bits_per_seed"), 1))
     sic_sum = 0.0
-    for _ in range(max(1, int(campaign_runs))):
-        cycle = _sample_cycle(rng, list(cycles), list(cumulative), int(total))
+    for _ in range(max(1, _BUILTIN_INT(campaign_runs))):
+        cycle = _sample_cycle(rng, list(cycles), list(cumulative), _BUILTIN_INT(total))
         block_seed = rng.randrange(seed_domain_size)
         bit_index = rng.randrange(per_seed_bits)
         category, sic = _classify_smem_fault(
@@ -916,44 +810,6 @@ def _run_smem_campaign(
     return {"counts": counts, "sic_sum": float(sic_sum)}
 
 
-def _run_smem_all_fault_points(state: Mapping[str, Any]) -> Dict[str, Any]:
-    _cycles, _cumulative, cycle_total = state.get("cycle_sampler", ([0], [1], 1))
-    seed_domain_size = max(1, _INT_VALUE(state.get("seed_domain_size"), 1))
-    per_seed_bits = max(1, _INT_VALUE(state.get("domain_bits_per_seed"), 1))
-    domain_points = int(cycle_total) * int(seed_domain_size) * int(per_seed_bits)
-
-    dcr_bits = 0
-    sic_sum = 0.0
-    lookup = state.get("lookup", {})
-    if isinstance(lookup, Mapping):
-        for key, index in lookup.items():
-            if not isinstance(key, tuple) or len(key) != 2:
-                continue
-            byte_addr = _INT_VALUE(key[1], -1)
-            bits_in_byte = _valid_bits_for_byte(byte_addr, per_seed_bits)
-            if bits_in_byte <= 0:
-                continue
-            for interval, version_end in _effective_entries(index):
-                for segment, segment_end in _effective_entries(interval.get("segment_index")):
-                    start_cycle = max(
-                        _INT_VALUE(interval.get("start_cycle"), 0),
-                        _INT_VALUE(segment.get("start_cycle"), 0),
-                    )
-                    end_cycle = min(int(version_end), int(segment_end))
-                    if end_cycle <= start_cycle:
-                        continue
-                    bit_weight = _cycle_weight_from_sampler(state.get("cycle_sampler"), start_cycle, end_cycle) * bits_in_byte
-                    if bit_weight <= 0:
-                        continue
-                    dcr_bits += int(bit_weight)
-                    sic_sum += float(bit_weight) * float(segment.get("sic", 1.0))
-
-    dcr_bits = min(max(0, int(dcr_bits)), int(domain_points))
-    return {
-        "counts": {"benign": int(domain_points - dcr_bits), "dcr": int(dcr_bits), "ebc": 0},
-        "sic_sum": float(sic_sum),
-        "domain_points": int(domain_points),
-    }
 def predict_rf(
     *,
     benchmark: str,
@@ -971,18 +827,13 @@ def predict_rf(
         trace_template=trace_template,
     )
     campaign_seed = _stable_campaign_seed(benchmark, test_id, "rf")
-    if is_all_campaign_runs(GEREM_STORAGE_CAMPAIGN_RUNS):
-        campaign = _run_rf_all_fault_points(state)
-        campaign_runs = int(campaign["domain_points"])
-        campaign_mode = "all"
-    else:
-        campaign = _run_rf_campaign(
-            state,
-            campaign_runs=int(GEREM_STORAGE_CAMPAIGN_RUNS),
-            rng_seed=campaign_seed,
-        )
-        campaign_runs = max(1, int(GEREM_STORAGE_CAMPAIGN_RUNS))
-        campaign_mode = "sample"
+    campaign = _run_rf_campaign(
+        state,
+        campaign_runs=_BUILTIN_INT(GEREM_STORAGE_CAMPAIGN_RUNS),
+        rng_seed=campaign_seed,
+    )
+    campaign_runs = max(1, _BUILTIN_INT(GEREM_STORAGE_CAMPAIGN_RUNS))
+    campaign_mode = "sample"
     counts = campaign["counts"]
     denominator = float(state["denominator"])
     efm_rates = {
@@ -1003,13 +854,13 @@ def predict_rf(
         efm_rates=efm_rates,
         final_rates=final_rates,
         meta={
-            "trace_version_count": int(state["version_count"]),
+            "trace_version_count": _BUILTIN_INT(state["version_count"]),
             "register_domain_size": len(state["register_rows"]),
-            "datatype_bits": int(state["datatype_bits"]),
-            "campaign_runs": int(campaign_runs),
+            "datatype_bits": _BUILTIN_INT(state["datatype_bits"]),
+            "campaign_runs": _BUILTIN_INT(campaign_runs),
             "campaign_mode": campaign_mode,
-            "campaign_seed": int(campaign_seed),
-            "rule": "rf_per_run_trace_efm_direct",
+            "campaign_seed": _BUILTIN_INT(campaign_seed),
+            "rule": "rf_random_sample_storage_efm_trace_scan",
         },
     )
 
@@ -1031,20 +882,15 @@ def predict_smem(
         trace_template=trace_template,
     )
     campaign_seed = _stable_campaign_seed(benchmark, test_id, "smem_rf")
-    if is_all_campaign_runs(GEREM_STORAGE_CAMPAIGN_RUNS):
-        campaign = _run_smem_all_fault_points(state)
-        campaign_runs = int(campaign["domain_points"])
-        campaign_mode = "all"
-    else:
-        campaign = _run_smem_campaign(
-            state,
-            campaign_runs=int(GEREM_STORAGE_CAMPAIGN_RUNS),
-            rng_seed=campaign_seed,
-        )
-        campaign_runs = max(1, int(GEREM_STORAGE_CAMPAIGN_RUNS))
-        campaign_mode = "sample"
+    campaign = _run_smem_campaign(
+        state,
+        campaign_runs=_BUILTIN_INT(GEREM_STORAGE_CAMPAIGN_RUNS),
+        rng_seed=campaign_seed,
+    )
+    campaign_runs = max(1, _BUILTIN_INT(GEREM_STORAGE_CAMPAIGN_RUNS))
+    campaign_mode = "sample"
     counts = campaign["counts"]
-    dcr_runs = int(counts["dcr"])
+    dcr_runs = _BUILTIN_INT(counts["dcr"])
     sic = 1.0 if dcr_runs <= 0 else float(campaign["sic_sum"]) / float(dcr_runs)
     denominator = float(state["denominator"])
     efm_rates = {
@@ -1065,15 +911,15 @@ def predict_smem(
         efm_rates=efm_rates,
         final_rates=final_rates,
         meta={
-            "trace_version_count": int(state["version_count"]),
-            "trace_load_site_count": int(state["trace_load_site_count"]),
+            "trace_version_count": _BUILTIN_INT(state["version_count"]),
+            "trace_load_site_count": _BUILTIN_INT(state["trace_load_site_count"]),
             "smem_sic": float(sic),
             "sic": float(sic),
-            "campaign_runs": int(campaign_runs),
+            "campaign_runs": _BUILTIN_INT(campaign_runs),
             "campaign_mode": campaign_mode,
-            "campaign_seed": int(campaign_seed),
-            "campaign_dcr_runs": int(dcr_runs),
-            "rule": "smem_per_run_trace_static_sic",
+            "campaign_seed": _BUILTIN_INT(campaign_seed),
+            "campaign_dcr_runs": _BUILTIN_INT(dcr_runs),
+            "rule": "smem_random_sample_storage_efm_trace_scan_static_sic",
         },
     )
 

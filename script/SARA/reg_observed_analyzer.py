@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """Offline backward analyzer for register-read observed-bit masks + exact DUE.
 
 Input format:
@@ -54,6 +55,7 @@ _BUILTIN_LEN = _builtins.len
 _BUILTIN_LIST = _builtins.list
 _BUILTIN_MAX = _builtins.max
 _BUILTIN_MIN = _builtins.min
+_BUILTIN_STR = _builtins.str
 _BUILTIN_TUPLE = _builtins.tuple
 EXPERIMENT_RANDOM_SEED = 2026
 
@@ -77,7 +79,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
-import exact_cpp_backend as exact_cpp_backend
 import outcome_oracle as shared_output_oracle
 
 try:
@@ -91,18 +92,50 @@ except Exception:
     _zstd = None
 
 
-_CPP_BACKWARD_INFLUENCE_ENABLED = (
-    os.environ.get("REG_OBSERVED_USE_CPP_BACKWARD_INFLUENCE", "1") != "0"
-)
-_CPP_BACKWARD_INFLUENCE_FAILED = False
-_CPP_CONTROL_TAINT_HASH_ENABLED = (
-    os.environ.get("REG_OBSERVED_USE_CPP_CONTROL_TAINT_HASH", "1") != "0"
-)
-_CPP_CONTROL_TAINT_HASH_FAILED = False
-_CPP_TOLERANCE_PATH_EVAL_ENABLED = (
-    os.environ.get("REG_OBSERVED_USE_CPP_TOLERANCE_PATH_EVAL", "1") != "0"
-)
-_CPP_TOLERANCE_PATH_EVAL_FAILED = False
+def _text(value: Any) -> str:
+    """Return a plain built-in str even if callers pass string-like objects.
+
+    Some analyzer paths store opcodes inside compact cache/manifest records and
+    later replay those records after binary/pickle/json round trips.  Keep all
+    opcode helpers insulated from objects whose attributes can shadow normal
+    string methods (for example a non-builtin string-like value with a textual
+    ``startswith`` attribute).
+    """
+
+    if value is None:
+        return ""
+    return _BUILTIN_STR(value)
+
+
+def _text_startswith(value: Any, prefix: str) -> bool:
+    """startswith for opcode strings without relying on a possibly shadowed method.
+
+    Long SARA runs replay opcodes through several compact/binary/pickle paths.
+    Keeping the hot opcode helpers on plain built-in conversions plus slicing
+    prevents string-like payloads from exposing a non-callable ``startswith``
+    attribute and makes the helper immune to accidental built-in name shadowing.
+    """
+
+    text = _text(value)
+    prefix_text = _text(prefix)
+    return text[: _BUILTIN_LEN(prefix_text)] == prefix_text
+
+
+def _text_in(value: Any, names: Sequence[str]) -> bool:
+    """Return whether value textually equals one of names without tuple ``in``.
+
+    A few historical failures occurred while replaying compact opcode artifacts,
+    where traceback line cache pointed at tuple
+    membership even though the logical operation was just an opcode equality
+    check.  Use an explicit equality loop so mixed string-like/tuple payloads
+    cannot trigger ordering comparisons inside optimized membership paths.
+    """
+
+    text = _text(value)
+    for name in names:
+        if text == _text(name):
+            return True
+    return False
 
 
 def _json_load_path(path: Path) -> Any:
@@ -167,12 +200,7 @@ def _binary_sidecar_payload_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
             out[f"{key}_count"] = int(len(rows))
     meta = payload.get("exact_meta", {})
     if isinstance(meta, dict):
-        for key in (
-            "fault_component",
-            "trace_expanding_bits_total",
-            "trace_expanding_read_bits_total",
-            "trace_expanding_site_bits_total"
-        ):
+        for key in ("fault_component",):
             if key in meta:
                 out[key] = meta.get(key)
     return out
@@ -192,46 +220,8 @@ def _write_binary_output_manifest(output_path: Path, payload: Dict[str, Any]) ->
     _json_dump_path(output_path, manifest)
 
 
-def _cpp_backward_influence(
-    *,
-    op: str,
-    src_vals: Sequence[int],
-    dst_val: int,
-    dst_observed_mask: int,
-    width_bits_default: int,
-) -> Optional[List[int]]:
-    global _CPP_BACKWARD_INFLUENCE_FAILED
-    if not _CPP_BACKWARD_INFLUENCE_ENABLED or _CPP_BACKWARD_INFLUENCE_FAILED:
-        return None
-    try:
-        return exact_cpp_backend.backward_influence(
-            op=op,
-            src_vals=src_vals,
-            dst_val=dst_val,
-            dst_observed_mask=dst_observed_mask,
-            width_bits=width_bits_default,
-            signed_mode=False
-        )
-    except Exception:
-        _CPP_BACKWARD_INFLUENCE_FAILED = True
-        return None
-
-
-def _cpp_backward_influence_many(
-    requests: Sequence[Dict[str, Any]],
-) -> Optional[List[List[int]]]:
-    global _CPP_BACKWARD_INFLUENCE_FAILED
-    if not _CPP_BACKWARD_INFLUENCE_ENABLED or _CPP_BACKWARD_INFLUENCE_FAILED:
-        return None
-    try:
-        return exact_cpp_backend.backward_influence_many(requests)
-    except Exception:
-        _CPP_BACKWARD_INFLUENCE_FAILED = True
-        return None
-
-
 try:
-    from dataclasses import dataclass as _stdlib_dataclass
+    from dataclasses import dataclass as _stdlib_dataclass, field as dataclass_field
     _DATACLASS_SUPPORTS_SLOTS = "slots" in inspect.signature(
         _stdlib_dataclass
     ).parameters
@@ -247,6 +237,11 @@ try:
             return _apply
         return _apply(_cls)
 except ImportError:
+    def dataclass_field(*_args, default=None, default_factory=None, **_kwargs):
+        if default_factory is not None:
+            return default_factory()
+        return default
+
     def dataclass(_cls=None, **_kwargs):
         def wrap(cls):
             fields = list(getattr(cls, "__annotations__", {}).keys())
@@ -429,24 +424,6 @@ _OPERAND_IMM = 0
 _OPERAND_PRED = 1
 _OPERAND_REG = 2
 LITE_OUTPUT_PROFILES = ("compat", "compute")
-FLOAT_TOLERANCE_BACKWARD_OPS = frozenset(
-    (
-        "IDENTITY",
-        "NEG_F32",
-        "ABS_F32",
-        "ADD_F32",
-        "SUB_F32",
-        "MUL_F32",
-        "FMA_F32",
-        "DIV_F32",
-        "SQRT_F32",
-        "EX2_APPROX_FTZ_F32",
-        "RCP_APPROX_FTZ_F32",
-        "CVT_SAT_F32_F32",
-        "MIN_F32",
-        "MAX_F32",
-    )
-)
 LITE_READ_EVENT_KEYS_COMPAT = (
     "event_index",
     "thread_id",
@@ -614,6 +591,13 @@ def coerce_positive_width_bits(
 
 
 def width_mask(width_bits: Any) -> int:
+    if type(width_bits) is int:
+        w = width_bits
+        if w <= 0:
+            return 0
+        if w >= 64:
+            return UINT64_MASK
+        return _WIDTH_MASK_TABLE[w]
     w = coerce_width_bits(width_bits, default=64)
     if w <= 0:
         return 0
@@ -637,18 +621,10 @@ _BYTE_POPCOUNT = tuple(bin(i).count("1") for i in range(256))
 
 def popcount(x: int) -> int:
     v = int(x & UINT64_MASK)
-    if hasattr(v, "bit_count"):
+    try:
         return v.bit_count()  # type: ignore[attr-defined]
-    return (
-        _BYTE_POPCOUNT[v & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 8) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 16) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 24) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 32) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 40) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 48) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 56) & 0xFF]
-    )
+    except AttributeError:  # pragma: no cover - Python < 3.8 compatibility
+        return sum(_BYTE_POPCOUNT[byte] for byte in v.to_bytes(8, "little"))
 
 
 def iter_set_bits(mask: int):
@@ -1100,6 +1076,7 @@ def build_compact_site_record(
     return out
 
 
+
 def compact_site_records_in_place(
     records: List[Any],
     *,
@@ -1113,101 +1090,6 @@ def compact_site_records_in_place(
             mask_format=mask_format,
         )
     return records
-
-
-def compute_trace_expanding_stats_from_analyzer_rows(
-    read_events: List[Any],
-    smem_fault_sites: List[Any],
-    l1d_fault_sites: List[Any],
-    l2_fault_sites: List[Any],
-) -> Dict[str, int]:
-    read_present = 0
-    read_bits = 0
-    site_present = 0
-    site_bits = 0
-
-    for rec in read_events:
-        if _is_compact_compute_read_row(rec):
-            read_present += 1
-            width = coerce_width_bits(
-                _compact_row_get(
-                    rec,
-                    index_map=COMPACT_READ_EVENT_KEYS_COMPUTE_INDEX,
-                    key="src_width_bits",
-                    default=64,
-                ),
-                default=64,
-            )
-            trace_mask = mask_as_int(
-                _compact_row_get(
-                    rec,
-                    index_map=COMPACT_READ_EVENT_KEYS_COMPUTE_INDEX,
-                    key="trace_expanding_mask_this_read",
-                    default=0,
-                )
-            )
-        elif isinstance(rec, dict):
-            if "trace_expanding_mask_this_read" in rec:
-                read_present += 1
-            width = coerce_width_bits(rec.get("src_width_bits", 64), default=64)
-            trace_mask = mask_as_int(rec.get("trace_expanding_mask_this_read", 0))
-        else:
-            continue
-        read_bits += int(
-            popcount(
-                trace_mask & width_mask(width)
-            )
-        )
-
-    for rows, family in (
-        (smem_fault_sites, "smem"),
-        (l1d_fault_sites, "cache"),
-        (l2_fault_sites, "cache"),
-    ):
-        for rec in rows:
-            if family == "smem" and _is_compact_smem_site_row(rec):
-                site_present += 1
-                width = 8
-                trace_mask = mask_as_int(
-                    _compact_row_get(
-                        rec,
-                        index_map=COMPACT_SMEM_SITE_KEYS_INDEX,
-                        key="trace_expanding_mask_this_site",
-                        default=0,
-                    )
-                )
-            elif family == "cache" and _is_compact_cache_site_row(rec):
-                site_present += 1
-                width = 8
-                trace_mask = mask_as_int(
-                    _compact_row_get(
-                        rec,
-                        index_map=COMPACT_CACHE_SITE_KEYS_INDEX,
-                        key="trace_expanding_mask_this_site",
-                        default=0,
-                    )
-                )
-            elif isinstance(rec, dict):
-                if "trace_expanding_mask_this_site" in rec:
-                    site_present += 1
-                width = coerce_width_bits(rec.get("width_bits", 8), default=8)
-                trace_mask = mask_as_int(rec.get("trace_expanding_mask_this_site", 0))
-            else:
-                continue
-            site_bits += int(
-                popcount(
-                    trace_mask & width_mask(width)
-                )
-            )
-
-    return {
-        "trace_expanding_read_mask_present_count": int(read_present),
-        "trace_expanding_read_bits_total": int(read_bits),
-        "trace_expanding_site_mask_present_count": int(site_present),
-        "trace_expanding_site_bits_total": int(site_bits),
-        "trace_expanding_mask_present_count": int(read_present + site_present),
-        "trace_expanding_bits_total": int(read_bits + site_bits),
-    }
 
 
 def aggregate_lite_read_records(
@@ -1356,7 +1238,7 @@ def _normalize_opcode_cached(opcode: str) -> str:
 
 
 def normalize_opcode(opcode: str) -> str:
-    return _normalize_opcode_cached(str(opcode))
+    return _normalize_opcode_cached(_text(opcode))
 
 
 def canonical_space(space: Optional[str]) -> Optional[str]:
@@ -1380,6 +1262,7 @@ def _canonical_space_cached(space: str) -> str:
 
 
 def infer_space_from_opcode(opcode: str) -> Optional[str]:
+    opcode = _text(opcode)
     op = opcode.strip().lower()
     if ".global" in op:
         return "global"
@@ -1608,6 +1491,65 @@ class TraceEvent:
     warp_id: Optional[int]
 
 
+def _is_basic_block_transfer_event(ev: TraceEvent) -> bool:
+    """True for events whose backward transfer is register-local and reorder-safe.
+
+    These events do not read/write memory, do not alter control-flow state, and
+    are not predicated.  A per-thread run of such events can be summarized as a
+    basic-block transfer because interleaved events from other threads cannot
+    observe or mutate this thread's register liveness state.
+    """
+
+    return (
+        ev.kind not in ("store", "load", "branch", "loop_branch")
+        and ev.dst_reg is not None
+        and ev.pred is None
+    )
+
+
+def _build_basic_block_transfer_maps(
+    events: Sequence[TraceEvent],
+    *,
+    min_len: int,
+) -> Tuple[Dict[int, Tuple[TraceEvent, ...]], Dict[int, int]]:
+    """Build per-thread pure-register block maps keyed by global event position.
+
+    The analyzer walks ``events`` in reverse global order.  For each thread we
+    group consecutive pure-register events in that thread's own dynamic stream,
+    even if other threads are interleaved in the global stream.  This is exact
+    because these blocks only touch the owning thread's register state.
+    """
+
+    min_len_i = max(2, int(min_len))
+    open_blocks: Dict[int, List[int]] = {}
+    block_end_to_events: Dict[int, Tuple[TraceEvent, ...]] = {}
+    block_member_to_end: Dict[int, int] = {}
+
+    def finish_thread_block(thread_id: int) -> None:
+        positions = open_blocks.get(thread_id)
+        if not positions:
+            open_blocks[thread_id] = []
+            return
+        if len(positions) >= min_len_i:
+            end_pos = int(positions[-1])
+            block_end_to_events[end_pos] = tuple(events[pos] for pos in positions)
+            for pos in positions:
+                block_member_to_end[int(pos)] = end_pos
+        open_blocks[thread_id] = []
+
+    for pos, ev in enumerate(events):
+        thread_id = int(ev.thread_id)
+        if _is_basic_block_transfer_event(ev):
+            open_blocks.setdefault(thread_id, []).append(int(pos))
+        else:
+            finish_thread_block(thread_id)
+
+    for thread_id in list(open_blocks.keys()):
+        finish_thread_block(int(thread_id))
+
+    return block_end_to_events, block_member_to_end
+
+
 @dataclass(frozen=True)
 class EAAnalysis:
     expr: Optional[EAExpr]
@@ -1618,129 +1560,8 @@ class EAAnalysis:
     src_indices: Tuple[int, ...]
     src_width_bits: Tuple[int, ...]
 
-
-@dataclass(frozen=True)
-class ToleranceStep:
-    op: str
-    src_vals: Tuple[int, ...]
-    width_bits_default: int
-    tracked_src_index: int
-
-    def __hash__(self) -> int:
-        return _tolerance_step_hash(self)
-
-
-@dataclass(frozen=True)
-class ToleranceComparePolicy:
-    scalar_kind: str
-    compare_kind: str
-    float_abs_tol: float
-    float_rel_tol: float
-    nan_equal: bool
-    inf_sign_must_match: bool
-
-    def __hash__(self) -> int:
-        return _tolerance_compare_policy_hash(self)
-
-
-@dataclass(frozen=True)
-class TolerancePath:
-    final_width_bits: int
-    baseline_final_bits: int
-    compare_policy: ToleranceComparePolicy
-    steps: Tuple[ToleranceStep, ...]
-
-    def __hash__(self) -> int:
-        return _tolerance_path_hash(self)
-
-
-def _tolerance_step_hash(step: Any) -> int:
-    return _BUILTIN_HASH(
-        (
-            str(getattr(step, "op", "")),
-            tuple(int(v) & UINT64_MASK for v in getattr(step, "src_vals", ()) or ()),
-            int(getattr(step, "width_bits_default", 0) or 0),
-            int(getattr(step, "tracked_src_index", 0) or 0)
-        )
-    )
-
-
-def _tolerance_compare_policy_hash(policy: Any) -> int:
-    """Hash compare policies by the fields used for tolerance decisions."""
-
-    return _BUILTIN_HASH(
-        (
-            str(getattr(policy, "scalar_kind", "") or ""),
-            str(getattr(policy, "compare_kind", "") or ""),
-            float(getattr(policy, "float_abs_tol", 0.0) or 0.0),
-            float(getattr(policy, "float_rel_tol", 0.0) or 0.0),
-            bool(getattr(policy, "nan_equal", True)),
-            bool(getattr(policy, "inf_sign_must_match", True))
-        )
-    )
-
-
-def _tolerance_path_hash(path: Any) -> int:
-    return _BUILTIN_HASH(
-        (
-            int(getattr(path, "final_width_bits", 0) or 0),
-            int(getattr(path, "baseline_final_bits", 0) or 0),
-            _tolerance_compare_policy_hash(getattr(path, "compare_policy", None)),
-            tuple(_tolerance_step_hash(step) for step in getattr(path, "steps", ()) or ())
-        )
-    )
-
-
-def _cpp_tolerance_path_payload(path: TolerancePath) -> Dict[str, Any]:
-    return {
-        "final_width_bits": int(path.final_width_bits),
-        "steps": tuple(
-            {
-                "op": str(step.op),
-                "src_vals": tuple(int(v) & UINT64_MASK for v in step.src_vals),
-                "width_bits_default": int(step.width_bits_default),
-                "tracked_src_index": int(step.tracked_src_index),
-            }
-            for step in path.steps
-        ),
-    }
-
-
-def _cpp_evaluate_tolerance_path_bits_many(
-    path_requests: Sequence[Tuple[TolerancePath, int]],
-) -> Optional[List[int]]:
-    global _CPP_TOLERANCE_PATH_EVAL_FAILED
-    if (
-        not _CPP_TOLERANCE_PATH_EVAL_ENABLED
-        or _CPP_TOLERANCE_PATH_EVAL_FAILED
-        or not path_requests
-    ):
-        return [] if not path_requests else None
-
-    path_to_index: Dict[int, int] = {}
-    payloads: List[Dict[str, Any]] = []
-    requests: List[Tuple[int, int]] = []
-    for path, current_value in path_requests:
-        path_key = int(id(path))
-        path_index = path_to_index.get(path_key)
-        if path_index is None:
-            path_index = len(payloads)
-            path_to_index[path_key] = path_index
-            payloads.append(_cpp_tolerance_path_payload(path))
-        requests.append((int(path_index), int(current_value) & UINT64_MASK))
-
-    try:
-        return exact_cpp_backend.evaluate_tolerance_paths_many(
-            paths=payloads,
-            requests=requests
-        )
-    except Exception:
-        _CPP_TOLERANCE_PATH_EVAL_FAILED = True
-        return None
-
-
 @lru_cache(maxsize=4096)
-def canonical_op(opcode: str) -> str:
+def _canonical_op_cached(opcode: str) -> str:
     op = opcode.strip().lower()
     op = op.split()[0] if op else op
     if "," in op:
@@ -1966,67 +1787,93 @@ def canonical_op(opcode: str) -> str:
     return opcode.strip().upper()
 
 
+def canonical_op(opcode: str) -> str:
+    return _canonical_op_cached(_text(opcode))
+
+
 def expected_src_count(op: str) -> int:
+    op = _text(op)
     if op == "IDENTITY":
         return 1
-    if op in ("NEG", "NEG_F32", "SQRT_F32"):
+    if _text_in(op, ("NEG", "NEG_F32", "SQRT_F32")):
         return 1
-    if op in ("NOT", "NOT_PRED", "POPC", "CLZ", "BREV"):
+    if _text_in(op, ("NOT", "NOT_PRED", "POPC", "CLZ", "BREV")):
         return 1
-    if op in ("MAD", "SELP", "FMA_F32", "BFE_U", "BFE_S"):
+    if _text_in(op, ("MAD", "SELP", "FMA_F32", "BFE_U", "BFE_S")):
         return 3
     if op == "LOP3":
         return 4
-    if op in (
+    if _text_in(
+        op,
+        (
         "CVT_U32_U64",
         "CVT_U64_U32",
         "CVT_S32_S64",
         "CVT_S64_S32",
         "CVT_SAT_F32_F32",
+        ),
     ):
         return 1
-    if op in ("ABS_F32", "EX2_APPROX_FTZ_F32", "RCP_APPROX_FTZ_F32"):
+    if _text_in(op, ("ABS_F32", "EX2_APPROX_FTZ_F32", "RCP_APPROX_FTZ_F32")):
         return 1
     return 2
 
 
-def dst_width_bits(op: str, default_width: int) -> int:
+@lru_cache(maxsize=512)
+def _dst_width_bits_cached(op: str, default_width: int) -> int:
     if op == "NOT_PRED":
         return 1
-    if op.startswith("SETP_"):
+    if _text_startswith(op, "SETP_"):
         return 1
-    if op in ("POPC", "CLZ"):
+    if op == "POPC" or op == "CLZ":
         return 32
-    if op in ("CVT_U32_U64", "CVT_S32_S64"):
+    if op == "CVT_U32_U64" or op == "CVT_S32_S64":
         return 64
-    if op in ("CVT_U64_U32", "CVT_S64_S32"):
+    if op == "CVT_U64_U32" or op == "CVT_S64_S32":
         return 32
-    if op in ("MUL_WIDE_U32", "MUL_WIDE_S32"):
+    if op == "MUL_WIDE_U32" or op == "MUL_WIDE_S32":
         return 64
     return default_width
 
 
+def dst_width_bits(op: str, default_width: int) -> int:
+    return _dst_width_bits_cached(_text(op), _BUILTIN_INT(default_width))
+
+
 @lru_cache(maxsize=256)
-def default_src_width_bits(op: str, default_width: int, src_index: int) -> int:
-    if op in ("CVT_U32_U64", "CVT_S32_S64"):
+def _default_src_width_bits_cached(op: str, default_width: int, src_index: int) -> int:
+    op = _text(op)
+    default_width = _BUILTIN_INT(default_width)
+    src_index = _BUILTIN_INT(src_index)
+    if op == "CVT_U32_U64" or op == "CVT_S32_S64":
         return 32
-    if op in ("CVT_U64_U32", "CVT_S64_S32"):
+    if op == "CVT_U64_U32" or op == "CVT_S64_S32":
         return 64
     if op == "SELP" and src_index == 2:
         return 1
     if op == "LOP3" and src_index == 3:
         return 8
-    if op in ("BFE_U", "BFE_S") and src_index in (1, 2):
+    if (op == "BFE_U" or op == "BFE_S") and (src_index == 1 or src_index == 2):
         return 32
-    if op in ("MUL_WIDE_U32", "MUL_WIDE_S32"):
+    if op == "MUL_WIDE_U32" or op == "MUL_WIDE_S32":
         return 32
     return default_width
 
 
+def default_src_width_bits(op: str, default_width: int, src_index: int) -> int:
+    return _default_src_width_bits_cached(
+        _text(op),
+        _BUILTIN_INT(default_width),
+        _BUILTIN_INT(src_index),
+    )
+
+
+@lru_cache(maxsize=1048576)
 def _bits_to_f32_u32(value: int) -> float:
     return struct.unpack("<f", struct.pack("<I", int(value) & 0xFFFFFFFF))[0]
 
 
+@lru_cache(maxsize=1048576)
 def _f32_to_bits_u32(value: float) -> int:
     v = float(value)
     if math.isnan(v):
@@ -2080,9 +1927,10 @@ def _fmax_f32(a: float, b: float) -> float:
 
 
 def _eval_canonical_float_setp(op: str, src_vals: List[int]) -> Optional[int]:
+    op = _text(op)
     match = re.fullmatch(
         r"SETP_(EQ|NE|LTU|LEU|GTU|GEU|LT|LE|GT|GE)_F(16|32|64)",
-        str(op),
+        op,
     )
     if match is None:
         return None
@@ -2097,7 +1945,9 @@ def _eval_canonical_float_setp(op: str, src_vals: List[int]) -> Optional[int]:
 
 
 def eval_op(op: str, src_vals: List[int], width_bits_default: int) -> int:
-    w = width_bits_default
+    if type(op) is not str:
+        op = _text(op)
+    w = width_bits_default if type(width_bits_default) is int else _BUILTIN_INT(width_bits_default)
     mask = width_mask(w)
 
     if op == "IDENTITY":
@@ -2109,7 +1959,7 @@ def eval_op(op: str, src_vals: List[int], width_bits_default: int) -> int:
     if op == "ADD_F32":
         a = _bits_to_f32_u32(src_vals[0])
         b = _bits_to_f32_u32(src_vals[1])
-        return _f32_to_bits_u32(_as_f32(a + b))
+        return _f32_to_bits_u32(a + b)
     if op == "DIV_F32":
         a = _bits_to_f32_u32(src_vals[0])
         b = _bits_to_f32_u32(src_vals[1])
@@ -2123,25 +1973,25 @@ def eval_op(op: str, src_vals: List[int], width_bits_default: int) -> int:
             out = math.copysign(float("inf"), a * b)
         else:
             out = a / b
-        return _f32_to_bits_u32(_as_f32(out))
+        return _f32_to_bits_u32(out)
     if op == "SQRT_F32":
         a = _bits_to_f32_u32(src_vals[0])
         if math.isnan(a) or a < 0.0:
             out = float("nan")
         else:
             out = math.sqrt(a)
-        return _f32_to_bits_u32(_as_f32(out))
+        return _f32_to_bits_u32(out)
     if op == "SUB":
         return (src_vals[0] - src_vals[1]) & mask
     if op == "SUB_F32":
         a = _bits_to_f32_u32(src_vals[0])
         b = _bits_to_f32_u32(src_vals[1])
-        return _f32_to_bits_u32(_as_f32(a - b))
+        return _f32_to_bits_u32(a - b)
     if op == "NEG":
         return (-src_vals[0]) & mask
     if op == "NEG_F32":
         a = _bits_to_f32_u32(src_vals[0])
-        return _f32_to_bits_u32(_as_f32(-a))
+        return _f32_to_bits_u32(-a)
     if op == "NOT":
         return (~src_vals[0]) & mask
     if op == "NOT_PRED":
@@ -2160,13 +2010,13 @@ def eval_op(op: str, src_vals: List[int], width_bits_default: int) -> int:
             if value & (1 << bit):
                 out |= 1 << (w - 1 - bit)
         return out & mask
-    if op in ("BFE_U", "BFE_S"):
+    if op == "BFE_U" or op == "BFE_S":
         value = src_vals[0] & mask
-        start = int(src_vals[1]) & 0xFF
-        length = int(src_vals[2]) & 0xFF
+        start = _BUILTIN_INT(src_vals[1]) & 0xFF
+        length = _BUILTIN_INT(src_vals[2]) & 0xFF
         if length <= 0 or start >= w:
             return 0
-        length = min(length, w - start, w)
+        length = _BUILTIN_MIN(length, w - start, w)
         field = (value >> start) & width_mask(length)
         if op == "BFE_S" and length > 0 and (field & (1 << (length - 1))):
             field |= mask ^ width_mask(length)
@@ -2189,7 +2039,7 @@ def eval_op(op: str, src_vals: List[int], width_bits_default: int) -> int:
     if op == "MUL_F32":
         a = _bits_to_f32_u32(src_vals[0])
         b = _bits_to_f32_u32(src_vals[1])
-        return _f32_to_bits_u32(_as_f32(a * b))
+        return _f32_to_bits_u32(a * b)
     if op == "MUL_WIDE_U32":
         return ((src_vals[0] & 0xFFFFFFFF) * (src_vals[1] & 0xFFFFFFFF)) & UINT64_MASK
     if op == "MUL_WIDE_S32":
@@ -2205,32 +2055,32 @@ def eval_op(op: str, src_vals: List[int], width_bits_default: int) -> int:
         except AttributeError:
             # Fallback on runtimes without math.fma.
             out = a * b + c
-        return _f32_to_bits_u32(_as_f32(out))
+        return _f32_to_bits_u32(out)
     if op == "ABS_F32":
         a = _bits_to_f32_u32(src_vals[0])
-        return _f32_to_bits_u32(_as_f32(abs(a)))
+        return _f32_to_bits_u32(abs(a))
     if op == "EX2_APPROX_FTZ_F32":
         a = _bits_to_f32_u32(src_vals[0])
         try:
             out = math.pow(2.0, float(a))
         except OverflowError:
             out = float("inf")
-        return _f32_to_bits_u32(_as_f32(_flush_subnormal_f32(out)))
+        return _f32_to_bits_u32(_flush_subnormal_f32(out))
     if op == "RCP_APPROX_FTZ_F32":
         a = _bits_to_f32_u32(src_vals[0])
         if a == 0.0:
             out = math.copysign(float("inf"), a)
         else:
             out = 1.0 / float(a)
-        return _f32_to_bits_u32(_as_f32(_flush_subnormal_f32(out)))
+        return _f32_to_bits_u32(_flush_subnormal_f32(out))
     if op == "MIN_F32":
         a = _bits_to_f32_u32(src_vals[0])
         b = _bits_to_f32_u32(src_vals[1])
-        return _f32_to_bits_u32(_as_f32(_fmin_f32(a, b)))
+        return _f32_to_bits_u32(_fmin_f32(a, b))
     if op == "MAX_F32":
         a = _bits_to_f32_u32(src_vals[0])
         b = _bits_to_f32_u32(src_vals[1])
-        return _f32_to_bits_u32(_as_f32(_fmax_f32(a, b)))
+        return _f32_to_bits_u32(_fmax_f32(a, b))
     if op == "AND":
         return (src_vals[0] & src_vals[1]) & mask
     if op == "OR":
@@ -2278,7 +2128,7 @@ def eval_op(op: str, src_vals: List[int], width_bits_default: int) -> int:
             a = 0.0
         elif a > 1.0:
             a = 1.0
-        return _f32_to_bits_u32(_as_f32(a))
+        return _f32_to_bits_u32(a)
     float_setp = _eval_canonical_float_setp(op, src_vals)
     if float_setp is not None:
         return int(float_setp)
@@ -2308,10 +2158,15 @@ def eval_op(op: str, src_vals: List[int], width_bits_default: int) -> int:
     raise KeyError(op)
 
 
+@lru_cache(maxsize=1048576)
+def eval_op_cached(op: str, src_vals: Tuple[int, ...], width_bits_default: int) -> int:
+    return eval_op(op, src_vals, int(width_bits_default))
+
+
 @lru_cache(maxsize=4096)
-def parse_setp_signature(opcode: str) -> Tuple[str, str, Optional[int]]:
+def _parse_setp_signature_cached(opcode: str) -> Tuple[str, str, Optional[int]]:
     op = normalize_opcode(opcode)
-    if not op.startswith("setp"):
+    if not _text_startswith(op, "setp"):
         raise NotImplementedError(f"not a setp opcode: {opcode}")
 
     tokens = [tok for tok in op.split(".") if tok]
@@ -2323,7 +2178,7 @@ def parse_setp_signature(opcode: str) -> Tuple[str, str, Optional[int]]:
         if cmp_kind is None and tok in SETP_COMPARATORS:
             cmp_kind = tok
             continue
-        if len(tok) >= 2 and tok[0] in ("s", "u", "f", "b") and tok[1:].isdigit():
+        if len(tok) >= 2 and _text_in(tok[0], ("s", "u", "f", "b")) and tok[1:].isdigit():
             value_width_bits = int(tok[1:])
             if tok[0] == "s":
                 value_kind = "signed"
@@ -2348,7 +2203,13 @@ def parse_setp_signature(opcode: str) -> Tuple[str, str, Optional[int]]:
     return cmp_kind, value_kind, value_width_bits
 
 
+def parse_setp_signature(opcode: str) -> Tuple[str, str, Optional[int]]:
+    return _parse_setp_signature_cached(_text(opcode))
+
+
 def bits_to_float_value(value: int, width_bits: int) -> float:
+    value = _BUILTIN_INT(value)
+    width_bits = _BUILTIN_INT(width_bits)
     if width_bits == 16:
         try:
             return struct.unpack("<e", struct.pack("<H", value & 0xFFFF))[0]
@@ -2739,6 +2600,7 @@ def backward_influence(
     opcode: Optional[str] = None,
     event_index: Optional[int] = None,
 ) -> List[int]:
+    op = _text(op)
     src_count = len(src_vals)
     observed = dst_observed_mask & width_mask(dst_width_bits(op, width_bits_default))
     if observed == 0:
@@ -2753,18 +2615,32 @@ def backward_influence(
 
     def eval_with_layout(vals: List[int]) -> int:
         if op == "SELP" and selp_swapped_src01 and len(vals) == 3:
-            return eval_op(op, [vals[1], vals[0], vals[2]], width_bits_default) & dst_wmask
-        return eval_op(op, vals, width_bits_default) & dst_wmask
+            return eval_op_cached(
+                op,
+                (
+                    int(vals[1]) & UINT64_MASK,
+                    int(vals[0]) & UINT64_MASK,
+                    int(vals[2]) & UINT64_MASK,
+                ),
+                int(width_bits_default),
+            ) & dst_wmask
+        return eval_op_cached(
+            op,
+            tuple(int(v) & UINT64_MASK for v in vals),
+            int(width_bits_default),
+        ) & dst_wmask
+
+    src_vals_key = tuple(int(v) & UINT64_MASK for v in src_vals)
 
     try:
-        base_dst = eval_with_layout(src_vals)
+        base_dst = eval_with_layout(src_vals_key)
     except KeyError as exc:
         raise NotImplementedError(f"Unsupported opcode in backward_influence: {ctx}") from exc
 
     if dst_val is not None and base_dst != (dst_val & dst_wmask):
         if op == "SELP" and len(src_vals) == 3:
             selp_swapped_src01 = True
-            base_dst = eval_with_layout(src_vals)
+            base_dst = eval_with_layout(src_vals_key)
             if base_dst == (dst_val & dst_wmask):
                 pass
             else:
@@ -2847,18 +2723,6 @@ def backward_influence(
         out[1] = acc & src_masks[1]
         return [x & UINT64_MASK for x in out]
 
-    cpp_masks = _cpp_backward_influence(
-        op=op,
-        src_vals=src_vals,
-        dst_val=base_dst,
-        dst_observed_mask=observed,
-        width_bits_default=width_bits_default,
-    )
-    if cpp_masks is not None:
-        for src_i in range(min(src_count, len(cpp_masks))):
-            out[src_i] = int(cpp_masks[src_i]) & src_masks[src_i]
-        return [x & UINT64_MASK for x in out]
-
     mutated = list(src_vals)
     for src_i in range(src_count):
         bit_width = src_widths[src_i] if src_i < len(src_widths) else width_bits_default
@@ -2878,7 +2742,7 @@ def backward_influence(
     return [x & UINT64_MASK for x in out]
 
 
-def backward_influence_triplet(
+def _backward_influence_triplet_uncached(
     *,
     op: str,
     src_vals: List[int],
@@ -2893,44 +2757,12 @@ def backward_influence_triplet(
     opcode: Optional[str] = None,
     event_index: Optional[int] = None,
 ) -> Tuple[List[int], List[int], List[int]]:
+    op = _text(op)
     src_count = len(src_vals)
     out_obs = [0] * src_count
     out_due = [0] * src_count
     out_trace = [0] * src_count
     if src_count <= 0:
-        return out_obs, out_due, out_trace
-
-    requests: List[Dict[str, Any]] = []
-    labels: List[str] = []
-
-    def add_request(label: str, mask: int) -> None:
-        if int(mask) == 0:
-            return
-        requests.append(
-            {
-                "op": op,
-                "src_vals": src_vals,
-                "dst_val": dst_val,
-                "dst_observed_mask": int(mask),
-                "width_bits": int(width_bits_default),
-                "signed_mode": False,
-            }
-        )
-        labels.append(label)
-
-    add_request("obs", obs_mask)
-    add_request("due", due_mask)
-    add_request("trace", trace_mask)
-
-    cpp_many = _cpp_backward_influence_many(requests)
-    if cpp_many is not None and len(cpp_many) == len(labels):
-        for label, masks in zip(labels, cpp_many):
-            if label == "obs":
-                out_obs = [int(v) & UINT64_MASK for v in masks]
-            elif label == "due":
-                out_due = [int(v) & UINT64_MASK for v in masks]
-            elif label == "trace":
-                out_trace = [int(v) & UINT64_MASK for v in masks]
         return out_obs, out_due, out_trace
 
     if int(obs_mask) != 0:
@@ -2976,461 +2808,89 @@ def backward_influence_triplet(
     return out_obs, out_due, out_trace
 
 
-def backward_influence_float_tolerance(
+@lru_cache(maxsize=524288)
+def _backward_influence_triplet_cached_core(
     op: str,
-    src_vals: List[int],
-    dst_val: int,
-    dst_observed_mask: int,
+    src_vals_key: Tuple[int, ...],
+    dst_val_key: Optional[int],
+    obs_mask: int,
+    due_mask: int,
+    trace_mask: int,
     width_bits_default: int,
-    src_widths: List[int],
-    *,
-    tol_policy: Optional[Dict[str, Any]],
-    thread_id: Optional[int] = None,
-    pc: Optional[str] = None,
-    opcode: Optional[str] = None,
-    event_index: Optional[int] = None,
-) -> List[int]:
-    src_count = len(src_vals)
-    observed = dst_observed_mask & width_mask(dst_width_bits(op, width_bits_default))
-    if observed == 0 or not output_oracle_has_float_tolerance(tol_policy):
-        return [0] * src_count
-
-    dst_width = dst_width_bits(op, width_bits_default)
-    if dst_width not in (32, 64):
-        return [0] * src_count
-
-    ctx = (
-        f"thread_id={thread_id}, pc={pc}, event_index={event_index}, "
-        f"opcode={opcode}, canonical_op={op}"
-    )
-    dst_wmask = width_mask(dst_width)
-    selp_swapped_src01 = False
-
-    def eval_with_layout(vals: List[int]) -> int:
-        if op == "SELP" and selp_swapped_src01 and len(vals) == 3:
-            return eval_op(op, [vals[1], vals[0], vals[2]], width_bits_default) & dst_wmask
-        return eval_op(op, vals, width_bits_default) & dst_wmask
-
-    try:
-        base_dst = eval_with_layout(src_vals)
-    except KeyError as exc:
-        raise NotImplementedError(
-            f"Unsupported opcode in backward_influence_float_tolerance: {ctx}"
-        ) from exc
-
-    if dst_val is not None and base_dst != (dst_val & dst_wmask):
-        if op == "SELP" and len(src_vals) == 3:
-            selp_swapped_src01 = True
-            base_dst = eval_with_layout(src_vals)
-            if base_dst != (dst_val & dst_wmask):
-                selp_swapped_src01 = False
-                base_dst = dst_val & dst_wmask
-        else:
-            base_dst = dst_val & dst_wmask
-
-    baseline = bits_to_float_value(int(base_dst), int(dst_width))
-    out = [0] * src_count
-    mutated = list(src_vals)
-    dst_prime_equal_cache: Dict[int, bool] = {}
-
-    for src_i in range(src_count):
-        bit_width = src_widths[src_i] if src_i < len(src_widths) else width_bits_default
-        bit_width = coerce_width_bits(bit_width, default=width_bits_default)
-        acc = 0
-        for bit in range(bit_width):
-            mutated[src_i] = src_vals[src_i] ^ (1 << bit)
-            try:
-                dst_prime = eval_with_layout(mutated)
-            except KeyError as exc:
-                raise NotImplementedError(
-                    f"Unsupported opcode in backward_influence_float_tolerance: {ctx}"
-                ) from exc
-            dst_prime_key = int(dst_prime) & dst_wmask
-            equal = dst_prime_equal_cache.get(dst_prime_key)
-            if equal is None:
-                mutated_value = bits_to_float_value(dst_prime_key, int(dst_width))
-                equal = shared_output_oracle._value_equal(
-                    baseline,
-                    mutated_value,
-                    tol_policy,
-                )
-                dst_prime_equal_cache[dst_prime_key] = bool(equal)
-            if not equal:
-                acc |= 1 << bit
-        mutated[src_i] = src_vals[src_i]
-        out[src_i] = acc & width_mask(bit_width)
-
-    return [x & UINT64_MASK for x in out]
-
-
-def _make_tolerance_compare_policy(
-    policy: Optional[Dict[str, Any]],
-) -> ToleranceComparePolicy:
-    raw = policy or {}
-    return ToleranceComparePolicy(
-        scalar_kind=str(raw.get("scalar_kind", "") or "").strip(),
-        compare_kind=str(raw.get("compare_kind", "") or "").strip(),
-        float_abs_tol=float(raw.get("float_abs_tol", 0.0) or 0.0),
-        float_rel_tol=float(raw.get("float_rel_tol", 0.0) or 0.0),
-        nan_equal=bool(raw.get("nan_equal", True)),
-        inf_sign_must_match=bool(raw.get("inf_sign_must_match", True)),
-    )
-
-
-def _tolerance_compare_policy_as_dict(
-    policy: ToleranceComparePolicy,
-) -> Dict[str, Any]:
-    return {
-        "scalar_kind": str(policy.scalar_kind),
-        "compare_kind": str(policy.compare_kind),
-        "float_abs_tol": float(policy.float_abs_tol),
-        "float_rel_tol": float(policy.float_rel_tol),
-        "nan_equal": bool(policy.nan_equal),
-        "inf_sign_must_match": bool(policy.inf_sign_must_match),
-    }
-
-
-def _tolerance_value_equal_fast(
-    baseline: float,
-    mutated: float,
-    policy: ToleranceComparePolicy,
-) -> bool:
-    compare_kind = str(policy.compare_kind).strip().lower()
-    scalar_kind = str(policy.scalar_kind).strip().lower()
-    if scalar_kind and not scalar_kind.startswith("float"):
-        return shared_output_oracle._value_equal(
-            baseline,
-            mutated,
-            _tolerance_compare_policy_as_dict(policy)
-        )
-    fa = float(baseline)
-    fb = float(mutated)
-    if math.isnan(fa) or math.isnan(fb):
-        return bool(policy.nan_equal) and math.isnan(fa) and math.isnan(fb)
-    if math.isinf(fa) or math.isinf(fb):
-        if not (math.isinf(fa) and math.isinf(fb)):
-            return False
-        if not bool(policy.inf_sign_must_match):
-            return True
-        return math.copysign(1.0, fa) == math.copysign(1.0, fb)
-    if compare_kind in ("float_tolerance", "approx", "float_abs_tol"):
-        diff = abs(fa - fb)
-        if diff <= float(policy.float_abs_tol):
-            return True
-        return diff <= float(policy.float_rel_tol) * max(abs(fa), abs(fb), 1.0)
-    if compare_kind == "exact":
-        return fa == fb
-    if float(policy.float_abs_tol) > 0.0 or float(policy.float_rel_tol) > 0.0:
-        diff = abs(fa - fb)
-        if diff <= float(policy.float_abs_tol):
-            return True
-        return diff <= float(policy.float_rel_tol) * max(abs(fa), abs(fb), 1.0)
-    return fa == fb
-
-
-def build_output_tolerance_seed_path(
-    ev: TraceEvent,
-    tol_policy: Optional[Dict[str, Any]],
-    output_ranges: Optional[Sequence[OutputRangeSpec]] = None,
-) -> Optional[TolerancePath]:
-    if not output_store_participates_in_comparison(ev, tol_policy, output_ranges):
-        return None
-    width_bits = classify_output_store_float_width(ev)
-    if width_bits not in (32, 64):
-        return None
-    raw_value = extract_store_value(ev)
-    if raw_value is None:
-        return None
-    output_spec = _match_output_range_for_store(ev, output_ranges)
-    output_name = str(output_spec.name) if output_spec is not None and output_spec.name else None
-    compare_policy = shared_output_oracle.resolve_output_policy(
-        tol_policy,
-        output_name=output_name,
-    )
-    baseline = shared_output_oracle.serialized_reference_value(
-        bits_to_float_value(int(raw_value), int(width_bits)),
-        tol_policy,
-        output_name=output_name,
-        size_bytes=width_bits // 8,
-    )
-    baseline_f = float(baseline)
-    if int(width_bits) == 32:
-        baseline_bits = struct.unpack("<I", struct.pack("<f", baseline_f))[0]
-    else:
-        baseline_bits = struct.unpack("<Q", struct.pack("<d", baseline_f))[0]
-    return TolerancePath(
-        final_width_bits=int(width_bits),
-        baseline_final_bits=int(baseline_bits) & width_mask(int(width_bits)),
-        compare_policy=_make_tolerance_compare_policy(compare_policy),
-        steps=tuple(),
-    )
-
-
-def compose_tolerance_path(
-    path: TolerancePath,
-    *,
-    op: str,
-    src_vals: List[int],
-    width_bits_default: int,
-    tracked_src_index: int,
-) -> TolerancePath:
-    step = ToleranceStep(
-        op=str(op),
-        src_vals=tuple(int(v) & UINT64_MASK for v in src_vals),
+    src_widths_key: Tuple[int, ...],
+) -> Tuple[Tuple[int, ...], Tuple[int, ...], Tuple[int, ...]]:
+    out_obs, out_due, out_trace = _backward_influence_triplet_uncached(
+        op=op,
+        src_vals=list(src_vals_key),
+        dst_val=dst_val_key,
+        obs_mask=int(obs_mask),
+        due_mask=int(due_mask),
+        trace_mask=int(trace_mask),
         width_bits_default=int(width_bits_default),
-        tracked_src_index=int(tracked_src_index),
+        src_widths=list(src_widths_key),
     )
-    return TolerancePath(
-        final_width_bits=int(path.final_width_bits),
-        baseline_final_bits=int(path.baseline_final_bits) & width_mask(int(path.final_width_bits)),
-        compare_policy=path.compare_policy,
-        steps=(step,) + tuple(path.steps),
+    return (
+        tuple(int(v) & UINT64_MASK for v in out_obs),
+        tuple(int(v) & UINT64_MASK for v in out_due),
+        tuple(int(v) & UINT64_MASK for v in out_trace),
     )
 
 
-
-def evaluate_tolerance_path_bits(path: TolerancePath, current_value: int) -> int:
-    value = int(current_value) & UINT64_MASK
-    if not path.steps:
-        return value & width_mask(int(path.final_width_bits))
-    if len(path.steps) == 1:
-        step = path.steps[0]
-        vals = list(step.src_vals)
-        if step.tracked_src_index < 0 or step.tracked_src_index >= len(vals):
-            raise ValueError(
-                "tolerance path tracked_src_index out of range: "
-                f"{step.tracked_src_index} for {len(vals)} srcs"
-            )
-        vals[step.tracked_src_index] = value
-        return eval_op(step.op, vals, int(step.width_bits_default)) & width_mask(
-            int(path.final_width_bits)
-        )
-    for step in path.steps:
-        vals = list(step.src_vals)
-        if step.tracked_src_index < 0 or step.tracked_src_index >= len(vals):
-            raise ValueError(
-                "tolerance path tracked_src_index out of range: "
-                f"{step.tracked_src_index} for {len(vals)} srcs"
-            )
-        vals[step.tracked_src_index] = value
-        value = eval_op(step.op, vals, int(step.width_bits_default)) & width_mask(
-            dst_width_bits(step.op, int(step.width_bits_default))
-        )
-    return value & width_mask(int(path.final_width_bits))
-
-def backward_influence_float_tolerance_paths(
-    paths: List[TolerancePath],
+def backward_influence_triplet(
+    *,
     op: str,
     src_vals: List[int],
     dst_val: int,
+    obs_mask: int,
+    due_mask: int,
+    trace_mask: int,
     width_bits_default: int,
     src_widths: List[int],
-    *,
-    tol_policy: Optional[Dict[str, Any]],
     thread_id: Optional[int] = None,
     pc: Optional[str] = None,
     opcode: Optional[str] = None,
     event_index: Optional[int] = None,
-) -> Tuple[List[int], List[List[TolerancePath]]]:
-    src_count = len(src_vals)
-    if not paths or not output_oracle_has_float_tolerance(tol_policy):
-        return [0] * src_count, [[] for _ in range(src_count)]
-
-    dst_width = dst_width_bits(op, width_bits_default)
-    if dst_width not in (32, 64):
-        return [0] * src_count, [[] for _ in range(src_count)]
-
-    ctx = (
-        f"thread_id={thread_id}, pc={pc}, event_index={event_index}, "
-        f"opcode={opcode}, canonical_op={op}"
+) -> Tuple[List[int], List[int], List[int]]:
+    op_text = _text(op)
+    src_vals_key = tuple(int(v) & UINT64_MASK for v in src_vals)
+    src_widths_key = tuple(
+        coerce_width_bits(
+            src_widths[i] if i < len(src_widths) else width_bits_default,
+            default=width_bits_default,
+        )
+        for i in range(len(src_vals_key))
     )
-    dst_wmask = width_mask(dst_width)
-    selp_swapped_src01 = False
-
-    def eval_with_layout(vals: List[int]) -> int:
-        if op == "SELP" and selp_swapped_src01 and len(vals) == 3:
-            return eval_op(op, [vals[1], vals[0], vals[2]], width_bits_default) & dst_wmask
-        return eval_op(op, vals, width_bits_default) & dst_wmask
-
+    dst_val_key = None if dst_val is None else int(dst_val) & UINT64_MASK
     try:
-        base_dst = eval_with_layout(src_vals)
-    except KeyError as exc:
-        raise NotImplementedError(
-            f"Unsupported opcode in backward_influence_float_tolerance_paths: {ctx}"
-        ) from exc
-
-    if dst_val is not None and base_dst != (dst_val & dst_wmask):
-        if op == "SELP" and len(src_vals) == 3:
-            selp_swapped_src01 = True
-            base_dst = eval_with_layout(src_vals)
-            if base_dst != (dst_val & dst_wmask):
-                selp_swapped_src01 = False
-                base_dst = dst_val & dst_wmask
-        else:
-            base_dst = dst_val & dst_wmask
-
-    out_masks = [0] * src_count
-    out_paths: List[List[TolerancePath]] = [[] for _ in range(src_count)]
-    mutated = list(src_vals)
-    src_bit_widths = [
-        max(
-            0,
-            min(
-                64,
-                int(src_widths[src_i] if src_i < len(src_widths) else width_bits_default),
-            )
+        cached = _backward_influence_triplet_cached_core(
+            op_text,
+            src_vals_key,
+            dst_val_key,
+            int(obs_mask) & UINT64_MASK,
+            int(due_mask) & UINT64_MASK,
+            int(trace_mask) & UINT64_MASK,
+            int(width_bits_default),
+            src_widths_key,
         )
-        for src_i in range(src_count)
-    ]
-    unique_paths: List[TolerancePath] = list(dict.fromkeys(paths))
-    if len(unique_paths) == 1 and (
-        not _CPP_TOLERANCE_PATH_EVAL_ENABLED or _CPP_TOLERANCE_PATH_EVAL_FAILED
-    ):
-        for path in unique_paths:
-            baseline_final = bits_to_float_value(
-                int(path.baseline_final_bits),
-                int(path.final_width_bits),
-            )
-            compare_policy = path.compare_policy
-            final_compare_cache: Dict[int, bool] = {}
-            for src_i in range(src_count):
-                bit_width = src_bit_widths[src_i]
-                if bit_width <= 0:
-                    continue
-                acc = 0
-                for bit in range(bit_width):
-                    mutated[src_i] = src_vals[src_i] ^ (1 << bit)
-                    try:
-                        dst_prime = eval_with_layout(mutated)
-                    except KeyError as exc:
-                        raise NotImplementedError(
-                            f"Unsupported opcode in backward_influence_float_tolerance_paths: {ctx}"
-                        ) from exc
-                    dst_prime_key = int(dst_prime) & dst_wmask
-                    equal = final_compare_cache.get(dst_prime_key)
-                    if equal is None:
-                        final_bits = evaluate_tolerance_path_bits(path, dst_prime_key)
-                        mutated_value = bits_to_float_value(
-                            int(final_bits),
-                            int(path.final_width_bits),
-                        )
-                        equal = _tolerance_value_equal_fast(
-                            baseline_final,
-                            mutated_value,
-                            compare_policy,
-                        )
-                        final_compare_cache[dst_prime_key] = bool(equal)
-                    if not equal:
-                        acc |= 1 << bit
-                mutated[src_i] = src_vals[src_i]
-                acc &= width_mask(bit_width)
-                if acc == 0:
-                    continue
-                out_masks[src_i] = (int(out_masks[src_i]) | int(acc)) & UINT64_MASK
-                out_paths[src_i].append(
-                    compose_tolerance_path(
-                        path,
-                        op=op,
-                        src_vals=src_vals,
-                        width_bits_default=width_bits_default,
-                        tracked_src_index=src_i,
-                    )
-                )
-        return [x & UINT64_MASK for x in out_masks], out_paths
-
-    mutated_dst_groups: List[Dict[int, int]] = []
-    for src_i in range(src_count):
-        bit_width = src_bit_widths[src_i]
-        groups: Dict[int, int] = {}
-        for bit in range(bit_width):
-            mutated[src_i] = src_vals[src_i] ^ (1 << bit)
-            try:
-                dst_prime = eval_with_layout(mutated)
-            except KeyError as exc:
-                raise NotImplementedError(
-                    f"Unsupported opcode in backward_influence_float_tolerance_paths: {ctx}"
-                ) from exc
-            dst_prime_key = int(dst_prime) & dst_wmask
-            groups[dst_prime_key] = (int(groups.get(dst_prime_key, 0)) | (1 << bit)) & UINT64_MASK
-        mutated[src_i] = src_vals[src_i]
-        mutated_dst_groups.append(groups)
-    baseline_cache: List[float] = [0.0 for _ in unique_paths]
-    final_bits_cache: Dict[Tuple[int, int], int] = {}
-    final_compare_cache: Dict[Tuple[int, int], bool] = {}
-    composed_path_cache: Dict[Tuple[int, int], TolerancePath] = {}
-
-    native_path_eval_requests: List[Tuple[TolerancePath, int]] = []
-    native_path_eval_keys: List[Tuple[int, int]] = []
-    for path_idx, path in enumerate(unique_paths):
-        for groups in mutated_dst_groups:
-            for dst_prime_key in groups.keys():
-                cache_key = (int(path_idx), int(dst_prime_key))
-                if cache_key in final_bits_cache:
-                    continue
-                final_bits_cache[cache_key] = -1
-                native_path_eval_keys.append(cache_key)
-                native_path_eval_requests.append((path, int(dst_prime_key)))
-    native_eval_results = _cpp_evaluate_tolerance_path_bits_many(native_path_eval_requests)
-    if native_eval_results is not None and len(native_eval_results) == len(native_path_eval_keys):
-        for cache_key, final_bits in zip(native_path_eval_keys, native_eval_results):
-            final_bits_cache[cache_key] = int(final_bits)
-    else:
-        for cache_key in native_path_eval_keys:
-            final_bits_cache.pop(cache_key, None)
-
-    for path_idx, path in enumerate(unique_paths):
-        baseline_final = bits_to_float_value(
-            int(path.baseline_final_bits),
-            int(path.final_width_bits)
+        return (list(cached[0]), list(cached[1]), list(cached[2]))
+    except Exception:
+        # Preserve the original diagnostic context on unusual malformed traces
+        # or unsupported opcodes.  Successful cached calls are pure functions of
+        # the key above and therefore exact across threads/warps.
+        return _backward_influence_triplet_uncached(
+            op=op_text,
+            src_vals=list(src_vals_key),
+            dst_val=dst_val_key,
+            obs_mask=int(obs_mask),
+            due_mask=int(due_mask),
+            trace_mask=int(trace_mask),
+            width_bits_default=int(width_bits_default),
+            src_widths=list(src_widths_key),
+            thread_id=thread_id,
+            pc=pc,
+            opcode=opcode,
+            event_index=event_index,
         )
-        baseline_cache[path_idx] = baseline_final
-        compare_policy = path.compare_policy
-        for src_i in range(src_count):
-            bit_width = src_bit_widths[src_i]
-            if bit_width <= 0:
-                continue
-            acc = 0
-            for dst_prime_key, bit_mask in mutated_dst_groups[src_i].items():
-                cache_key = (int(path_idx), int(dst_prime_key))
-                equal = final_compare_cache.get(cache_key)
-                if equal is None:
-                    final_bits = final_bits_cache.get(cache_key)
-                    if final_bits is None:
-                        final_bits = evaluate_tolerance_path_bits(path, dst_prime_key)
-                        final_bits_cache[cache_key] = int(final_bits)
-                    mutated_value = bits_to_float_value(
-                        int(final_bits),
-                        int(path.final_width_bits),
-                    )
-                    equal = _tolerance_value_equal_fast(
-                        baseline_cache[path_idx],
-                        mutated_value,
-                        compare_policy,
-                    )
-                    final_compare_cache[cache_key] = bool(equal)
-                if not equal:
-                    acc |= int(bit_mask)
-            acc &= width_mask(bit_width)
-            if acc == 0:
-                continue
-            out_masks[src_i] = (int(out_masks[src_i]) | int(acc)) & UINT64_MASK
-            compose_key = (int(path_idx), int(src_i))
-            composed_path = composed_path_cache.get(compose_key)
-            if composed_path is None:
-                composed_path = compose_tolerance_path(
-                    path,
-                    op=op,
-                    src_vals=src_vals,
-                    width_bits_default=width_bits_default,
-                    tracked_src_index=src_i,
-                )
-                composed_path_cache[compose_key] = composed_path
-            out_paths[src_i].append(
-                composed_path
-            )
-
-    return [x & UINT64_MASK for x in out_masks], out_paths
-
 
 def bytes_to_mask(size_bytes: int, byte_offset: int) -> int:
     if size_bytes <= 0:
@@ -4248,113 +3708,25 @@ def parse_output_ranges(raw_output_spec: Any) -> List[OutputRangeSpec]:
     return out
 
 
-def normalize_output_oracle_tol_policy(raw: Any) -> Dict[str, Any]:
-    if not isinstance(raw, dict):
-        return {}
-    return {str(k): v for k, v in raw.items()}
+def normalize_output_oracle_policy(raw: Any) -> Dict[str, Any]:
+    """Normalize every benchmark to the exact-output SDC oracle.
 
-
-def output_oracle_has_float_tolerance(tol_policy: Optional[Dict[str, Any]]) -> bool:
-    policy = tol_policy or {}
-    if (
-        float(policy.get("float_abs_tol", 0.0) or 0.0) > 0.0
-        or float(policy.get("float_rel_tol", 0.0) or 0.0) > 0.0
-    ):
-        return True
-    mode = str(policy.get("comparison_mode", "") or "").strip().lower()
-    raw_outputs = policy.get("outputs", [])
-    if isinstance(raw_outputs, list):
-        for item in raw_outputs:
-            if not isinstance(item, dict):
-                continue
-            scalar_kind = str(item.get("scalar_kind", "") or "").strip().lower()
-            if not scalar_kind.startswith("float"):
-                continue
-            if (
-                float(item.get("float_abs_tol", 0.0) or 0.0) > 0.0
-                or float(item.get("float_rel_tol", 0.0) or 0.0) > 0.0
-            ):
-                return True
-            if mode == "serialized_result":
-                return True
-    return False
-
-
-def is_float_reg_name(reg: Any) -> bool:
-    return str(reg or "").strip().lower().startswith("%f")
-
-
-def classify_event_float_width(
-    ev: TraceEvent,
-    *,
-    op: Optional[str] = None,
-) -> Optional[int]:
-    width_bits = coerce_width_bits(ev.width_bits, default=32)
-    if width_bits not in (32, 64):
-        return None
-
-    opcode = str(ev.opcode or "").strip().lower()
-    match = re.search(r"(?:^|[.])f(32|64)(?:$|[.])", opcode)
-    if match is not None:
-        op_width = int(match.group(1))
-        if op_width == width_bits:
-            return op_width
-        return None
-
-    op_norm = str(op or canonical_op(ev.opcode)).strip().upper()
-    if op_norm == "IDENTITY":
-        regs = []
-        if ev.dst_reg is not None:
-            regs.append(ev.dst_reg)
-        regs.extend(ev.src_regs)
-        if any(is_float_reg_name(reg) for reg in regs):
-            return width_bits
-    return None
-
-
-def supports_float_tolerance_backward(
-    ev: TraceEvent,
-    op: str,
-    tol_policy: Optional[Dict[str, Any]],
-) -> bool:
-    if not output_oracle_has_float_tolerance(tol_policy):
-        return False
-    if str(op).strip().upper() not in FLOAT_TOLERANCE_BACKWARD_OPS:
-        return False
-    return classify_event_float_width(ev, op=op) in (32, 64)
-
-
-def extract_store_value(ev: TraceEvent) -> Optional[int]:
-    size_bytes = access_size_bytes_for_event(ev)
-    if ev.kind != "store" or size_bytes <= 0:
-        return None
-    src_i = int(ev.store_data_src_index)
-    if src_i < 0 or src_i >= len(ev.src_vals):
-        return None
-    byte_off = int(ev.store_data_byte_offset)
-    if byte_off < 0:
-        return None
-    return (ev.src_vals[src_i] >> (8 * byte_off)) & width_mask(size_bytes * 8)
-
-
-def classify_output_store_float_width(ev: TraceEvent) -> Optional[int]:
-    size_bytes = access_size_bytes_for_event(ev)
-    if size_bytes not in (4, 8):
-        return None
-    opcode = str(ev.opcode or "").strip().lower()
-    match = re.search(r"(?:^|[.])f(32|64)(?:$|[.])", opcode)
-    if match is not None:
-        width_bits = int(match.group(1))
-        if width_bits == size_bytes * 8:
-            return width_bits
-        return None
-    src_i = int(ev.store_data_src_index)
-    if src_i < 0 or src_i >= len(ev.src_regs):
-        return None
-    src_reg = str(ev.src_regs[src_i]).strip().lower()
-    if size_bytes == 4 and src_reg.startswith("%f"):
-        return 32
-    return None
+    Older SARA revisions carried app-specific floating-point tolerance metadata.
+    The current experiment definition intentionally removes that tolerance for
+    FI, SARA, and GEREM-all: any final output mismatch is SDC.  This normalizer
+    therefore strips stale tolerance fields even if an old policy file is passed
+    in from a previous result directory.
+    """
+    source = "exact_output_mismatch_oracle"
+    if isinstance(raw, dict):
+        source = str(raw.get("source", source) or source)
+    return {
+        "source": source,
+        "compare_kind": "exact",
+        "nan_equal": False,
+        "inf_sign_must_match": True,
+        "device_materialized": True,
+    }
 
 
 def _match_output_range_for_store(
@@ -4381,7 +3753,7 @@ def _match_output_range_for_store(
 
 def output_store_participates_in_comparison(
     ev: TraceEvent,
-    tol_policy: Optional[Dict[str, Any]],
+    oracle_policy: Optional[Dict[str, Any]],
     output_ranges: Optional[Sequence[OutputRangeSpec]] = None,
 ) -> bool:
     if output_ranges:
@@ -4394,52 +3766,10 @@ def output_store_participates_in_comparison(
             else None
         )
         return shared_output_oracle.output_is_device_materialized(
-            tol_policy,
+            oracle_policy,
             output_name=output_name
         )
     return bool(getattr(ev, "is_output_store", False))
-
-
-def compute_output_store_visible_mask_with_tolerance(
-    ev: TraceEvent,
-    tol_policy: Optional[Dict[str, Any]],
-    output_ranges: Optional[Sequence[OutputRangeSpec]] = None,
-) -> Optional[int]:
-    if not output_store_participates_in_comparison(ev, tol_policy, output_ranges):
-        return None
-    if not output_oracle_has_float_tolerance(tol_policy):
-        return None
-
-    width_bits = classify_output_store_float_width(ev)
-    if width_bits not in (32, 64):
-        return None
-
-    raw_value = extract_store_value(ev)
-    if raw_value is None:
-        return None
-
-    byte_off = int(ev.store_data_byte_offset)
-    if byte_off < 0 or (byte_off * 8) + width_bits > 64:
-        return None
-
-    output_spec = _match_output_range_for_store(ev, output_ranges)
-    output_name = str(output_spec.name) if output_spec is not None and output_spec.name else None
-    baseline = shared_output_oracle.serialized_reference_value(
-        bits_to_float_value(int(raw_value), int(width_bits)),
-        tol_policy,
-        output_name=output_name,
-        size_bytes=width_bits // 8,
-    )
-    visible_mask = 0
-    for bit in range(int(width_bits)):
-        mutated = bits_to_float_value(int(raw_value) ^ (1 << bit), int(width_bits))
-        output_policy = shared_output_oracle.resolve_output_policy(
-            tol_policy,
-            output_name=output_name
-        )
-        if not shared_output_oracle._value_equal(mutated, baseline, output_policy):
-            visible_mask |= 1 << (byte_off * 8 + bit)
-    return visible_mask & bytes_to_mask(width_bits // 8, byte_off)
 
 
 def derive_memory_ranges_from_events(events: List[TraceEvent]) -> List[MemoryRange]:
@@ -5118,7 +4448,6 @@ def _scope_words_live_mask_for_addr(scope_words: Optional[Dict[int, Any]], addr:
         return 0
     shift = lane * 8
     live_mask = int(getattr(state, "byte_obs_masks", 0) >> shift) & 0xFF
-    live_mask |= int(getattr(state, "byte_tol_obs_masks", 0) >> shift) & 0xFF
     live_mask |= int(getattr(state, "byte_due_masks", 0) >> shift) & 0xFF
     live_mask |= int(getattr(state, "byte_trace_masks", 0) >> shift) & 0xFF
     return live_mask & 0xFF
@@ -5393,49 +4722,12 @@ def should_seed_observed_for_load(ev: TraceEvent, dst_live_obs: int) -> bool:
 
 def merge_observed_state(
     regs_obs: Dict[str, int],
-    regs_obs_tol: Dict[str, int],
     reg: str,
-    exact_mask: int,
-    tol_mask: int,
+    observed_mask: int,
 ) -> None:
-    exact = int(exact_mask) & UINT64_MASK
-    tol = int(tol_mask) & UINT64_MASK
-    existing_exact = int(regs_obs[reg]) & (~int(regs_obs_tol[reg]) & UINT64_MASK)
-    tol &= (~(exact | existing_exact) & UINT64_MASK)
-    if exact != 0:
-        regs_obs[reg] = (regs_obs[reg] | exact) & UINT64_MASK
-        regs_obs_tol[reg] = (regs_obs_tol[reg] & (~exact & UINT64_MASK)) & UINT64_MASK
-    if tol != 0:
-        regs_obs[reg] = (regs_obs[reg] | tol) & UINT64_MASK
-        regs_obs_tol[reg] = (regs_obs_tol[reg] | tol) & UINT64_MASK
-
-
-def extend_unique_tolerance_paths(
-    reg_tol_paths: Dict[str, List[TolerancePath]],
-    reg: str,
-    paths: List[TolerancePath],
-) -> None:
-    if not paths:
-        return
-    existing = reg_tol_paths.get(reg)
-    if not existing:
-        reg_tol_paths[reg] = list(paths)
-        return
-    existing_set = set(existing)
-    for path in paths:
-        if path in existing_set:
-            continue
-        existing.append(path)
-        existing_set.add(path)
-
-
-def clear_tolerance_paths_if_dead(
-    regs_obs_tol: Dict[str, int],
-    reg_tol_paths: Dict[str, List[TolerancePath]],
-    reg: str,
-) -> None:
-    if int(regs_obs_tol.get(reg, 0)) == 0:
-        reg_tol_paths.pop(reg, None)
+    observed = int(observed_mask) & UINT64_MASK
+    if observed != 0:
+        regs_obs[reg] = (regs_obs[reg] | observed) & UINT64_MASK
 
 
 def seed_address_masks(
@@ -5970,9 +5262,13 @@ def _hash_update_u64(hasher: "hashlib._Hash", value: int) -> None:
 
 
 @lru_cache(maxsize=131072)
-def _control_taint_text_blob(text: str) -> bytes:
-    raw = str(text).encode("utf-8", errors="surrogatepass")
+def _control_taint_text_blob_cached(text: str) -> bytes:
+    raw = text.encode("utf-8", errors="surrogatepass")
     return struct.pack("<I", len(raw)) + raw
+
+
+def _control_taint_text_blob(text: str) -> bytes:
+    return _control_taint_text_blob_cached(_text(text))
 
 
 def _control_taint_base_taken(ev: TraceEvent) -> bool:
@@ -6081,114 +5377,6 @@ def _control_taint_text_id(
     value = len(interner) + 1
     interner[key] = int(value)
     return int(value)
-
-
-def _control_taint_thread_hashes_cpp(
-    thread_events: List[TraceEvent],
-    *,
-    interner: Dict[str, int],
-) -> Optional[Tuple[bytes, bytes]]:
-    global _CPP_CONTROL_TAINT_HASH_FAILED
-    if not _CPP_CONTROL_TAINT_HASH_ENABLED or _CPP_CONTROL_TAINT_HASH_FAILED:
-        return None
-
-    payload: List[Dict[str, Any]] = []
-    for ev in thread_events:
-        payload.append(
-            {
-                "kind_id": _control_taint_text_id(ev.kind, interner),
-                "opcode_id": _control_taint_text_id(normalize_opcode(ev.opcode), interner),
-                "pc_id": _control_taint_text_id(ev.pc if ev.pc is not None else "", interner),
-                "dst_reg_id": _control_taint_text_id(
-                    ev.dst_reg if ev.dst_reg is not None else "",
-                    interner,
-                ),
-                "width_bits": int(ev.width_bits),
-                "src_reg_ids": [
-                    _control_taint_text_id(reg, interner) for reg in ev.src_regs
-                ],
-                "src_width_bits": [int(width) for width in ev.src_width_bits],
-                "src_vals": [int(val) & UINT64_MASK for val in ev.src_vals],
-                "branch_flag": ev.kind in ("branch", "loop_branch"),
-                "base_taken": _control_taint_base_taken(ev)
-                if ev.kind in ("branch", "loop_branch")
-                else False,
-            }
-        )
-    try:
-        return exact_cpp_backend.control_taint_thread_hashes(payload)
-    except Exception:
-        _CPP_CONTROL_TAINT_HASH_FAILED = True
-        return None
-
-
-def _control_taint_thread_hashes_cpp_many(
-    thread_events_by_tid: Sequence[Tuple[int, List[TraceEvent]]],
-    *,
-    interner: Dict[str, int],
-) -> Optional[Dict[int, Tuple[bytes, bytes]]]:
-    global _CPP_CONTROL_TAINT_HASH_FAILED
-    if not _CPP_CONTROL_TAINT_HASH_ENABLED or _CPP_CONTROL_TAINT_HASH_FAILED:
-        return None
-    thread_rows: List[Tuple[int, int]] = []
-    event_rows: List[
-        Tuple[int, int, int, int, int, int, int, int, int, int, int, bool, bool]
-    ] = []
-    flat_src_reg_ids: List[int] = []
-    flat_src_width_bits: List[int] = []
-    flat_src_vals: List[int] = []
-    tids: List[int] = []
-    for tid, thread_events in thread_events_by_tid:
-        tids.append(int(tid))
-        event_offset = len(event_rows)
-        for ev in thread_events:
-            src_reg_offset = len(flat_src_reg_ids)
-            src_width_offset = len(flat_src_width_bits)
-            src_val_offset = len(flat_src_vals)
-            src_reg_ids = [_control_taint_text_id(reg, interner) for reg in ev.src_regs]
-            src_width_bits = [int(width) for width in ev.src_width_bits]
-            src_vals = [int(val) & UINT64_MASK for val in ev.src_vals]
-            flat_src_reg_ids.extend(src_reg_ids)
-            flat_src_width_bits.extend(src_width_bits)
-            flat_src_vals.extend(src_vals)
-            branch_flag = ev.kind in ("branch", "loop_branch")
-            event_rows.append(
-                (
-                    _control_taint_text_id(ev.kind, interner),
-                    _control_taint_text_id(normalize_opcode(ev.opcode), interner),
-                    _control_taint_text_id(
-                        ev.pc if ev.pc is not None else "", interner
-                    ),
-                    _control_taint_text_id(
-                        ev.dst_reg if ev.dst_reg is not None else "",
-                        interner,
-                    ),
-                    int(ev.width_bits),
-                    int(src_reg_offset),
-                    int(len(src_reg_ids)),
-                    int(src_width_offset),
-                    int(len(src_width_bits)),
-                    int(src_val_offset),
-                    int(len(src_vals)),
-                    bool(branch_flag),
-                    bool(_control_taint_base_taken(ev)) if branch_flag else False,
-                )
-            )
-        thread_rows.append((int(event_offset), int(len(thread_events))))
-    try:
-        hashes = exact_cpp_backend.control_taint_thread_hashes_many_columnar(
-            thread_rows=thread_rows,
-            event_rows=event_rows,
-            src_reg_ids=flat_src_reg_ids,
-            src_width_bits=flat_src_width_bits,
-            src_vals=flat_src_vals
-        )
-    except Exception:
-        _CPP_CONTROL_TAINT_HASH_FAILED = True
-        return None
-    if hashes is None or len(hashes) != len(tids):
-        return None
-    return {int(tid): hashes[idx] for idx, tid in enumerate(tids)}
 
 
 def _merge_target_masks_into(
@@ -6726,15 +5914,6 @@ def propagate_control_taint_backward(
     thread_order = list(events_by_thread.keys())
     thread_groups: List[Tuple[Optional[bytes], List[int]]] = []
     total_event_count = int(len(events))
-    control_taint_text_ids: Dict[str, int] = {}
-    tid_to_cpp_hashes: Dict[int, Tuple[bytes, bytes]] = {}
-    if thread_dedup_enabled:
-        cpp_many_hashes = _control_taint_thread_hashes_cpp_many(
-            [(int(tid), events_by_thread[int(tid)]) for tid in thread_order],
-            interner=control_taint_text_ids
-        )
-        if cpp_many_hashes:
-            tid_to_cpp_hashes.update(cpp_many_hashes)
     use_direct_signature_dedup = (
         thread_dedup_enabled
         and _control_taint_should_use_direct_signature(
@@ -6745,17 +5924,7 @@ def propagate_control_taint_backward(
     if use_direct_signature_dedup:
         sig_to_tids: "OrderedDict[bytes, List[int]]" = OrderedDict()
         for tid in thread_order:
-            cpp_hashes = tid_to_cpp_hashes.get(int(tid))
-            if cpp_hashes is None:
-                cpp_hashes = _control_taint_thread_hashes_cpp(
-                    events_by_thread[int(tid)],
-                    interner=control_taint_text_ids,
-                )
-            if cpp_hashes is not None:
-                sig = cpp_hashes[0]
-                tid_to_cpp_hashes[int(tid)] = cpp_hashes
-            else:
-                sig = _control_taint_thread_signature(events_by_thread[int(tid)])
+            sig = _control_taint_thread_signature(events_by_thread[int(tid)])
             thread_dedup_strict_signature_threads += 1
             sig_to_tids.setdefault(sig, []).append(int(tid))
         thread_dedup_candidate_buckets = int(
@@ -6770,17 +5939,7 @@ def propagate_control_taint_backward(
         tid_to_sketch: Dict[int, bytes] = {}
         sketch_to_tids: Dict[bytes, List[int]] = defaultdict(list)
         for tid in thread_order:
-            cpp_hashes = tid_to_cpp_hashes.get(int(tid))
-            if cpp_hashes is None:
-                cpp_hashes = _control_taint_thread_hashes_cpp(
-                    events_by_thread[int(tid)],
-                    interner=control_taint_text_ids,
-                )
-            if cpp_hashes is not None:
-                tid_to_cpp_hashes[int(tid)] = cpp_hashes
-                sketch = cpp_hashes[1]
-            else:
-                sketch = _control_taint_thread_sketch(events_by_thread[tid])
+            sketch = _control_taint_thread_sketch(events_by_thread[tid])
             tid_to_sketch[tid] = sketch
             sketch_to_tids[sketch].append(tid)
 
@@ -6801,11 +5960,7 @@ def propagate_control_taint_backward(
             sig_to_tids: Dict[bytes, List[int]] = defaultdict(list)
             tid_to_sig: Dict[int, bytes] = {}
             for bt in sketch_bucket:
-                cpp_hashes = tid_to_cpp_hashes.get(int(bt))
-                if cpp_hashes is not None:
-                    sig = cpp_hashes[0]
-                else:
-                    sig = _control_taint_thread_signature(events_by_thread[int(bt)])
+                sig = _control_taint_thread_signature(events_by_thread[int(bt)])
                 thread_dedup_strict_signature_threads += 1
                 tid_to_sig[int(bt)] = sig
                 sig_to_tids[sig].append(int(bt))
@@ -7014,8 +6169,6 @@ def propagate_control_taint_backward(
 class _LiveWordState:
     __slots__ = (
         "byte_obs_masks",
-        "byte_tol_obs_masks",
-        "byte_tol_paths",
         "byte_due_masks",
         "byte_trace_masks",
         "byte_counts",
@@ -7024,8 +6177,6 @@ class _LiveWordState:
 
     def __init__(self) -> None:
         self.byte_obs_masks = 0
-        self.byte_tol_obs_masks = 0
-        self.byte_tol_paths: List[Optional[List[TolerancePath]]] = [None] * 8
         self.byte_due_masks = 0
         self.byte_trace_masks = 0
         self.byte_counts = [0] * 8
@@ -7067,13 +6218,11 @@ def analyze(
     assume_sorted_events: bool = False,
     fault_component: str = "rf",
     emit_cache_sites: bool = True,
-    output_oracle_tol_policy: Optional[Dict[str, Any]] = None,
+    output_oracle_policy: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if memory_ranges is None:
         memory_ranges = []
-    output_oracle_tol_policy = normalize_output_oracle_tol_policy(
-        output_oracle_tol_policy
-    )
+    output_oracle_policy = normalize_output_oracle_policy(output_oracle_policy)
     mask_format = str(mask_format).strip().lower()
     if mask_format not in MASK_FORMATS:
         raise ValueError(
@@ -7182,18 +6331,36 @@ def analyze(
     output_ranges = output_ranges or []
 
     reg_observed_mask: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    reg_observed_tol_mask: Dict[int, Dict[str, int]] = defaultdict(
-        lambda: defaultdict(int)
-    )
-    reg_tolerance_paths: Dict[int, Dict[str, List[TolerancePath]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
     reg_due_mask: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     reg_trace_mask: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     reg_smem_store_escape_mask: Dict[int, Dict[str, int]] = defaultdict(
         lambda: defaultdict(int)
     )
     read_records: List[Any] = []
+    zero_effect_read_records_elided = 0
+    zero_effect_read_bits_elided = 0
+    elide_zero_effect_read_records = bool(
+        use_compact_storage_rows
+        and env_flag("REG_OBSERVED_ELIDE_ZERO_READ_EVENTS_FOR_COMPUTE", True)
+    )
+
+    if elide_zero_effect_read_records:
+        def append_read_record(rec: Any) -> None:
+            nonlocal zero_effect_read_records_elided
+            nonlocal zero_effect_read_bits_elided
+            width_i = coerce_width_bits(_read_row_field(rec, "src_width_bits", 64), default=64)
+            mask_i = width_mask(width_i)
+            obs_i = mask_as_int(_read_row_field(rec, "observed_mask_this_read", 0)) & mask_i
+            due_i = mask_as_int(_read_row_field(rec, "due_mask_this_read", 0)) & mask_i
+            trace_i = mask_as_int(_read_row_field(rec, "trace_expanding_mask_this_read", 0)) & mask_i
+            addr_due_i = mask_as_int(_read_row_field(rec, ADDR_STATIC_DUE_MASK_FIELD, 0)) & mask_i
+            if (obs_i | due_i | trace_i | addr_due_i) == 0:
+                zero_effect_read_records_elided += 1
+                zero_effect_read_bits_elided += int(width_i)
+                return
+            read_records.append(rec)
+    else:
+        append_read_record = read_records.append
 
     def memory_scope_key(ev: TraceEvent) -> Optional[Tuple[Any, ...]]:
         space = canonical_space(ev.mem_space)
@@ -7211,6 +6378,76 @@ def analyze(
         global_events = events
     else:
         global_events = sorted(events, key=_event_sort_key)
+
+    rf_register_uid_map: Dict[str, Set[int]] = defaultdict(set)
+    for uid_ev in global_events:
+        for reg_name, uid_raw in zip(uid_ev.src_regs, uid_ev.src_reg_uids):
+            try:
+                uid_i = int(uid_raw)
+            except Exception:
+                uid_i = -1
+            if uid_i >= 0:
+                rf_register_uid_map[str(reg_name)].add(uid_i)
+        if uid_ev.dst_reg is not None and uid_ev.dst_reg_uid is not None:
+            try:
+                dst_uid_i = int(uid_ev.dst_reg_uid)
+            except Exception:
+                dst_uid_i = -1
+            if dst_uid_i >= 0:
+                rf_register_uid_map[str(uid_ev.dst_reg)].add(dst_uid_i)
+        if uid_ev.pred is not None and uid_ev.pred.uid is not None:
+            try:
+                pred_uid_i = int(uid_ev.pred.uid)
+            except Exception:
+                pred_uid_i = -1
+            if pred_uid_i >= 0:
+                rf_register_uid_map[str(uid_ev.pred.reg)].add(pred_uid_i)
+
+    basic_block_transfer_enabled = env_flag(
+        "REG_OBSERVED_BASIC_BLOCK_TRANSFER",
+        True,
+    )
+    try:
+        basic_block_transfer_min_len = int(
+            os.environ.get("REG_OBSERVED_BASIC_BLOCK_TRANSFER_MIN_LEN", "2")
+        )
+    except Exception:
+        basic_block_transfer_min_len = 2
+    try:
+        basic_block_transfer_cache_max_entries = int(
+            os.environ.get("REG_OBSERVED_BASIC_BLOCK_TRANSFER_CACHE_MAX", "8192")
+        )
+    except Exception:
+        basic_block_transfer_cache_max_entries = 8192
+    if basic_block_transfer_cache_max_entries < 0:
+        basic_block_transfer_cache_max_entries = 0
+    if basic_block_transfer_enabled:
+        (
+            basic_block_transfer_end_to_events,
+            basic_block_transfer_member_to_end,
+        ) = _build_basic_block_transfer_maps(
+            global_events,
+            min_len=basic_block_transfer_min_len,
+        )
+    else:
+        basic_block_transfer_end_to_events = {}
+        basic_block_transfer_member_to_end = {}
+    basic_block_transfer_cache: OrderedDict[Any, Any] = OrderedDict()
+    basic_block_transfer_signature_cache: Dict[int, Tuple[Any, ...]] = {}
+    basic_block_transfer_touched_cache: Dict[int, Tuple[str, ...]] = {}
+    basic_block_transfer_raw_candidate_blocks = int(
+        len(basic_block_transfer_end_to_events)
+    )
+    basic_block_transfer_raw_candidate_events = int(
+        sum(len(block) for block in basic_block_transfer_end_to_events.values())
+    )
+    basic_block_transfer_candidate_blocks = 0
+    basic_block_transfer_candidate_events = 0
+    basic_block_transfer_blocks_applied = 0
+    basic_block_transfer_events_applied = 0
+    basic_block_transfer_cache_hits = 0
+    basic_block_transfer_cache_misses = 0
+    basic_block_transfer_skipped_member_events = 0
 
     trace_memory_oracle: Optional[TraceMemoryOracle] = None
     trace_memory_oracle_built = False
@@ -7270,20 +6507,13 @@ def analyze(
         and control_taint_max_events > 0
         and control_taint_event_count > control_taint_max_events
     ):
-        precomputed_target_masks = {}
-        precomputed_control_taint_stats = {
-            "threads": int(len({int(ev.thread_id) for ev in global_events})),
-            "resource_guarded": 1,
-            "resource_guard_reason": "event_count",
-            "event_count": int(control_taint_event_count),
-            "max_events": int(control_taint_max_events),
-        }
-        print(
-            "WARNING: control-taint propagation skipped by resource guard "
+        raise RuntimeError(
+            "control-taint propagation exceeds the configured event limit "
             f"(event_count={control_taint_event_count}, "
-            f"max_events={control_taint_max_events}); "
-            "trace-expanding control seeds will be omitted for this run",
-            file=sys.stderr
+            f"max_events={control_taint_max_events}). "
+            "Refusing to omit trace-expanding control seeds; rerun with a higher "
+            "EXACT_CONTROL_TAINT_MAX_EVENTS value or set "
+            "EXACT_CONTROL_TAINT_RESOURCE_GUARD=0 to perform full propagation."
         )
     else:
         control_seed_rec_map = build_control_seed_rec_map(global_events)
@@ -7308,11 +6538,13 @@ def analyze(
     l2_fault_site_count_total = 0
     l2_load_site_count_total = 0
     l2_store_site_count_total = 0
-    site_trace_expanding_mask_present_count_total = 0
-    site_trace_expanding_bits_total_total = 0
-    read_trace_expanding_bits_total_total = 0
+    zero_effect_cache_site_hist: Counter = Counter()
+    zero_effect_cache_site_bits_elided = 0
+    elide_zero_effect_cache_site_records = bool(
+        use_compact_storage_rows and compact_site_output
+    )
 
-    def _record_site_totals(site_kind: str, trace_mask: int, width_bits: int = 8) -> None:
+    def _record_site_count(site_kind: str) -> None:
         nonlocal smem_fault_site_count_total
         nonlocal smem_rf_site_count_total
         nonlocal smem_lds_site_count_total
@@ -7322,19 +6554,8 @@ def analyze(
         nonlocal l2_fault_site_count_total
         nonlocal l2_load_site_count_total
         nonlocal l2_store_site_count_total
-        nonlocal site_trace_expanding_mask_present_count_total
-        nonlocal site_trace_expanding_bits_total_total
 
         kind = str(site_kind)
-        width_i = int(width_bits)
-        trace_mask_i = int(trace_mask)
-        site_trace_expanding_mask_present_count_total += 1
-        if width_i == 8:
-            site_trace_expanding_bits_total_total += int(popcount(trace_mask_i & 0xFF))
-        else:
-            site_trace_expanding_bits_total_total += int(
-                popcount(mask_as_int(trace_mask_i) & width_mask(width_i))
-            )
         if kind == "smem_rf":
             smem_fault_site_count_total += 1
             smem_rf_site_count_total += 1
@@ -7354,18 +6575,86 @@ def analyze(
             l2_fault_site_count_total += 1
             l2_store_site_count_total += 1
 
-    def _record_read_trace_bits(trace_mask: int, width_bits: int) -> None:
-        nonlocal read_trace_expanding_bits_total_total
-        width_i = coerce_width_bits(width_bits, default=64)
-        read_trace_expanding_bits_total_total += int(
-            popcount(int(trace_mask) & width_mask(width_i))
+    def _record_site_count_many(site_kind: str, count: int) -> None:
+        n = int(count)
+        if n <= 0:
+            return
+        for _ in range(n):
+            _record_site_count(site_kind)
+
+    def _record_zero_effect_cache_site(site_kind: str, width_bits: int = 8, count: int = 1) -> None:
+        nonlocal zero_effect_cache_site_bits_elided
+        n = int(count)
+        if n <= 0:
+            return
+        kind = str(site_kind)
+        zero_effect_cache_site_hist[kind] += n
+        zero_effect_cache_site_bits_elided += n * max(0, int(width_bits))
+
+    def _cache_site_is_zero_effect(
+        observed_mask_this_site: int,
+        due_mask_this_site: int,
+        trace_expanding_mask_this_site: int,
+    ) -> bool:
+        return (
+            (int(observed_mask_this_site) & 0xFF)
+            | (int(due_mask_this_site) & 0xFF)
+            | (int(trace_expanding_mask_this_site) & 0xFF)
+        ) == 0
+
+    def _append_cache_load_site_record(
+        target: List[Any],
+        *,
+        site_family: str,
+        site_kind: str,
+        mem_space: str,
+        thread_id: int,
+        sm_id: int,
+        cta_id: int,
+        addr: int,
+        cycle: int,
+        event_index: int,
+        width_bits: int,
+        writer_event_index: int,
+        observed_mask_this_site: int,
+        due_mask_this_site: int,
+        trace_expanding_mask_this_site: int,
+    ) -> None:
+        # Exact-output cache analysis treats an absent load byte history as
+        # masked mass.  Therefore a cache-load byte whose observed/due/trace
+        # masks are all zero can be represented by this exact histogram instead
+        # of an explicit site row.  This is a deterministic live-byte slice, not
+        # sampling or a tunable heuristic.
+        if elide_zero_effect_cache_site_records and _cache_site_is_zero_effect(
+            observed_mask_this_site,
+            due_mask_this_site,
+            trace_expanding_mask_this_site,
+        ):
+            _record_zero_effect_cache_site(site_kind, width_bits=width_bits)
+            return
+        target.append(
+            build_internal_site_record(
+                site_family=site_family,
+                site_kind=site_kind,
+                mem_space=mem_space,
+                thread_id=thread_id,
+                sm_id=sm_id,
+                cta_id=cta_id,
+                addr=addr,
+                cycle=cycle,
+                event_index=event_index,
+                width_bits=width_bits,
+                writer_event_index=writer_event_index,
+                observed_mask_this_site=observed_mask_this_site,
+                due_mask_this_site=due_mask_this_site,
+                trace_expanding_mask_this_site=trace_expanding_mask_this_site,
+                compact=use_compact_storage_rows,
+            )
         )
 
     def _record_predicate_read(
         ev: TraceEvent,
         regs_obs: Dict[str, int],
-        regs_obs_tol: Dict[str, int],
-        reg_tol_paths: Dict[str, List[TolerancePath]],
         regs_due: Dict[str, int],
         regs_trace: Dict[str, int],
         pred_mask_obs: int,
@@ -7377,8 +6666,7 @@ def analyze(
             return
         pred_reg = ev.pred.reg
         if int(pred_mask_obs) != 0:
-            merge_observed_state(regs_obs, regs_obs_tol, pred_reg, 1, 0)
-            clear_tolerance_paths_if_dead(regs_obs_tol, reg_tol_paths, pred_reg)
+            merge_observed_state(regs_obs, pred_reg, 1)
         if int(pred_mask_due) != 0:
             regs_due[pred_reg] = (regs_due[pred_reg] | 1) & UINT64_MASK
         if int(pred_mask_trace) != 0:
@@ -7387,8 +6675,7 @@ def analyze(
         pred_notes = {"pred_val": ev.pred.val}
         if notes:
             pred_notes.update(notes)
-        _record_read_trace_bits(int(pred_mask_trace) & UINT64_MASK, 1)
-        read_records.append(
+        append_read_record(
             build_internal_read_record(
                 profile=internal_read_record_profile,
                 event_index=ev.index,
@@ -7414,6 +6701,539 @@ def analyze(
             )
         )
 
+    def _basic_block_touched_regs(block_events: Tuple[TraceEvent, ...]) -> Tuple[str, ...]:
+        regs: Set[str] = set()
+        for block_ev in block_events:
+            if block_ev.dst_reg is not None:
+                regs.add(str(block_ev.dst_reg))
+            for src_reg in block_ev.src_regs:
+                regs.add(str(src_reg))
+        return tuple(sorted(regs))
+
+    def _basic_block_value_independent_event(block_ev: TraceEvent) -> bool:
+        """Whether this event's exact backward transfer ignores runtime values.
+
+        Keep this deliberately narrow.  ``IDENTITY`` covers mov/cvta-style
+        register transfers: for observed/due/trace masks, each propagated bit is
+        the same source bit regardless of the concrete register value.  Other
+        operations may have value-dependent carries, comparisons, predicates, or
+        floating-point behavior, so their dynamic values remain part of the
+        cache signature.
+        """
+
+        return canonical_op(block_ev.opcode) == "IDENTITY"
+
+    def _basic_block_signature(block_events: Tuple[TraceEvent, ...]) -> Tuple[Any, ...]:
+        return tuple(
+            (
+                str(block_ev.pc),
+                str(block_ev.opcode),
+                canonical_op(block_ev.opcode),
+                int(block_ev.width_bits),
+                str(block_ev.dst_reg),
+                (
+                    None
+                    if block_ev.dst_write_mask is None
+                    else int(block_ev.dst_write_mask) & UINT64_MASK
+                ),
+                tuple(str(reg) for reg in block_ev.src_regs),
+                tuple(int(w) for w in block_ev.src_width_bits),
+                (
+                    "value_independent"
+                    if _basic_block_value_independent_event(block_ev)
+                    else tuple(int(v) & UINT64_MASK for v in block_ev.src_vals)
+                ),
+                (
+                    "value_independent"
+                    if _basic_block_value_independent_event(block_ev)
+                    else (
+                        None
+                        if block_ev.dst_val is None
+                        else int(block_ev.dst_val) & UINT64_MASK
+                    )
+                ),
+            )
+            for block_ev in block_events
+        )
+
+    if basic_block_transfer_enabled and basic_block_transfer_end_to_events:
+        # The transfer function is exact, but building/applying it is only worth
+        # doing when a block has a structurally identical peer.  Unique dynamic
+        # blocks cannot hit the memoized transfer cache, so keep them on the
+        # existing per-event path.  This is a structural equivalence test, not a
+        # result-tuned heuristic: the key is the full opcode/register/value
+        # shape used by the transfer itself.
+        block_signature_by_end: Dict[int, Tuple[Any, ...]] = {}
+        signature_counts: Counter = Counter()
+        for block_end_pos, block_events in basic_block_transfer_end_to_events.items():
+            signature = _basic_block_signature(block_events)
+            block_signature_by_end[int(block_end_pos)] = signature
+            signature_counts[signature] += 1
+
+        reusable_block_ends = {
+            int(block_end_pos)
+            for block_end_pos, signature in block_signature_by_end.items()
+            if int(signature_counts.get(signature, 0)) > 1
+        }
+        if reusable_block_ends:
+            basic_block_transfer_end_to_events = {
+                int(block_end_pos): block_events
+                for block_end_pos, block_events in basic_block_transfer_end_to_events.items()
+                if int(block_end_pos) in reusable_block_ends
+            }
+            basic_block_transfer_member_to_end = {
+                int(pos): int(block_end_pos)
+                for pos, block_end_pos in basic_block_transfer_member_to_end.items()
+                if int(block_end_pos) in reusable_block_ends
+            }
+            basic_block_transfer_signature_cache.update(
+                {
+                    int(block_end_pos): signature
+                    for block_end_pos, signature in block_signature_by_end.items()
+                    if int(block_end_pos) in reusable_block_ends
+                }
+            )
+        else:
+            basic_block_transfer_end_to_events = {}
+            basic_block_transfer_member_to_end = {}
+
+    basic_block_transfer_candidate_blocks = int(
+        len(basic_block_transfer_end_to_events)
+    )
+    basic_block_transfer_candidate_events = int(
+        sum(len(block) for block in basic_block_transfer_end_to_events.values())
+    )
+
+    def _basic_block_state_key(
+        touched_regs: Tuple[str, ...],
+        regs_obs: Dict[str, int],
+        regs_due: Dict[str, int],
+        regs_trace: Dict[str, int],
+        regs_smem_escape: Dict[str, int],
+    ) -> Tuple[Any, ...]:
+        return tuple(
+            (
+                reg,
+                int(regs_obs.get(reg, 0)) & UINT64_MASK,
+                int(regs_due.get(reg, 0)) & UINT64_MASK,
+                int(regs_trace.get(reg, 0)) & UINT64_MASK,
+                int(regs_smem_escape.get(reg, 0)) & UINT64_MASK,
+            )
+            for reg in touched_regs
+        )
+
+    def _apply_basic_block_final_state(
+        final_state: Tuple[Any, ...],
+        regs_obs: Dict[str, int],
+        regs_due: Dict[str, int],
+        regs_trace: Dict[str, int],
+        regs_smem_escape: Dict[str, int],
+    ) -> None:
+        for (
+            reg,
+            obs,
+            due,
+            trace,
+            smem_escape,
+        ) in final_state:
+            regs_obs[reg] = int(obs) & UINT64_MASK
+            regs_due[reg] = int(due) & UINT64_MASK
+            regs_trace[reg] = int(trace) & UINT64_MASK
+            regs_smem_escape[reg] = int(smem_escape) & UINT64_MASK
+
+    def _emit_basic_block_read_records(
+        block_events: Tuple[TraceEvent, ...],
+        read_masks: Tuple[Tuple[int, int, int, int, int, int, int], ...],
+    ) -> None:
+        for (
+            event_offset,
+            src_i,
+            src_obs,
+            src_due,
+            src_trace,
+            reg_obs_at_read,
+            reg_due_at_read,
+        ) in read_masks:
+            block_ev = block_events[int(event_offset)]
+            src_index = int(src_i)
+            src_reg = block_ev.src_regs[src_index]
+            src_w = block_ev.src_width_bits[src_index]
+            append_read_record(
+                build_internal_read_record(
+                    profile=internal_read_record_profile,
+                    event_index=block_ev.index,
+                    thread_id=block_ev.thread_id,
+                    cycle=block_ev.cycle,
+                    sm_id=block_ev.sm_id,
+                    cta_id=block_ev.cta_id,
+                    warp_id=block_ev.warp_id,
+                    pc=block_ev.pc,
+                    opcode=block_ev.opcode,
+                    read_kind="src",
+                    src_index=src_index,
+                    src_reg=src_reg,
+                    src_reg_uid=(
+                        block_ev.src_reg_uids[src_index]
+                        if 0 <= src_index < len(block_ev.src_reg_uids)
+                        else -1
+                    ),
+                    src_width_bits=src_w,
+                    observed_mask_this_read=int(src_obs) & UINT64_MASK,
+                    due_mask_this_read=int(src_due) & UINT64_MASK,
+                    trace_expanding_mask_this_read=int(src_trace) & UINT64_MASK,
+                    reg_observed_mask_at_read=int(reg_obs_at_read) & UINT64_MASK,
+                    reg_due_mask_at_read=int(reg_due_at_read) & UINT64_MASK,
+                    compact_compute=use_compact_storage_rows,
+                )
+            )
+
+    def _compute_basic_block_transfer(
+        block_events: Tuple[TraceEvent, ...],
+        touched_regs: Tuple[str, ...],
+        regs_obs: Dict[str, int],
+        regs_due: Dict[str, int],
+        regs_trace: Dict[str, int],
+        regs_smem_escape: Dict[str, int],
+    ) -> Tuple[
+        Tuple[Any, ...],
+        Tuple[Tuple[int, int, int, int, int, int, int], ...],
+        int,
+        int,
+    ]:
+        local_obs: Dict[str, int] = {
+            reg: int(regs_obs.get(reg, 0)) & UINT64_MASK for reg in touched_regs
+        }
+        local_due: Dict[str, int] = {
+            reg: int(regs_due.get(reg, 0)) & UINT64_MASK for reg in touched_regs
+        }
+        local_trace: Dict[str, int] = {
+            reg: int(regs_trace.get(reg, 0)) & UINT64_MASK for reg in touched_regs
+        }
+        local_smem_escape: Dict[str, int] = {
+            reg: int(regs_smem_escape.get(reg, 0)) & UINT64_MASK
+            for reg in touched_regs
+        }
+        read_masks: List[Tuple[int, int, int, int, int, int, int]] = []
+        local_zero_effect_read_records_elided = 0
+        local_zero_effect_read_bits_elided = 0
+        event_offset_by_index = {
+            int(block_ev.index): int(offset)
+            for offset, block_ev in enumerate(block_events)
+        }
+
+        for block_ev in reversed(block_events):
+            op = canonical_op(block_ev.opcode)
+            write_mask = block_ev.dst_write_mask
+            if write_mask is None:
+                write_mask = width_mask(dst_width_bits(op, block_ev.width_bits))
+            write_mask &= UINT64_MASK
+
+            dst_reg = str(block_ev.dst_reg)
+            dst_live_obs = local_obs.get(dst_reg, 0) & write_mask
+            dst_live_due = local_due.get(dst_reg, 0) & write_mask
+            dst_live_trace = (
+                local_trace.get(dst_reg, 0) & write_mask
+            ) if enable_memory_site_features else 0
+            dst_live_smem_escape = (
+                local_smem_escape.get(dst_reg, 0) & write_mask
+            ) if enable_smem_features else 0
+
+            src_masks_obs = [0] * len(block_ev.src_regs)
+            src_masks_due = [0] * len(block_ev.src_regs)
+            src_masks_trace = [0] * len(block_ev.src_regs)
+
+            if (
+                elide_zero_effect_read_records
+                and (
+                    int(dst_live_obs)
+                    | int(dst_live_due)
+                    | int(dst_live_trace)
+                    | int(dst_live_smem_escape)
+                )
+                == 0
+            ):
+                zero_effect_event_bits = 0
+                has_trace_seed = False
+                for src_i, _src_reg in enumerate(block_ev.src_regs):
+                    src_w = coerce_width_bits(
+                        block_ev.src_width_bits[src_i]
+                        if src_i < len(block_ev.src_width_bits)
+                        else 64,
+                        default=64,
+                    )
+                    zero_effect_event_bits += int(src_w)
+                    if (
+                        int(
+                            trace_seed_by_read_key.get(
+                                (
+                                    int(block_ev.thread_id),
+                                    int(block_ev.index),
+                                    "src",
+                                    int(src_i),
+                                ),
+                                0,
+                            )
+                        )
+                        & width_mask(src_w)
+                    ) != 0:
+                        has_trace_seed = True
+                        break
+                if not has_trace_seed:
+                    local_zero_effect_read_records_elided += int(len(block_ev.src_regs))
+                    local_zero_effect_read_bits_elided += int(zero_effect_event_bits)
+                    continue
+
+            if (
+                dst_live_obs != 0
+                or dst_live_due != 0
+                or dst_live_trace != 0
+                or dst_live_smem_escape != 0
+            ):
+                if op not in SUPPORTED_OPS:
+                    raise NotImplementedError(
+                        "Unsupported opcode with observed/due/trace destination bits: "
+                        f"thread_id={block_ev.thread_id}, pc={block_ev.pc}, "
+                        f"event_index={block_ev.index}, opcode={block_ev.opcode}, "
+                        f"canonical_op={op}"
+                    )
+
+                if op == "IDENTITY":
+                    if len(block_ev.src_vals) not in (0, 1):
+                        raise ValueError(
+                            f"event[{block_ev.index}] opcode {block_ev.opcode} "
+                            f"expects 0 or 1 srcs, got {len(block_ev.src_vals)}"
+                        )
+                else:
+                    need = expected_src_count(op)
+                    if len(block_ev.src_vals) != need:
+                        raise ValueError(
+                            f"event[{block_ev.index}] opcode {block_ev.opcode} "
+                            f"expects {need} srcs, got {len(block_ev.src_vals)}"
+                        )
+
+                if block_ev.dst_val is None:
+                    try:
+                        dst_val = eval_op(op, block_ev.src_vals, block_ev.width_bits)
+                    except KeyError as exc:
+                        raise NotImplementedError(
+                            "Unsupported opcode while computing dst_val: "
+                            f"thread_id={block_ev.thread_id}, pc={block_ev.pc}, "
+                            f"event_index={block_ev.index}, opcode={block_ev.opcode}, "
+                            f"canonical_op={op}"
+                        ) from exc
+                else:
+                    dst_val = block_ev.dst_val
+
+                obs_mask_for_exact = int(dst_live_obs) & UINT64_MASK
+
+                if len(block_ev.src_vals) > 0:
+                    (
+                        src_masks_obs,
+                        src_masks_due,
+                        src_masks_trace,
+                    ) = backward_influence_triplet(
+                        op=op,
+                        src_vals=block_ev.src_vals,
+                        dst_val=dst_val,
+                        obs_mask=obs_mask_for_exact,
+                        due_mask=dst_live_due,
+                        trace_mask=dst_live_trace,
+                        width_bits_default=block_ev.width_bits,
+                        src_widths=block_ev.src_width_bits,
+                        thread_id=block_ev.thread_id,
+                        pc=block_ev.pc,
+                        opcode=block_ev.opcode,
+                        event_index=block_ev.index,
+                    )
+
+                for src_i, src_reg_raw in enumerate(block_ev.src_regs):
+                    src_reg = str(src_reg_raw)
+                    merge_observed_state(local_obs, src_reg, int(src_masks_obs[src_i]))
+                    local_due[src_reg] = (
+                        local_due.get(src_reg, 0) | src_masks_due[src_i]
+                    ) & UINT64_MASK
+                    local_trace[src_reg] = (
+                        local_trace.get(src_reg, 0) | src_masks_trace[src_i]
+                    ) & UINT64_MASK
+
+                local_obs[dst_reg] = local_obs.get(dst_reg, 0) & (
+                    ~write_mask
+                ) & UINT64_MASK
+                local_due[dst_reg] = local_due.get(dst_reg, 0) & (
+                    ~write_mask
+                ) & UINT64_MASK
+                local_trace[dst_reg] = local_trace.get(dst_reg, 0) & (
+                    ~write_mask
+                ) & UINT64_MASK
+                local_smem_escape[dst_reg] = local_smem_escape.get(dst_reg, 0) & (
+                    ~write_mask
+                ) & UINT64_MASK
+
+            for src_i, src_reg_raw in enumerate(block_ev.src_regs):
+                src_reg = str(src_reg_raw)
+                src_w = max(
+                    0,
+                    min(
+                        64,
+                        int(block_ev.src_width_bits[src_i])
+                        if src_i < len(block_ev.src_width_bits)
+                        else 64,
+                    ),
+                )
+                trace_seed_mask = (
+                    int(
+                        trace_seed_by_read_key.get(
+                            (
+                                int(block_ev.thread_id),
+                                int(block_ev.index),
+                                "src",
+                                int(src_i),
+                            ),
+                            0,
+                        )
+                    )
+                    & width_mask(src_w)
+                )
+                if trace_seed_mask != 0:
+                    src_masks_trace[src_i] = (
+                        int(src_masks_trace[src_i]) | trace_seed_mask
+                    ) & UINT64_MASK
+                    local_trace[src_reg] = (
+                        local_trace.get(src_reg, 0) | trace_seed_mask
+                    ) & UINT64_MASK
+                src_obs_i = int(src_masks_obs[src_i]) & UINT64_MASK
+                src_due_i = int(src_masks_due[src_i]) & UINT64_MASK
+                src_trace_i = int(src_masks_trace[src_i]) & UINT64_MASK
+                if (
+                    elide_zero_effect_read_records
+                    and ((src_obs_i | src_due_i | src_trace_i) & width_mask(src_w)) == 0
+                ):
+                    # Exact zero-read elision inside cached basic-block transfers.
+                    # This mirrors append_read_record's compute-profile behavior,
+                    # but stores only the accounting in the transfer result so
+                    # cache hits do not replay semantically masked read tuples.
+                    local_zero_effect_read_records_elided += 1
+                    local_zero_effect_read_bits_elided += int(src_w)
+                    continue
+                read_masks.append(
+                    (
+                        int(event_offset_by_index[int(block_ev.index)]),
+                        int(src_i),
+                        int(src_obs_i) & UINT64_MASK,
+                        int(src_due_i) & UINT64_MASK,
+                        int(src_trace_i) & UINT64_MASK,
+                        int(local_obs.get(src_reg, 0)) & UINT64_MASK,
+                        int(local_due.get(src_reg, 0)) & UINT64_MASK,
+                    )
+                )
+
+        final_state = _basic_block_state_key(
+            touched_regs,
+            local_obs,
+            local_due,
+            local_trace,
+            local_smem_escape,
+        )
+        return (
+            final_state,
+            tuple(read_masks),
+            int(local_zero_effect_read_records_elided),
+            int(local_zero_effect_read_bits_elided),
+        )
+
+    def _apply_basic_block_transfer(
+        block_end_pos: int,
+        block_events: Tuple[TraceEvent, ...],
+        regs_obs: Dict[str, int],
+        regs_due: Dict[str, int],
+        regs_trace: Dict[str, int],
+        regs_smem_escape: Dict[str, int],
+    ) -> Tuple[bool, int, int]:
+        nonlocal zero_effect_read_records_elided
+        nonlocal zero_effect_read_bits_elided
+
+        touched_regs = basic_block_transfer_touched_cache.get(block_end_pos)
+        if touched_regs is None:
+            touched_regs = _basic_block_touched_regs(block_events)
+            basic_block_transfer_touched_cache[block_end_pos] = touched_regs
+        signature = basic_block_transfer_signature_cache.get(block_end_pos)
+        if signature is None:
+            signature = _basic_block_signature(block_events)
+            basic_block_transfer_signature_cache[block_end_pos] = signature
+
+        trace_seed_key = tuple(
+            int(
+                trace_seed_by_read_key.get(
+                    (int(block_ev.thread_id), int(block_ev.index), "src", int(src_i)),
+                    0,
+                )
+            )
+            & UINT64_MASK
+            for block_ev in block_events
+            for src_i, _src_reg in enumerate(block_ev.src_regs)
+        )
+        state_key = _basic_block_state_key(
+            touched_regs,
+            regs_obs,
+            regs_due,
+            regs_trace,
+            regs_smem_escape,
+        )
+        cache_key = (
+            signature,
+            trace_seed_key,
+            bool(enable_memory_site_features),
+            bool(enable_smem_features),
+            state_key,
+        )
+        cached = (
+            basic_block_transfer_cache.get(cache_key)
+            if basic_block_transfer_cache_max_entries != 0
+            else None
+        )
+        cache_hit = cached is not None
+        if cached is None:
+            cached = _compute_basic_block_transfer(
+                block_events,
+                touched_regs,
+                regs_obs,
+                regs_due,
+                regs_trace,
+                regs_smem_escape,
+            )
+            if basic_block_transfer_cache_max_entries != 0:
+                basic_block_transfer_cache[cache_key] = cached
+                if (
+                    basic_block_transfer_cache_max_entries > 0
+                    and len(basic_block_transfer_cache)
+                    > basic_block_transfer_cache_max_entries
+                ):
+                    basic_block_transfer_cache.popitem(last=False)
+        else:
+            basic_block_transfer_cache.move_to_end(cache_key)
+
+        (
+            final_state,
+            read_masks,
+            block_zero_records_elided,
+            block_zero_bits_elided,
+        ) = cached
+        _apply_basic_block_final_state(
+            final_state,
+            regs_obs,
+            regs_due,
+            regs_trace,
+            regs_smem_escape,
+        )
+        _emit_basic_block_read_records(block_events, read_masks)
+        zero_effect_read_records_elided += int(block_zero_records_elided)
+        zero_effect_read_bits_elided += int(block_zero_bits_elided)
+        return (
+            cache_hit,
+            int(len(block_events)),
+            int(len(read_masks)),
+        )
+
     forwarded_load_bytes_total = 0
     forwarded_load_bytes_with_store = 0
     forwarded_cross_thread_count = 0
@@ -7428,19 +7248,44 @@ def analyze(
         "store_addr_proven_masked_bits": 0,
         "store_addr_proven_masked_events": 0,
     }
-    tol_output_store_seed_count = 0
-    tol_float_backward_op_count = 0
-    tol_memory_forward_byte_count = 0
-    tol_exact_conversion_count = 0
 
-    for ev in reversed(global_events):
+    for _event_pos in range(len(global_events) - 1, -1, -1):
+        ev = global_events[_event_pos]
         tid = ev.thread_id
         regs_obs = reg_observed_mask[tid]
-        regs_obs_tol = reg_observed_tol_mask[tid]
-        reg_tol_paths = reg_tolerance_paths[tid]
         regs_due = reg_due_mask[tid]
         regs_trace = reg_trace_mask[tid]
         regs_smem_escape = reg_smem_store_escape_mask[tid]
+
+        if basic_block_transfer_enabled:
+            block_end_pos = basic_block_transfer_member_to_end.get(_event_pos)
+            if block_end_pos is not None:
+                if int(block_end_pos) != int(_event_pos):
+                    basic_block_transfer_skipped_member_events += 1
+                    continue
+                block_events = basic_block_transfer_end_to_events.get(block_end_pos)
+                if block_events:
+                    (
+                        cache_hit,
+                        event_count,
+                        _read_count,
+                    ) = (
+                        _apply_basic_block_transfer(
+                            int(block_end_pos),
+                            block_events,
+                            regs_obs,
+                            regs_due,
+                            regs_trace,
+                            regs_smem_escape,
+                        )
+                    )
+                    basic_block_transfer_blocks_applied += 1
+                    basic_block_transfer_events_applied += int(event_count)
+                    if cache_hit:
+                        basic_block_transfer_cache_hits += 1
+                    else:
+                        basic_block_transfer_cache_misses += 1
+                    continue
 
         if ev.kind == "store":
             if ev.pred is not None and ev.pred.val == 0:
@@ -7480,10 +7325,6 @@ def analyze(
                                 int((state.byte_obs_masks >> shift) & 0xFF)
                                 << out_shift
                             )
-                            pred_live_obs |= (
-                                int((state.byte_tol_obs_masks >> shift) & 0xFF)
-                                << out_shift
-                            )
                             if enable_memory_site_features:
                                 pred_live_due |= (
                                     int((state.byte_due_masks >> shift) & 0xFF)
@@ -7511,8 +7352,6 @@ def analyze(
                 _record_predicate_read(
                     ev,
                     regs_obs,
-                    regs_obs_tol,
-                    reg_tol_paths,
                     regs_due,
                     regs_trace,
                     pred_obs,
@@ -7526,12 +7365,9 @@ def analyze(
                 continue
 
             memory_forward_live_mask = 0
-            memory_forward_tol_live_mask = 0
             memory_forward_due_live_mask = 0
             memory_forward_trace_live_mask = 0
             memory_forward_src_obs_mask = 0
-            memory_forward_src_tol_obs_mask = 0
-            memory_forward_src_tol_paths: List[TolerancePath] = []
             memory_forward_src_due_mask = 0
             memory_forward_src_trace_mask = 0
             memory_forward_live_bytes = 0
@@ -7557,9 +7393,6 @@ def analyze(
                             origin_counts: Optional[Dict[int, int]] = None
                             if state is not None:
                                 live_byte_obs_mask = int((state.byte_obs_masks >> shift) & 0xFF)
-                                live_byte_tol_obs_mask = int(
-                                    (state.byte_tol_obs_masks >> shift) & 0xFF
-                                )
                                 if enable_memory_site_features:
                                     live_byte_due_mask = int((state.byte_due_masks >> shift) & 0xFF)
                                     live_byte_trace_mask = int(
@@ -7571,8 +7404,6 @@ def analyze(
                                         live_byte_obs_mask << (8 * byte_i)
                                     ) & UINT64_MASK
                                     memory_forward_live_bytes += 1
-                                    if live_byte_tol_obs_mask != 0:
-                                        tol_memory_forward_byte_count += 1
 
                                     pending = int(state.byte_counts[lane])
                                     if pending <= 0:
@@ -7595,15 +7426,6 @@ def analyze(
                                     memory_forward_src_obs_mask |= (
                                         live_byte_obs_mask << (8 * src_byte_i)
                                     ) & UINT64_MASK
-                                    memory_forward_src_tol_obs_mask |= (
-                                        live_byte_tol_obs_mask << (8 * src_byte_i)
-                                    ) & UINT64_MASK
-                                    if live_byte_tol_obs_mask != 0:
-                                        byte_tol_paths = state.byte_tol_paths[lane]
-                                        if byte_tol_paths:
-                                            for path in byte_tol_paths:
-                                                if path not in memory_forward_src_tol_paths:
-                                                    memory_forward_src_tol_paths.append(path)
                                     if enable_memory_site_features:
                                         memory_forward_src_due_mask |= (
                                             live_byte_due_mask << (8 * src_byte_i)
@@ -7619,13 +7441,8 @@ def analyze(
                                     memory_forward_trace_live_mask |= (
                                         live_byte_trace_mask << (8 * byte_i)
                                     ) & UINT64_MASK
-                                memory_forward_tol_live_mask |= (
-                                    live_byte_tol_obs_mask << (8 * byte_i)
-                                ) & UINT64_MASK
 
                                 state.byte_obs_masks &= (~(0xFF << shift)) & UINT64_MASK
-                                state.byte_tol_obs_masks &= (~(0xFF << shift)) & UINT64_MASK
-                                state.byte_tol_paths[lane] = None
                                 if enable_memory_site_features:
                                     state.byte_due_masks &= (~(0xFF << shift)) & UINT64_MASK
                                     state.byte_trace_masks &= (~(0xFF << shift)) & UINT64_MASK
@@ -7637,7 +7454,6 @@ def analyze(
 
                                 if (
                                     state.byte_obs_masks == 0
-                                    and state.byte_tol_obs_masks == 0
                                     and (
                                         (state.byte_due_masks == 0 and state.byte_trace_masks == 0)
                                         or (not enable_memory_site_features)
@@ -7647,7 +7463,7 @@ def analyze(
 
                             cspace = canonical_space(ev.mem_space)
                             if cspace == "shared":
-                                _record_site_totals("smem_rf", int(live_byte_trace_mask) & 0xFF)
+                                _record_site_count("smem_rf")
                             if collect_smem_fault_sites and cspace == "shared":
                                 smem_fault_sites.append(
                                     build_internal_site_record(
@@ -7670,7 +7486,7 @@ def analyze(
                                     )
                                 )
                             if emit_cache_sites and cspace in ("global", "local"):
-                                _record_site_totals("l1d_store", int(live_byte_trace_mask) & 0xFF)
+                                _record_site_count("l1d_store")
                             if collect_l1d_fault_sites and cspace in ("global", "local"):
                                 l1d_fault_sites.append(
                                     build_internal_site_record(
@@ -7693,7 +7509,7 @@ def analyze(
                                     )
                                 )
                             if emit_cache_sites and cspace in ("global", "local"):
-                                _record_site_totals("l2_store", int(live_byte_trace_mask) & 0xFF)
+                                _record_site_count("l2_store")
                             if collect_l2_fault_sites and cspace in ("global", "local"):
                                 l2_fault_sites.append(
                                     build_internal_site_record(
@@ -7727,7 +7543,7 @@ def analyze(
             if observed_output_store:
                 observed_output_store = output_store_participates_in_comparison(
                     ev,
-                    output_oracle_tol_policy,
+                    output_oracle_policy,
                     output_ranges,
                 )
 
@@ -7742,50 +7558,20 @@ def analyze(
                     src_w = coerce_width_bits(ev.src_width_bits[src_i], default=64)
 
             output_store_mask = 0
-            output_store_tol_mask = 0
-            output_store_tol_paths: List[TolerancePath] = []
-            output_store_tolerance_mask_applied = False
             if observed_output_store:
                 if ev.store_size_bytes is None:
                     raise ValueError(f"event[{ev.index}] output store missing store_size_bytes")
                 output_store_mask = bytes_to_mask(ev.store_size_bytes, ev.store_data_byte_offset)
-                tol_visible_mask = compute_output_store_visible_mask_with_tolerance(
-                    ev,
-                    output_oracle_tol_policy,
-                    output_ranges,
-                )
-                if tol_visible_mask is not None:
-                    output_store_mask = int(tol_visible_mask) & UINT64_MASK
-                    output_store_tol_mask = int(tol_visible_mask) & UINT64_MASK
-                    seed_path = build_output_tolerance_seed_path(
-                        ev,
-                        output_oracle_tol_policy,
-                        output_ranges,
-                    )
-                    if seed_path is not None:
-                        output_store_tol_paths = [seed_path]
-                    output_store_tolerance_mask_applied = True
-                    tol_output_store_seed_count += 1
 
             if src_reg is not None:
                 src_mask_w = width_mask(src_w)
                 output_store_mask &= src_mask_w
-                output_store_tol_mask &= src_mask_w
                 memory_forward_src_obs_mask &= src_mask_w
-                memory_forward_src_tol_obs_mask &= src_mask_w
                 memory_forward_src_due_mask &= src_mask_w
                 memory_forward_src_trace_mask &= src_mask_w
                 store_data_obs_mask = (
                     output_store_mask | memory_forward_src_obs_mask
                 ) & UINT64_MASK
-                store_data_tol_obs_mask = (
-                    output_store_tol_mask | memory_forward_src_tol_obs_mask
-                ) & UINT64_MASK
-                store_data_tol_obs_mask &= store_data_obs_mask
-                store_data_tol_paths = list(output_store_tol_paths)
-                for path in memory_forward_src_tol_paths:
-                    if path not in store_data_tol_paths:
-                        store_data_tol_paths.append(path)
                 store_data_due_mask = (
                     memory_forward_src_due_mask & UINT64_MASK
                 ) if enable_memory_site_features else 0
@@ -7800,18 +7586,9 @@ def analyze(
                 ):
                     merge_observed_state(
                         regs_obs,
-                        regs_obs_tol,
                         src_reg,
-                        int(store_data_obs_mask) & (~int(store_data_tol_obs_mask) & UINT64_MASK),
-                        int(store_data_tol_obs_mask),
+                        int(store_data_obs_mask) & UINT64_MASK,
                     )
-                    clear_tolerance_paths_if_dead(regs_obs_tol, reg_tol_paths, src_reg)
-                    if int(store_data_tol_obs_mask) != 0:
-                        extend_unique_tolerance_paths(
-                            reg_tol_paths,
-                            src_reg,
-                            store_data_tol_paths,
-                        )
                     regs_due[src_reg] = (regs_due[src_reg] | store_data_due_mask) & UINT64_MASK
                     regs_trace[src_reg] = (
                         regs_trace[src_reg] | store_data_trace_mask
@@ -7823,10 +7600,17 @@ def analyze(
                         regs_smem_escape[src_reg] = (
                             regs_smem_escape[src_reg] | memory_forward_src_obs_mask
                         ) & UINT64_MASK
-                # Exact RF accounting needs every dynamic store-data consumer, even
-                # when the masks are all zero and the read is fully masked.
-                _record_read_trace_bits(int(store_data_trace_mask) & UINT64_MASK, src_w)
-                read_records.append(
+                if (
+                    elide_zero_effect_read_records
+                    and (
+                        (int(store_data_obs_mask) | int(store_data_due_mask) | int(store_data_trace_mask))
+                        & width_mask(src_w)
+                    ) == 0
+                ):
+                    zero_effect_read_records_elided += 1
+                    zero_effect_read_bits_elided += int(coerce_width_bits(src_w, default=64))
+                    continue
+                append_read_record(
                     build_internal_read_record(
                         profile=internal_read_record_profile,
                         event_index=ev.index,
@@ -7858,15 +7642,10 @@ def analyze(
                                 int(ev.index) in output_last_writer_event_indices
                             ),
                             "output_store_observed_seed": bool(observed_output_store),
-                            "output_store_tolerance_mask_applied": bool(
-                                output_store_tolerance_mask_applied
-                            ),
                             "store_size_bytes": ev.store_size_bytes,
                             "store_data_byte_offset": ev.store_data_byte_offset,
                             "memory_forwarded": bool(memory_forward_live_bytes > 0),
                             "memory_forwarded_live_mask": int(memory_forward_live_mask)
-                            & UINT64_MASK,
-                            "memory_forwarded_tol_live_mask": int(memory_forward_tol_live_mask)
                             & UINT64_MASK,
                             "memory_forwarded_due_live_mask": int(
                                 memory_forward_due_live_mask
@@ -7979,8 +7758,6 @@ def analyze(
                 _record_predicate_read(
                     ev,
                     regs_obs,
-                    regs_obs_tol,
-                    reg_tol_paths,
                     regs_due,
                     regs_trace,
                     store_pred_obs,
@@ -7997,11 +7774,9 @@ def analyze(
         if ev.kind == "load":
             write_mask = None
             dst_live_obs = 0
-            dst_live_obs_tol = 0
             dst_live_due = 0
             dst_live_trace = 0
             load_live_obs = 0
-            load_live_obs_tol = 0
             load_live_due = 0
             load_live_trace = 0
             load_live_smem_escape = 0
@@ -8012,7 +7787,6 @@ def analyze(
                     write_mask = width_mask(ev.width_bits)
                 write_mask &= UINT64_MASK
                 dst_live_obs = regs_obs[ev.dst_reg] & write_mask
-                dst_live_obs_tol = regs_obs_tol[ev.dst_reg] & write_mask
                 dst_live_due = (
                     regs_due[ev.dst_reg] & write_mask
                 ) if enable_memory_site_features else 0
@@ -8021,7 +7795,6 @@ def analyze(
                 ) if enable_memory_site_features else 0
                 if load_size_bytes > 0:
                     load_live_obs = dst_live_obs & bytes_to_mask(load_size_bytes, 0)
-                    load_live_obs_tol = dst_live_obs_tol & bytes_to_mask(load_size_bytes, 0)
                     load_live_due = (
                         dst_live_due & bytes_to_mask(load_size_bytes, 0)
                     ) if enable_memory_site_features else 0
@@ -8036,12 +7809,7 @@ def analyze(
                 pred_obs = 0
                 pred_due = 0
                 pred_trace = 0
-                pred_obs_mask = (
-                    int(dst_live_obs) & (~int(dst_live_obs_tol) & UINT64_MASK)
-                ) & UINT64_MASK
-                if int(dst_live_obs_tol) != 0:
-                    pred_obs_mask |= int(dst_live_obs_tol) & UINT64_MASK
-                    tol_exact_conversion_count += 1
+                pred_obs_mask = int(dst_live_obs) & UINT64_MASK
 
                 if ev.pred.val == 1:
                     old_value = ev.dst_old_val
@@ -8084,8 +7852,6 @@ def analyze(
                 _record_predicate_read(
                     ev,
                     regs_obs,
-                    regs_obs_tol,
-                    reg_tol_paths,
                     regs_due,
                     regs_trace,
                     pred_obs,
@@ -8173,49 +7939,15 @@ def analyze(
                         scope_words[word_addr] = state
                     shift = lane * 8
                     prev_obs = int((state.byte_obs_masks >> shift) & 0xFF)
-                    prev_tol_obs = int((state.byte_tol_obs_masks >> shift) & 0xFF)
                     prev_due = int((state.byte_due_masks >> shift) & 0xFF)
                     prev_trace = int((state.byte_trace_masks >> shift) & 0xFF)
                     merged_obs = (prev_obs | int(live_byte_obs_mask)) & 0xFF
-                    merged_tol_obs = (prev_tol_obs | int((load_live_obs_tol >> (8 * byte_i)) & 0xFF)) & 0xFF
                     merged_due = (prev_due | int(live_byte_due_mask)) & 0xFF
                     merged_trace = (prev_trace | int(live_byte_trace_mask)) & 0xFF
                     if merged_obs != prev_obs:
                         state.byte_obs_masks = (
                             state.byte_obs_masks & (~(0xFF << shift) & UINT64_MASK)
                         ) | (merged_obs << shift)
-                    if merged_tol_obs != prev_tol_obs:
-                        state.byte_tol_obs_masks = (
-                            state.byte_tol_obs_masks & (~(0xFF << shift) & UINT64_MASK)
-                        ) | (merged_tol_obs << shift)
-                    if int((load_live_obs_tol >> (8 * byte_i)) & 0xFF) != 0 and ev.dst_reg is not None:
-                        prev_paths = state.byte_tol_paths[lane]
-                        merged_paths = list(prev_paths) if prev_paths else []
-                        merged_paths_overflow = False
-                        max_paths = max(
-                            0,
-                            int(
-                                os.environ.get(
-                                    "REG_OBSERVED_MAX_TOLERANCE_PATHS_PER_REG",
-                                    "16",
-                                )
-                            ),
-                        )
-                        for path in reg_tol_paths.get(ev.dst_reg, []):
-                            if path not in merged_paths:
-                                if max_paths > 0 and len(merged_paths) >= max_paths:
-                                    merged_paths_overflow = True
-                                    break
-                                merged_paths.append(path)
-                        if merged_paths_overflow:
-                            state.byte_tol_obs_masks &= (
-                                ~(0xFF << shift) & UINT64_MASK
-                            )
-                            state.byte_tol_paths[lane] = None
-                        else:
-                            state.byte_tol_paths[lane] = (
-                                merged_paths if merged_paths else None
-                            )
                     if merged_due != prev_due:
                         state.byte_due_masks = (
                             state.byte_due_masks & (~(0xFF << shift) & UINT64_MASK)
@@ -8244,44 +7976,62 @@ def analyze(
             if byte_count > 0 and (is_shared_load or is_cache_load):
                 base_addr = int(ev.mem_addr) if has_mem_addr else 0
                 cache_space = str(cspace) if is_cache_load else ""
-                for byte_i in range(byte_count):
-                    shift = 8 * byte_i
-                    byte_trace_mask = int((load_live_trace >> shift) & 0xFF)
-                    byte_obs_mask = int((load_live_obs >> shift) & 0xFF)
-                    byte_due_mask = int((load_live_due >> shift) & 0xFF)
-                    addr_i = int(base_addr + byte_i)
-                    if is_shared_load:
-                        _record_site_totals("smem_lds", byte_trace_mask)
-                        if collect_smem_fault_sites:
-                            smem_fault_sites.append(
-                                build_internal_site_record(
-                                    site_family="smem",
-                                    site_kind="smem_lds",
-                                    mem_space="shared",
-                                    thread_id=tid,
-                                    sm_id=ev.sm_id,
-                                    cta_id=ev.cta_id,
-                                    addr=addr_i,
-                                    cycle=ev.cycle,
-                                    event_index=int(ev.index),
-                                    width_bits=8,
-                                    writer_event_index=int(ev.index),
-                                    observed_mask_this_site=byte_obs_mask,
-                                    due_mask_this_site=byte_due_mask,
-                                    trace_expanding_mask_this_site=byte_trace_mask,
-                                    shared_store_escape_mask_this_site=int(
-                                        (load_live_smem_escape >> shift) & 0xFF
-                                    ),
-                                    compact=use_compact_storage_rows,
+                cache_load_is_zero_live = bool(
+                    is_cache_load
+                    and (
+                        (int(load_live_obs) & UINT64_MASK)
+                        | (int(load_live_due) & UINT64_MASK)
+                        | (int(load_live_trace) & UINT64_MASK)
+                    )
+                    == 0
+                )
+                if cache_load_is_zero_live:
+                    if emit_cache_sites:
+                        _record_site_count_many("l1d_load", byte_count)
+                        _record_site_count_many("l2_load", byte_count)
+                    if collect_l1d_fault_sites:
+                        _record_zero_effect_cache_site("l1d_load", width_bits=8, count=byte_count)
+                    if collect_l2_fault_sites:
+                        _record_zero_effect_cache_site("l2_load", width_bits=8, count=byte_count)
+                else:
+                    for byte_i in range(byte_count):
+                        shift = 8 * byte_i
+                        byte_trace_mask = int((load_live_trace >> shift) & 0xFF)
+                        byte_obs_mask = int((load_live_obs >> shift) & 0xFF)
+                        byte_due_mask = int((load_live_due >> shift) & 0xFF)
+                        addr_i = int(base_addr + byte_i)
+                        if is_shared_load:
+                            _record_site_count("smem_lds")
+                            if collect_smem_fault_sites:
+                                smem_fault_sites.append(
+                                    build_internal_site_record(
+                                        site_family="smem",
+                                        site_kind="smem_lds",
+                                        mem_space="shared",
+                                        thread_id=tid,
+                                        sm_id=ev.sm_id,
+                                        cta_id=ev.cta_id,
+                                        addr=addr_i,
+                                        cycle=ev.cycle,
+                                        event_index=int(ev.index),
+                                        width_bits=8,
+                                        writer_event_index=int(ev.index),
+                                        observed_mask_this_site=byte_obs_mask,
+                                        due_mask_this_site=byte_due_mask,
+                                        trace_expanding_mask_this_site=byte_trace_mask,
+                                        shared_store_escape_mask_this_site=int(
+                                            (load_live_smem_escape >> shift) & 0xFF
+                                        ),
+                                        compact=use_compact_storage_rows,
+                                    )
                                 )
-                            )
-                    if is_cache_load:
-                        if emit_cache_sites:
-                            _record_site_totals("l1d_load", byte_trace_mask)
-                            _record_site_totals("l2_load", byte_trace_mask)
-                        if collect_l1d_fault_sites:
-                            l1d_fault_sites.append(
-                                build_internal_site_record(
+                        if is_cache_load:
+                            if emit_cache_sites:
+                                _record_site_count("l1d_load")
+                                _record_site_count("l2_load")
+                            if collect_l1d_fault_sites:
+                                _append_cache_load_site_record(
+                                    l1d_fault_sites,
                                     site_family="l1d",
                                     site_kind="l1d_load",
                                     mem_space=cache_space,
@@ -8296,12 +8046,10 @@ def analyze(
                                     observed_mask_this_site=byte_obs_mask,
                                     due_mask_this_site=byte_due_mask,
                                     trace_expanding_mask_this_site=byte_trace_mask,
-                                    compact=use_compact_storage_rows,
                                 )
-                            )
-                        if collect_l2_fault_sites:
-                            l2_fault_sites.append(
-                                build_internal_site_record(
+                            if collect_l2_fault_sites:
+                                _append_cache_load_site_record(
+                                    l2_fault_sites,
                                     site_family="l2",
                                     site_kind="l2_load",
                                     mem_space=cache_space,
@@ -8316,15 +8064,11 @@ def analyze(
                                     observed_mask_this_site=byte_obs_mask,
                                     due_mask_this_site=byte_due_mask,
                                     trace_expanding_mask_this_site=byte_trace_mask,
-                                    compact=use_compact_storage_rows,
                                 )
-                            )
 
             # Load writes dst; kill the written version after transfer.
             if ev.dst_reg is not None:
                 regs_obs[ev.dst_reg] &= (~write_mask) & UINT64_MASK
-                regs_obs_tol[ev.dst_reg] &= (~write_mask) & UINT64_MASK
-                clear_tolerance_paths_if_dead(regs_obs_tol, reg_tol_paths, ev.dst_reg)
                 regs_due[ev.dst_reg] &= (~write_mask) & UINT64_MASK
                 regs_trace[ev.dst_reg] &= (~write_mask) & UINT64_MASK
                 regs_smem_escape[ev.dst_reg] &= (~write_mask) & UINT64_MASK
@@ -8350,18 +8094,14 @@ def analyze(
                 if direct_sdc_mask != 0:
                     merge_observed_state(
                         regs_obs,
-                        regs_obs_tol,
                         src_reg,
                         int(direct_sdc_mask) & UINT64_MASK,
-                        0,
                     )
-                    clear_tolerance_paths_if_dead(regs_obs_tol, reg_tol_paths, src_reg)
                 if trace_seed_mask != 0:
                     regs_trace[src_reg] = (
                         regs_trace[src_reg] | trace_seed_mask
                     ) & UINT64_MASK
-                _record_read_trace_bits(int(trace_seed_mask) & UINT64_MASK, src_w)
-                read_records.append(
+                append_read_record(
                     build_internal_read_record(
                         profile=internal_read_record_profile,
                         event_index=ev.index,
@@ -8410,13 +8150,6 @@ def analyze(
         write_mask &= UINT64_MASK
 
         dst_live_obs = regs_obs[ev.dst_reg] & write_mask
-        dst_live_obs_tol = regs_obs_tol[ev.dst_reg] & write_mask
-        dst_tol_paths = (
-            list(reg_tol_paths.get(ev.dst_reg, []))
-            if dst_live_obs_tol != 0
-            else []
-        )
-        dst_live_obs_exact = dst_live_obs & (~dst_live_obs_tol & UINT64_MASK)
         dst_live_due = regs_due[ev.dst_reg] & write_mask
         dst_live_trace = (
             regs_trace[ev.dst_reg] & write_mask
@@ -8425,9 +8158,54 @@ def analyze(
             regs_smem_escape[ev.dst_reg] & write_mask
         ) if enable_smem_features else 0
 
+        if (
+            elide_zero_effect_read_records
+            and (
+                int(dst_live_obs)
+                | int(dst_live_due)
+                | int(dst_live_trace)
+                | int(dst_live_smem_escape)
+            )
+            == 0
+        ):
+            # Exact whole-event zero-effect pruning.
+            #
+            # If the destination is not live in any SARA state and no
+            # precomputed control-taint seed targets a source operand, this
+            # dynamic instruction can only contribute all-masked source/predicate
+            # read records.  Those records are already represented by
+            # zero_effect_read_bits_elided in compute-profile output, and the
+            # persistent RF exact path prunes zero-effect read cycles explicitly.
+            # Skipping the whole event avoids per-source list/mask bookkeeping
+            # without changing the public rates or exact component counts.
+            zero_effect_event_bits = 1 if ev.pred is not None else 0
+            has_trace_seed = False
+            for src_i, _src_reg in enumerate(ev.src_regs):
+                src_w = coerce_width_bits(
+                    ev.src_width_bits[src_i] if src_i < len(ev.src_width_bits) else 64,
+                    default=64,
+                )
+                zero_effect_event_bits += int(src_w)
+                if (
+                    int(
+                        trace_seed_by_read_key.get(
+                            (int(tid), int(ev.index), "src", int(src_i)),
+                            0,
+                        )
+                    )
+                    & width_mask(src_w)
+                ) != 0:
+                    has_trace_seed = True
+                    break
+
+            if not has_trace_seed:
+                zero_effect_read_records_elided += int(len(ev.src_regs)) + (
+                    1 if ev.pred is not None else 0
+                )
+                zero_effect_read_bits_elided += int(zero_effect_event_bits)
+                continue
+
         src_masks_obs = [0] * len(ev.src_regs)
-        src_masks_obs_tol = [0] * len(ev.src_regs)
-        src_tol_paths_by_src: List[List[TolerancePath]] = [[] for _ in ev.src_regs]
         src_masks_due = [0] * len(ev.src_regs)
         src_masks_trace = [0] * len(ev.src_regs)
         pred_mask_obs = 0
@@ -8471,18 +8249,7 @@ def analyze(
             else:
                 dst_val = ev.dst_val
 
-            obs_mask_for_exact = int(dst_live_obs_exact) & UINT64_MASK
-            obs_mask_for_tol = int(dst_live_obs_tol) & UINT64_MASK
-            tol_supported = supports_float_tolerance_backward(
-                ev,
-                op,
-                output_oracle_tol_policy,
-            )
-            if obs_mask_for_tol != 0 and (ev.pred is not None or not tol_supported):
-                obs_mask_for_exact |= obs_mask_for_tol
-                obs_mask_for_tol = 0
-                dst_tol_paths = []
-                tol_exact_conversion_count += 1
+            obs_mask_for_exact = int(dst_live_obs) & UINT64_MASK
 
             if ev.pred is not None:
                 if ev.dst_old_val is None:
@@ -8516,12 +8283,9 @@ def analyze(
                     pred_mask_obs = 1
                     merge_observed_state(
                         regs_obs,
-                        regs_obs_tol,
                         ev.pred.reg,
                         1,
-                        0,
                     )
-                    clear_tolerance_paths_if_dead(regs_obs_tol, reg_tol_paths, ev.pred.reg)
                 if pred_mask_due != 0:
                     pred_mask_due = 1
                     regs_due[ev.pred.reg] = (regs_due[ev.pred.reg] | 1) & UINT64_MASK
@@ -8549,66 +8313,14 @@ def analyze(
                             opcode=ev.opcode,
                             event_index=ev.index,
                         )
-                    if obs_mask_for_tol != 0 and len(ev.src_vals) > 0:
-                        if dst_tol_paths:
-                            (
-                                src_masks_obs_tol,
-                                src_tol_paths_by_src,
-                            ) = backward_influence_float_tolerance_paths(
-                                dst_tol_paths,
-                                op=op,
-                                src_vals=ev.src_vals,
-                                dst_val=dst_val,
-                                width_bits_default=ev.width_bits,
-                                src_widths=ev.src_width_bits,
-                                tol_policy=output_oracle_tol_policy,
-                                thread_id=tid,
-                                pc=ev.pc,
-                                opcode=ev.opcode,
-                                event_index=ev.index,
-                            )
-                        else:
-                            src_masks_obs_tol = backward_influence_float_tolerance(
-                                op=op,
-                                src_vals=ev.src_vals,
-                                dst_val=dst_val,
-                                dst_observed_mask=obs_mask_for_tol,
-                                width_bits_default=ev.width_bits,
-                                src_widths=ev.src_width_bits,
-                                tol_policy=output_oracle_tol_policy,
-                                thread_id=tid,
-                                pc=ev.pc,
-                                opcode=ev.opcode,
-                                event_index=ev.index,
-                            )
-                        tol_float_backward_op_count += 1
                     for src_i, src_reg in enumerate(ev.src_regs):
-                        src_masks_obs_tol[src_i] &= (~int(src_masks_obs[src_i]) & UINT64_MASK)
-                        src_masks_obs[src_i] = (
-                            int(src_masks_obs[src_i]) | int(src_masks_obs_tol[src_i])
-                        ) & UINT64_MASK
-                        merge_observed_state(
-                            regs_obs,
-                            regs_obs_tol,
-                            src_reg,
-                            int(src_masks_obs[src_i]) & (~int(src_masks_obs_tol[src_i]) & UINT64_MASK),
-                            int(src_masks_obs_tol[src_i]),
-                        )
-                        clear_tolerance_paths_if_dead(regs_obs_tol, reg_tol_paths, src_reg)
-                        if int(src_masks_obs_tol[src_i]) != 0:
-                            extend_unique_tolerance_paths(
-                                reg_tol_paths,
-                                src_reg,
-                                src_tol_paths_by_src[src_i],
-                            )
+                        merge_observed_state(regs_obs, src_reg, int(src_masks_obs[src_i]))
                         regs_due[src_reg] = (regs_due[src_reg] | src_masks_due[src_i]) & UINT64_MASK
                         regs_trace[src_reg] = (
                             regs_trace[src_reg] | src_masks_trace[src_i]
                         ) & UINT64_MASK
 
                     regs_obs[ev.dst_reg] &= (~write_mask) & UINT64_MASK
-                    regs_obs_tol[ev.dst_reg] &= (~write_mask) & UINT64_MASK
-                    clear_tolerance_paths_if_dead(regs_obs_tol, reg_tol_paths, ev.dst_reg)
                     regs_due[ev.dst_reg] &= (~write_mask) & UINT64_MASK
                     regs_trace[ev.dst_reg] &= (~write_mask) & UINT64_MASK
                     regs_smem_escape[ev.dst_reg] &= (~write_mask) & UINT64_MASK
@@ -8635,66 +8347,14 @@ def analyze(
                         opcode=ev.opcode,
                         event_index=ev.index,
                     )
-                if obs_mask_for_tol != 0 and len(ev.src_vals) > 0:
-                    if dst_tol_paths:
-                        (
-                            src_masks_obs_tol,
-                            src_tol_paths_by_src,
-                        ) = backward_influence_float_tolerance_paths(
-                            dst_tol_paths,
-                            op=op,
-                            src_vals=ev.src_vals,
-                            dst_val=dst_val,
-                            width_bits_default=ev.width_bits,
-                            src_widths=ev.src_width_bits,
-                            tol_policy=output_oracle_tol_policy,
-                            thread_id=tid,
-                            pc=ev.pc,
-                            opcode=ev.opcode,
-                            event_index=ev.index,
-                        )
-                    else:
-                        src_masks_obs_tol = backward_influence_float_tolerance(
-                            op=op,
-                            src_vals=ev.src_vals,
-                            dst_val=dst_val,
-                            dst_observed_mask=obs_mask_for_tol,
-                            width_bits_default=ev.width_bits,
-                            src_widths=ev.src_width_bits,
-                            tol_policy=output_oracle_tol_policy,
-                            thread_id=tid,
-                            pc=ev.pc,
-                            opcode=ev.opcode,
-                            event_index=ev.index,
-                        )
-                    tol_float_backward_op_count += 1
                 for src_i, src_reg in enumerate(ev.src_regs):
-                    src_masks_obs_tol[src_i] &= (~int(src_masks_obs[src_i]) & UINT64_MASK)
-                    src_masks_obs[src_i] = (
-                        int(src_masks_obs[src_i]) | int(src_masks_obs_tol[src_i])
-                    ) & UINT64_MASK
-                    merge_observed_state(
-                        regs_obs,
-                        regs_obs_tol,
-                        src_reg,
-                        int(src_masks_obs[src_i]) & (~int(src_masks_obs_tol[src_i]) & UINT64_MASK),
-                        int(src_masks_obs_tol[src_i]),
-                    )
-                    clear_tolerance_paths_if_dead(regs_obs_tol, reg_tol_paths, src_reg)
-                    if int(src_masks_obs_tol[src_i]) != 0:
-                        extend_unique_tolerance_paths(
-                            reg_tol_paths,
-                            src_reg,
-                            src_tol_paths_by_src[src_i],
-                        )
+                    merge_observed_state(regs_obs, src_reg, int(src_masks_obs[src_i]))
                     regs_due[src_reg] = (regs_due[src_reg] | src_masks_due[src_i]) & UINT64_MASK
                     regs_trace[src_reg] = (
                         regs_trace[src_reg] | src_masks_trace[src_i]
                     ) & UINT64_MASK
 
                 regs_obs[ev.dst_reg] &= (~write_mask) & UINT64_MASK
-                regs_obs_tol[ev.dst_reg] &= (~write_mask) & UINT64_MASK
-                clear_tolerance_paths_if_dead(regs_obs_tol, reg_tol_paths, ev.dst_reg)
                 regs_due[ev.dst_reg] &= (~write_mask) & UINT64_MASK
                 regs_trace[ev.dst_reg] &= (~write_mask) & UINT64_MASK
                 regs_smem_escape[ev.dst_reg] &= (~write_mask) & UINT64_MASK
@@ -8724,11 +8384,16 @@ def analyze(
 
         # Emit one record per source-register read at this dynamic instruction.
         for src_i, src_reg in enumerate(ev.src_regs):
-            _record_read_trace_bits(
-                int(src_masks_trace[src_i]) & UINT64_MASK,
-                ev.src_width_bits[src_i],
-            )
-            read_records.append(
+            src_width_i = ev.src_width_bits[src_i]
+            src_wmask_i = width_mask(src_width_i)
+            src_obs_i = int(src_masks_obs[src_i]) & src_wmask_i
+            src_due_i = int(src_masks_due[src_i]) & src_wmask_i
+            src_trace_i = int(src_masks_trace[src_i]) & src_wmask_i
+            if elide_zero_effect_read_records and (src_obs_i | src_due_i | src_trace_i) == 0:
+                zero_effect_read_records_elided += 1
+                zero_effect_read_bits_elided += int(coerce_width_bits(src_width_i, default=64))
+                continue
+            append_read_record(
                 build_internal_read_record(
                     profile=internal_read_record_profile,
                     event_index=ev.index,
@@ -8748,10 +8413,9 @@ def analyze(
                         else -1
                     ),
                     src_width_bits=ev.src_width_bits[src_i],
-                    observed_mask_this_read=int(src_masks_obs[src_i]) & UINT64_MASK,
-                    due_mask_this_read=int(src_masks_due[src_i]) & UINT64_MASK,
-                    trace_expanding_mask_this_read=int(src_masks_trace[src_i])
-                    & UINT64_MASK,
+                    observed_mask_this_read=int(src_obs_i) & UINT64_MASK,
+                    due_mask_this_read=int(src_due_i) & UINT64_MASK,
+                    trace_expanding_mask_this_read=int(src_trace_i) & UINT64_MASK,
                     reg_observed_mask_at_read=int(regs_obs[src_reg]) & UINT64_MASK,
                     reg_due_mask_at_read=int(regs_due[src_reg]) & UINT64_MASK,
                     compact_compute=use_compact_storage_rows,
@@ -8759,9 +8423,15 @@ def analyze(
             )
 
         if ev.pred is not None:
-            _record_read_trace_bits(int(pred_mask_trace) & UINT64_MASK, 1)
-            read_records.append(
-                build_internal_read_record(
+            if (
+                elide_zero_effect_read_records
+                and (int(pred_mask_obs) | int(pred_mask_due) | int(pred_mask_trace)) == 0
+            ):
+                zero_effect_read_records_elided += 1
+                zero_effect_read_bits_elided += 1
+            else:
+                append_read_record(
+                    build_internal_read_record(
                     profile=internal_read_record_profile,
                     event_index=ev.index,
                     thread_id=tid,
@@ -8796,9 +8466,8 @@ def analyze(
     skip_sorted_output_for_compute = bool(
         lite_output
         and str(lite_output_profile).strip().lower() == "compute"
-        and env_flag("REG_OBSERVED_SKIP_SORT_FOR_COMPUTE", False)
+        and env_flag("REG_OBSERVED_SKIP_SORT_FOR_COMPUTE", True)
     )
-
     # Return records in forward execution order, stable by source index.
     if not skip_sorted_output_for_compute:
         read_records.sort(
@@ -8829,118 +8498,11 @@ def analyze(
 
     control_taint_stats = dict(precomputed_control_taint_stats)
 
-    counts = {"masked": 0, "sdc": 0, "due": 0, "unknown": 0}
-    fault_classification_counts = {
-        "trace_preserving": {"masked": 0, "sdc": 0, "due": 0, "unknown": 0, "total": 0},
-        "trace_expanding": {"masked": 0, "sdc": 0, "due": 0, "unknown": 0, "total": 0},
-    }
+    # Analyzer-level fault classification is intentionally not computed here.
+    # exact_sdc_compute.py recomputes final RF/SMEM/L1D/L2 counts over the real
+    # sampling domains; scanning read_records here would only duplicate work in
+    # the current exact-output experiment path.
     due_from_static_checks = 0
-
-    for rec in read_records:
-        w = coerce_width_bits(_read_row_field(rec, "src_width_bits", 64), default=64)
-        wmask = width_mask(w)
-
-        obs = mask_as_int(_read_row_field(rec, "observed_mask_this_read", 0)) & wmask
-        due = mask_as_int(_read_row_field(rec, "due_mask_this_read", 0)) & wmask
-        trace = mask_as_int(_read_row_field(rec, "trace_expanding_mask_this_read", 0)) & wmask
-        rec_thread_id = int(_read_row_field(rec, "thread_id", -1))
-        rec_event_index = int(_read_row_field(rec, "event_index", -1))
-        rec_read_kind = str(_read_row_field(rec, "read_kind", ""))
-        rec_src_index = int(_read_row_field(rec, "src_index", -1))
-
-        for bit in range(w):
-            due_bit = ((due >> bit) & 1) != 0
-            obs_bit = ((obs >> bit) & 1) != 0
-            if due_bit:
-                cls = "due"
-                due_from_static_checks += 1
-            elif obs_bit:
-                cls = "sdc"
-            else:
-                cls = "masked"
-            fault_class = (
-                "trace_expanding" if (((trace >> bit) & 1) != 0) else "trace_preserving"
-            )
-
-            counts[cls] += 1
-            fault_classification_counts[fault_class][cls] += 1
-            fault_classification_counts[fault_class]["total"] += 1
-
-    total = counts["masked"] + counts["sdc"] + counts["due"] + counts["unknown"]
-    rates = {
-        "masked": (counts["masked"] / total) if total else 0.0,
-        "sdc": (counts["sdc"] / total) if total else 0.0,
-        "due": (counts["due"] / total) if total else 0.0,
-        "unknown": (counts["unknown"] / total) if total else 0.0,
-    }
-
-    weighted_denominator = 1
-    weighted_counts_num = {
-        "masked": int(counts["masked"]),
-        "sdc": int(counts["sdc"]),
-        "due": int(counts["due"]),
-        "unknown": int(counts["unknown"]),
-    }
-    weighted_total_num = int(total)
-    weighted_total = Fraction(weighted_total_num, weighted_denominator)
-    if weighted_total_num == 0:
-        weighted_rates = {
-            "masked": fraction_to_json(Fraction(0, 1)),
-            "sdc": fraction_to_json(Fraction(0, 1)),
-            "due": fraction_to_json(Fraction(0, 1)),
-            "unknown": fraction_to_json(Fraction(0, 1)),
-        }
-    else:
-        weighted_rates = {
-            "masked": fraction_to_json(
-                Fraction(weighted_counts_num["masked"], weighted_total_num)
-            ),
-            "sdc": fraction_to_json(
-                Fraction(weighted_counts_num["sdc"], weighted_total_num)
-            ),
-            "due": fraction_to_json(
-                Fraction(weighted_counts_num["due"], weighted_total_num)
-            ),
-            "unknown": fraction_to_json(
-                Fraction(weighted_counts_num["unknown"], weighted_total_num)
-            ),
-        }
-
-    weighted_counts_json = {
-        "masked": fraction_to_json(
-            Fraction(weighted_counts_num["masked"], weighted_denominator)
-        ),
-        "sdc": fraction_to_json(
-            Fraction(weighted_counts_num["sdc"], weighted_denominator)
-        ),
-        "due": fraction_to_json(
-            Fraction(weighted_counts_num["due"], weighted_denominator)
-        ),
-        "unknown": fraction_to_json(
-            Fraction(weighted_counts_num["unknown"], weighted_denominator)
-        ),
-        "total": fraction_to_json(weighted_total),
-    }
-
-    weighted_fault_class_json: Dict[str, Dict[str, Any]] = {}
-    for fc, vals in fault_classification_counts.items():
-        weighted_fault_class_json[fc] = {
-            "masked": fraction_to_json(
-                Fraction(int(vals["masked"]), weighted_denominator)
-            ),
-            "sdc": fraction_to_json(
-                Fraction(int(vals["sdc"]), weighted_denominator)
-            ),
-            "due": fraction_to_json(
-                Fraction(int(vals["due"]), weighted_denominator)
-            ),
-            "unknown": fraction_to_json(
-                Fraction(int(vals["unknown"]), weighted_denominator)
-            ),
-            "total": fraction_to_json(
-                Fraction(int(vals["total"]), weighted_denominator)
-            ),
-        }
 
     output_spec_entry_count = int(len(output_ranges))
     output_spec_total_bytes = int(sum(int(out.size) for out in output_ranges))
@@ -8981,10 +8543,31 @@ def analyze(
             addr_proof_diagnostics.get("store_addr_proven_masked_events", 0)
         ),
         "trace_memory_oracle_built": bool(trace_memory_oracle_built),
-        "tol_output_store_seed_count": int(tol_output_store_seed_count),
-        "tol_float_backward_op_count": int(tol_float_backward_op_count),
-        "tol_memory_forward_byte_count": int(tol_memory_forward_byte_count),
-        "tol_exact_conversion_count": int(tol_exact_conversion_count),
+        "basic_block_transfer_enabled": bool(basic_block_transfer_enabled),
+        "basic_block_transfer_raw_candidate_blocks": int(
+            basic_block_transfer_raw_candidate_blocks
+        ),
+        "basic_block_transfer_raw_candidate_events": int(
+            basic_block_transfer_raw_candidate_events
+        ),
+        "basic_block_transfer_candidate_blocks": int(
+            basic_block_transfer_candidate_blocks
+        ),
+        "basic_block_transfer_candidate_events": int(
+            basic_block_transfer_candidate_events
+        ),
+        "basic_block_transfer_blocks_applied": int(
+            basic_block_transfer_blocks_applied
+        ),
+        "basic_block_transfer_events_applied": int(
+            basic_block_transfer_events_applied
+        ),
+        "basic_block_transfer_skipped_member_events": int(
+            basic_block_transfer_skipped_member_events
+        ),
+        "basic_block_transfer_cache_entries": int(len(basic_block_transfer_cache)),
+        "basic_block_transfer_cache_hits": int(basic_block_transfer_cache_hits),
+        "basic_block_transfer_cache_misses": int(basic_block_transfer_cache_misses),
         "output_oracle_type": (
             "signature-based" if output_spec_entry_count > 0 else "log-based"
         ),
@@ -8996,6 +8579,25 @@ def analyze(
         "output_total_store_count": int(output_total_store_count),
         "filtered_store_ratio": float(filtered_store_ratio),
         "compact_storage_read_rows": bool(use_compact_storage_rows),
+        "zero_effect_read_events_elided": bool(elide_zero_effect_read_records),
+        "zero_effect_read_event_count_elided": int(zero_effect_read_records_elided),
+        "zero_effect_read_bits_elided": int(zero_effect_read_bits_elided),
+        "zero_effect_cache_site_records_elided": int(
+            sum(int(v) for v in zero_effect_cache_site_hist.values())
+        ),
+        "zero_effect_cache_site_bits_elided": int(zero_effect_cache_site_bits_elided),
+        "zero_effect_cache_site_histogram": {
+            str(k): int(v) for k, v in sorted(zero_effect_cache_site_hist.items())
+        },
+        "memory_live_byte_slice_cache_zero_load_sites_elided": int(
+            zero_effect_cache_site_hist.get("l1d_load", 0)
+            + zero_effect_cache_site_hist.get("l2_load", 0)
+        ),
+        "rf_register_uid_map": {
+            str(reg): [int(uid) for uid in sorted(uids)]
+            for reg, uids in sorted(rf_register_uid_map.items())
+            if uids
+        },
         "compact_storage_site_rows": bool(use_compact_storage_rows and compact_site_output),
         "compact_read_events_schema": (
             "compute_v1" if bool(use_compact_storage_rows) else ""
@@ -9144,40 +8746,6 @@ def analyze(
     else:
         l1d_fault_sites_out = l1d_fault_sites
 
-    if use_compact_storage_rows and mask_format == "int":
-        trace_expanding_stats = {
-            "trace_expanding_read_mask_present_count": int(
-                len(read_events_for_trace_stats)
-            ),
-            "trace_expanding_read_bits_total": int(
-                read_trace_expanding_bits_total_total
-            ),
-            "trace_expanding_site_mask_present_count": 0,
-            "trace_expanding_site_bits_total": 0,
-            "trace_expanding_mask_present_count": int(len(read_events_for_trace_stats)),
-            "trace_expanding_bits_total": int(read_trace_expanding_bits_total_total),
-        }
-    else:
-        trace_expanding_stats = compute_trace_expanding_stats_from_analyzer_rows(
-            read_events_for_trace_stats,
-            [],
-            [],
-            []
-        )
-    trace_expanding_stats["trace_expanding_site_mask_present_count"] = int(
-        site_trace_expanding_mask_present_count_total
-    )
-    trace_expanding_stats["trace_expanding_site_bits_total"] = int(
-        site_trace_expanding_bits_total_total
-    )
-    trace_expanding_stats["trace_expanding_mask_present_count"] = int(
-        trace_expanding_stats.get("trace_expanding_read_mask_present_count", 0)
-    ) + int(site_trace_expanding_mask_present_count_total)
-    trace_expanding_stats["trace_expanding_bits_total"] = int(
-        trace_expanding_stats.get("trace_expanding_read_bits_total", 0)
-    ) + int(site_trace_expanding_bits_total_total)
-    for key, value in trace_expanding_stats.items():
-        analyzer_exact_meta[key] = int(value)
     if omit_meta_diagnostic_samples:
         for key in META_DIAGNOSTIC_SAMPLE_FIELDS:
             analyzer_exact_meta.pop(key, None)
@@ -9188,23 +8756,6 @@ def analyze(
         "l1d_fault_sites": l1d_fault_sites_out,
         "l2_fault_sites": l2_fault_sites_out,
         "exact_meta": analyzer_exact_meta,
-        "classification_counts": {
-            "masked": counts["masked"],
-            "sdc": counts["sdc"],
-            "due": counts["due"],
-            "unknown": counts["unknown"],
-            "total": total,
-        },
-        "classification_rates": rates,
-        "weighted_classification_counts": weighted_counts_json,
-        "weighted_classification_rates": weighted_rates,
-        "fault_class_counts": {
-            "trace_preserving": fault_classification_counts["trace_preserving"]["total"],
-            "trace_expanding": fault_classification_counts["trace_expanding"]["total"],
-            "total": total,
-        },
-        "fault_classification_counts": fault_classification_counts,
-        "weighted_fault_classification_counts": weighted_fault_class_json,
     }
 
     if not omit_top_level_diagnostics:
@@ -9242,10 +8793,6 @@ def analyze(
                 "store_addr_proven_masked_events": int(
                     addr_proof_diagnostics.get("store_addr_proven_masked_events", 0)
                 ),
-                "tol_output_store_seed_count": int(tol_output_store_seed_count),
-                "tol_float_backward_op_count": int(tol_float_backward_op_count),
-                "tol_memory_forward_byte_count": int(tol_memory_forward_byte_count),
-                "tol_exact_conversion_count": int(tol_exact_conversion_count),
                 "output_last_writer_store_count": int(output_last_writer_store_count),
                 "output_total_store_count": int(output_total_store_count),
                 "filtered_store_ratio": float(filtered_store_ratio),
@@ -9544,7 +9091,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    output_oracle_tol_policy: Dict[str, Any] = {}
+    output_oracle_policy: Dict[str, Any] = {}
     if args.output_oracle_policy is not None:
         try:
             loaded_policy = json.loads(args.output_oracle_policy.read_text())
@@ -9556,7 +9103,7 @@ def main() -> int:
             raise ValueError(
                 f"output oracle policy must be a JSON object: {args.output_oracle_policy}"
             )
-        output_oracle_tol_policy = normalize_output_oracle_tol_policy(loaded_policy)
+        output_oracle_policy = normalize_output_oracle_policy(loaded_policy)
     elif str(args.output_oracle_policy_json or "").strip() not in ("", "{}"):
         try:
             loaded_policy = json.loads(str(args.output_oracle_policy_json))
@@ -9564,7 +9111,7 @@ def main() -> int:
             raise ValueError(f"failed to parse --output-oracle-policy-json: {exc}")
         if not isinstance(loaded_policy, dict):
             raise ValueError("--output-oracle-policy-json must decode to a JSON object")
-        output_oracle_tol_policy = normalize_output_oracle_tol_policy(loaded_policy)
+        output_oracle_policy = normalize_output_oracle_policy(loaded_policy)
 
     events, ranges, output_ranges = load_trace(
         args.trace,
@@ -9586,7 +9133,7 @@ def main() -> int:
             assume_sorted_events=bool(args.assume_sorted_events),
             fault_component=str(args.fault_component),
             emit_cache_sites=bool(args.emit_cache_sites),
-            output_oracle_tol_policy=output_oracle_tol_policy,
+            output_oracle_policy=output_oracle_policy,
         )
     finally:
         if prof is not None:

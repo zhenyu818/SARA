@@ -102,7 +102,7 @@ int main(int argc, char *argv[]) {
     cudaMemcpy(output, d_output, src_size_bytes, cudaMemcpyDeviceToHost);
 
     for (size_t i = 0; i < src_size; i++) {
-        printf("%.6f ", output[i]); // 打印每一项
+        printf("%.9g ", output[i]); // 打印每一项
     }
     printf("\n");
 

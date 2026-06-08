@@ -3,6 +3,7 @@
 
 import argparse
 import bisect
+import builtins as _builtins
 import gzip
 import hashlib
 import json
@@ -14,12 +15,161 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter, defaultdict
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
-import exact_cpp_backend as exact_cpp_backend
+_BUILTIN_INT = _builtins.int
+_BUILTIN_ISINSTANCE = _builtins.isinstance
+_BUILTIN_LEN = _builtins.len
+_BUILTIN_RANGE = _builtins.range
+_BUILTIN_MAX = _builtins.max
+_BUILTIN_MIN = _builtins.min
+_BUILTIN_STR = _builtins.str
+_BUILTIN_TYPE = _builtins.type
+_TEXT_TYPE = _BUILTIN_TYPE("")
+_BYTES_TYPE = _BUILTIN_TYPE(b"")
+_INT_TYPE = _BUILTIN_TYPE(0)
+_BOOL_TYPE = _BUILTIN_TYPE(True)
+_FLOAT_TYPE = _BUILTIN_TYPE(0.0)
+_LIST_TYPE = _BUILTIN_TYPE([])
+_TUPLE_TYPE = _BUILTIN_TYPE(())
+
+
+def _plain_builtin_text(text: str) -> str:
+    """Return an exact builtin ``str`` object, not a scalar wrapper/subclass."""
+
+    if _BUILTIN_TYPE(text) is _TEXT_TYPE:
+        return text
+    # ``str`` subclasses may override comparison or string methods.  Joining
+    # through a builtin separator copies only the character payload into a plain
+    # ``str`` without invoking subclass-specific ``__eq__``/ordering behavior.
+    return "".join([text])
+
+
+def _stable_scalar_text(value: Any) -> str:
+    """Return a deterministic plain-text representation for analyzer scalars.
+
+    Some cached analyzer records can carry scalar-like wrapper objects.  Calling
+    ``str(wrapper)`` is fragile when the wrapper accidentally exposes a data
+    attribute named ``__str__``; Python then raises ``TypeError: 'str' object is
+    not callable``.  The exact analysis only needs the scalar payload here, so
+    unwrap common payload attributes before falling back to Python's normal
+    conversion.  This is a structural normalization, not a heuristic: values are
+    accepted only when they expose an explicit scalar payload.
+
+    The returned value is always an exact builtin ``str``.  This avoids later
+    membership/sort operations accidentally dispatching to a string subclass or
+    analyzer scalar wrapper with non-text comparison semantics.
+    """
+
+    if value is None:
+        return _BUILTIN_STR(value)
+    if _BUILTIN_TYPE(value) is _TEXT_TYPE:
+        return value
+    if _BUILTIN_ISINSTANCE(value, _TEXT_TYPE):
+        # Preserve the character payload but drop string-subclass attributes
+        # such as a data field named ``strip``/``lower`` or custom comparison.
+        return _plain_builtin_text(value)
+    if _BUILTIN_ISINSTANCE(value, (_INT_TYPE, _BOOL_TYPE, _FLOAT_TYPE)):
+        return _BUILTIN_STR(value)
+    try:
+        return _plain_builtin_text(_BUILTIN_STR(value))
+    except TypeError:
+        for attr in ("value", "raw", "text", "data", "name"):
+            try:
+                payload = object.__getattribute__(value, attr)
+            except Exception:
+                continue
+            if payload is value:
+                continue
+            if _BUILTIN_ISINSTANCE(
+                payload, (_TEXT_TYPE, _BYTES_TYPE, _INT_TYPE, _BOOL_TYPE, _FLOAT_TYPE)
+            ):
+                return _stable_scalar_text(payload)
+        raise
+
+
+def _stable_text_equals_any(value: Any, names: Sequence[str]) -> bool:
+    """Compare scalar text with a fixed literal list without tuple membership.
+
+    Historical analyzer scalar wrappers have triggered unexpected comparison
+    dispatch inside ``x in (...)`` on some Python builds.  Normalize to an exact
+    builtin string and use direct equality against builtin literals only.
+    """
+
+    text = _stable_scalar_text(value)
+    for name in names:
+        if text == name:
+            return True
+    return False
+
+
+def _stable_normalized_mem_space_text(value: Any) -> str:
+    text = _plain_builtin_text(_stable_scalar_text(value))
+    text = _TEXT_TYPE.strip(text)
+    text = _TEXT_TYPE.lower(text)
+    text = _TEXT_TYPE.replace(text, "-", "_")
+    return _plain_builtin_text(text)
+
+
+def _stable_scalar_int(value: Any) -> int:
+    """Return a deterministic integer for analyzer scalar wrappers."""
+
+    if _BUILTIN_ISINSTANCE(value, _BOOL_TYPE):
+        return 1 if value else 0
+    if _BUILTIN_ISINSTANCE(value, _INT_TYPE):
+        return value
+    if _BUILTIN_ISINSTANCE(value, _FLOAT_TYPE):
+        return _BUILTIN_INT(value)
+    if _BUILTIN_ISINSTANCE(value, _TEXT_TYPE):
+        text = _stable_scalar_text(value).strip()
+        try:
+            return _BUILTIN_INT(text)
+        except ValueError:
+            return _BUILTIN_INT(text, 0)
+    if _BUILTIN_ISINSTANCE(value, _BYTES_TYPE):
+        text = value.decode("utf-8", errors="replace").strip()
+        try:
+            return _BUILTIN_INT(text)
+        except ValueError:
+            return _BUILTIN_INT(text, 0)
+    try:
+        return _BUILTIN_INT(value)
+    except TypeError:
+        for attr in ("value", "raw", "data"):
+            try:
+                payload = object.__getattribute__(value, attr)
+            except Exception:
+                continue
+            if payload is value:
+                continue
+            if _BUILTIN_ISINSTANCE(
+                payload, (_TEXT_TYPE, _BYTES_TYPE, _INT_TYPE, _BOOL_TYPE, _FLOAT_TYPE)
+            ):
+                return _stable_scalar_int(payload)
+        raise
+
+
+def _stable_trace_event_index(ev: Any, fallback_index: int) -> int:
+    """Return the canonical integer index for a loaded trace event.
+
+    ``reg_observed_analyzer.load_trace`` constructs event indices from the
+    event's position in the trace.  A few serialized/scalar-wrapper paths can
+    replay that scalar as a singleton container; normalize that representation
+    exactly, and otherwise fall back to the enumerated trace position which is
+    the same canonical identity used by the loader.
+    """
+
+    raw = getattr(ev, "index", fallback_index)
+    try:
+        return _stable_scalar_int(raw)
+    except Exception:
+        if _BUILTIN_ISINSTANCE(raw, (_LIST_TYPE, _TUPLE_TYPE)) and _BUILTIN_LEN(raw) == 1:
+            return _stable_scalar_int(raw[0])
+        return _BUILTIN_INT(fallback_index)
 
 try:
     import orjson as _orjson  # type: ignore
@@ -97,6 +247,7 @@ MASK_FIELDS = (
 DETAIL_MAP_FIELDS = ("notes",)
 DETAIL_SCALAR_FIELDS = ("pc", "opcode", "read_kind")
 MASK64 = (1 << 64) - 1
+_WIDTH_MASK_TABLE = tuple((1 << w) - 1 for w in range(65))
 ANALYZER_OUTPUT_ALIAS_FILENAMES = frozenset(
     (
         "analyzer_output_rf.json",
@@ -113,23 +264,7 @@ SMEM_SITE_MASK_FIELDS = (
     "due_mask_this_site",
     "trace_expanding_mask_this_site",
 )
-_CPP_MASK_CLASSIFIER_ENABLED = False
-_CPP_MASK_CLASSIFIER_FAILED = False
-_CPP_THREAD_CYCLE_MODE = str(
-    os.environ.get("EXACT_SDC_USE_CPP_THREAD_CYCLE", "0")
-).strip().lower()
-_CPP_THREAD_CYCLE_FORCE = _CPP_THREAD_CYCLE_MODE in ("force", "forced")
-_CPP_THREAD_CYCLE_ENABLED = _CPP_THREAD_CYCLE_FORCE or (
-    _CPP_THREAD_CYCLE_MODE not in ("", "0", "false", "no", "off")
-)
-_CPP_THREAD_CYCLE_FAILED = False
-_CPP_THREAD_CYCLE_AUTO_MAX_RECORDS = 256
-_CPP_THREAD_CYCLE_AUTO_MAX_TOTAL_ACTIVE_THREADS = 4096
-_CPP_RF_INTERVAL_ACCUM_ENABLED = (
-    os.environ.get("EXACT_SDC_USE_CPP_RF_INTERVAL_ACCUM", "1") != "0"
-)
-_CPP_RF_INTERVAL_ACCUM_FAILED = False
-_CPP_RF_INTERVAL_ACCUM_BATCH_SIZE = int(
+RF_INTERVAL_ACCUM_BATCH_SIZE = int(
     os.environ.get("EXACT_SDC_RF_INTERVAL_ACCUM_BATCH_SIZE", "65536")
 )
 COMPACT_READ_EVENT_KEYS_COMPUTE = (
@@ -252,7 +387,7 @@ RF_SDC_PROOF_SOURCE_KEYS = (
 
 
 def _ptx_opcode_base(opcode: Any) -> str:
-    raw = str(opcode or "").strip().lower()
+    raw = _stable_scalar_text(opcode or "").strip().lower()
     if not raw:
         return ""
     # The trace normally stores only the opcode, but tolerate predicated PTX
@@ -283,9 +418,9 @@ def _rf_sdc_proof_source_from_event(
         return "rf_store_commit_transfer"
 
     raw = event if isinstance(event, Mapping) else {}
-    opcode = str(raw.get("opcode", "")).strip().lower()
+    opcode = _stable_scalar_text(_mapping_get(raw, "opcode", "")).strip().lower()
     base = _ptx_opcode_base(opcode)
-    kind = str(raw.get("kind", "")).strip().lower()
+    kind = _stable_scalar_text(_mapping_get(raw, "kind", "")).strip().lower()
     if kind == "store" or base == "st":
         return "rf_store_commit_transfer"
     if kind == "branch" or base in {"bra", "call", "ret", "exit"}:
@@ -342,10 +477,10 @@ def _disjoint_source_masks(
 ) -> Dict[str, int]:
     """Return non-overlapping masks and move cross-source overlap to multi_key."""
 
-    valid = set(str(k) for k in valid_keys)
+    valid = set(_stable_scalar_text(k) for k in valid_keys)
     raw: Dict[str, int] = {}
     for key, mask in source_masks.items():
-        key_s = str(key)
+        key_s = _stable_scalar_text(key)
         if key_s not in valid:
             key_s = "rf_other_exact_transfer"
         mask_i = int(mask) & MASK64
@@ -373,7 +508,7 @@ def _disjoint_source_masks(
 
 
 def _rf_read_kind_code(raw: Any) -> int:
-    kind = str(raw or "").strip().lower()
+    kind = _stable_scalar_text(raw or "").strip().lower()
     if kind == "addr":
         return RF_READ_KIND_ADDR
     if kind == "src":
@@ -418,9 +553,9 @@ def _json_load_path(path: Path) -> Any:
 
 def _path_cache_key(path: Any) -> str:
     try:
-        return str(Path(path).resolve())
+        return _stable_scalar_text(Path(path).resolve())
     except Exception:
-        return str(path)
+        return _stable_scalar_text(path)
 
 
 @lru_cache(maxsize=None)
@@ -430,7 +565,7 @@ def _file_head_signature(path_key: str, sample_bytes: int = 1 << 20) -> Tuple[in
     h = hashlib.sha256()
     with path.open("rb") as handle:
         h.update(handle.read(int(sample_bytes)))
-    return int(stat.st_size), str(h.hexdigest())
+    return int(stat.st_size), _stable_scalar_text(h.hexdigest())
 
 
 def _canonicalize_analyzer_output_path(path: Path) -> Path:
@@ -479,15 +614,36 @@ def _compact_row_get(
 ) -> Any:
     if not isinstance(rec, (list, tuple)):
         return default
-    idx = index_map.get(str(key))
+    idx = index_map.get(_stable_scalar_text(key))
     if idx is None or idx < 0 or idx >= len(rec):
         return default
     return rec[idx]
 
 
+def _mapping_get(rec: Any, key: str, default: Any = None) -> Any:
+    """Read a mapping field without calling a possibly shadowed ``.get``.
+
+    Some serialized analyzer/trace rows are ``dict`` subclasses or scalar
+    wrappers that can carry data attributes named ``get``/``strip``.  Calling
+    ``rec.get(...)`` on those wrappers has caused exact-compute crashes such as
+    ``TypeError: 'str' object is not callable``.  This helper uses the builtin
+    ``dict.get`` descriptor for dictionaries and falls back to item lookup for
+    generic mappings, preserving the exact stored value.
+    """
+
+    if _BUILTIN_ISINSTANCE(rec, dict):
+        return dict.get(rec, key, default)
+    if _BUILTIN_ISINSTANCE(rec, Mapping):
+        try:
+            return rec[key] if key in rec else default
+        except Exception:
+            return default
+    return default
+
+
 def _read_event_row_field(rec: Any, key: str, default: Any = None) -> Any:
     if isinstance(rec, dict):
-        return rec.get(key, default)
+        return _mapping_get(rec, key, default)
     if _is_compact_read_event_row(rec):
         return _compact_row_get(
             rec,
@@ -500,7 +656,7 @@ def _read_event_row_field(rec: Any, key: str, default: Any = None) -> Any:
 
 def _smem_site_row_field(rec: Any, key: str, default: Any = None) -> Any:
     if isinstance(rec, dict):
-        return rec.get(key, default)
+        return _mapping_get(rec, key, default)
     if _is_compact_smem_site_row(rec):
         return _compact_row_get(
             rec,
@@ -513,7 +669,7 @@ def _smem_site_row_field(rec: Any, key: str, default: Any = None) -> Any:
 
 def _cache_site_row_field(rec: Any, key: str, default: Any = None) -> Any:
     if isinstance(rec, dict):
-        return rec.get(key, default)
+        return _mapping_get(rec, key, default)
     if _is_compact_cache_site_row(rec):
         return _compact_row_get(
             rec,
@@ -527,17 +683,17 @@ def _cache_site_row_field(rec: Any, key: str, default: Any = None) -> Any:
 def _cache_site_record_with_kind(rec: Any, site_kind: str) -> Any:
     if isinstance(rec, dict):
         out = dict(rec)
-        out["site_kind"] = str(site_kind)
+        out["site_kind"] = _stable_scalar_text(site_kind)
         return out
     if _is_compact_cache_site_row(rec):
         out = list(rec)
-        out[COMPACT_CACHE_SITE_KEYS_INDEX["site_kind"]] = str(site_kind)
+        out[COMPACT_CACHE_SITE_KEYS_INDEX["site_kind"]] = _stable_scalar_text(site_kind)
         return tuple(out) if isinstance(rec, tuple) else out
     return rec
 
 
 def _l1d_cache_site_record_as_l2(rec: Any) -> Any:
-    site_kind = str(_cache_site_row_field(rec, "site_kind", ""))
+    site_kind = _stable_scalar_text(_cache_site_row_field(rec, "site_kind", ""))
     if site_kind == "l1d_load":
         return _cache_site_record_with_kind(rec, "l2_load")
     if site_kind == "l1d_store":
@@ -642,7 +798,7 @@ def _analyzer_meta_sidecar_candidates(path: Path) -> List[Path]:
     seen: Set[str] = set()
     unique: List[Path] = []
     for candidate in candidates:
-        key = str(candidate)
+        key = _stable_scalar_text(candidate)
         if key in seen:
             continue
         seen.add(key)
@@ -676,7 +832,7 @@ def _load_analyzer_output_for_compute_cached(
         isinstance(analyzer, dict)
         and analyzer.get("manifest_kind") == "exact_sdc_analyzer_output_binary_v1"
     ):
-        fmt = str(analyzer.get("binary_format", "")).strip().lower()
+        fmt = _stable_scalar_text(analyzer.get("binary_format", "")).strip().lower()
         if fmt != "pickle_dict_v1":
             raise ValueError(
                 f"{analyzer_path}: unsupported analyzer output binary_format={fmt!r}"
@@ -686,7 +842,7 @@ def _load_analyzer_output_for_compute_cached(
             raise ValueError(
                 f"{analyzer_path}: binary analyzer output manifest missing binary_ref"
             )
-        ref_path = Path(str(ref_raw))
+        ref_path = Path(_stable_scalar_text(ref_raw))
         if not ref_path.is_absolute():
             ref_path = analyzer_path.parent / ref_path
         with ref_path.open("rb") as fh:
@@ -751,7 +907,7 @@ def parse_spec_list(spec: Optional[str]) -> Optional[List[int]]:
 
 
 def _parse_addr_bits_spec(raw: Any) -> Tuple[str, Optional[List[int]]]:
-    mode_raw = str(raw if raw is not None else "").strip()
+    mode_raw = _stable_scalar_text(raw if raw is not None else "").strip()
     mode_lc = mode_raw.lower()
     if mode_lc in ("", "auto"):
         return "auto", None
@@ -792,7 +948,7 @@ def _resolve_selected_addr_bits(
     if eff_bits <= 0:
         return 0, 0, 0
 
-    mode = str(addr_bits_mode).strip().lower()
+    mode = _stable_scalar_text(addr_bits_mode).strip().lower()
     if mode not in ADDR_BITS_MODES:
         mode = "auto"
 
@@ -821,7 +977,7 @@ def _summarize_effective_bits(values: Set[int]) -> Any:
 def parse_shader_list(spec: Optional[str]) -> Optional[List[int]]:
     if spec is None:
         return None
-    raw = str(spec).strip()
+    raw = _stable_scalar_text(spec).strip()
     if raw == "":
         return None
     toks = raw.replace(",", " ").replace(":", " ").split()
@@ -852,7 +1008,7 @@ def _parse_shader_domain_value(raw: Any) -> Optional[List[int]]:
             seen.add(val)
             out.append(int(val))
         return out or None
-    return parse_shader_list(str(raw))
+    return parse_shader_list(_stable_scalar_text(raw))
 
 
 def parse_register_list(spec: str) -> List[str]:
@@ -1671,7 +1827,7 @@ def load_cycle_records_with_meta(
         _path_cache_key(cycles_path),
         active_key,
         bool(allow_missing_active_threads),
-        str(missing_active_threads_policy),
+        _stable_scalar_text(missing_active_threads_policy),
     )
 
 
@@ -1748,7 +1904,7 @@ def _load_cycle_records_with_meta_cached(
     total_cycles = int(len(out))
     missing_ratio = (float(missing_cycles) / float(total_cycles)) if total_cycles > 0 else 0.0
     diag = {
-        "missing_active_threads_policy": str(policy),
+        "missing_active_threads_policy": _stable_scalar_text(policy),
         "missing_active_thread_cycles": int(missing_cycles),
         "missing_active_thread_cycle_ratio": float(missing_ratio),
         "active_threads_carried_forward_cycles": int(carried_forward_cycles),
@@ -1907,6 +2063,101 @@ def _collect_label_thread_cycles(
     return out
 
 
+def _fast_mask_record_has_rf_effect(record: FastMaskRecord) -> bool:
+    """Return whether a compact read record can change RF exact outcome.
+
+    Persistent RF faults are only affected by reads whose analyzer-proven masks
+    contribute SDC, DUE, or trace-expanding/unknown policy bits. Fully zero
+    records are exact masked consumers; they do not kill a persistent fault and
+    therefore do not need to appear as suffix-aggregation boundaries.
+    """
+
+    try:
+        return (
+            (int(record[1]) & MASK64) != 0
+            or (int(record[2]) & MASK64) != 0
+            or (int(record[3]) & MASK64) != 0
+        )
+    except Exception:
+        return True
+
+
+def _rf_consumer_record_has_rf_effect(record: RFConsumerRecord) -> bool:
+    try:
+        return (
+            (int(record[1]) & MASK64) != 0
+            or (int(record[2]) & MASK64) != 0
+            or (int(record[3]) & MASK64) != 0
+            or (int(record[7]) & MASK64) != 0
+        )
+    except Exception:
+        return True
+
+
+def _build_persistent_rf_effective_reads_by_uid(
+    by_uid: Mapping[Tuple[int, int, int], FastMaskRecord],
+    consumer_by_uid: Mapping[Tuple[int, int, int], Sequence[RFConsumerRecord]],
+    addr_static_due_by_uid: Mapping[Tuple[int, int, int], int],
+    *,
+    valid_threads: Optional[Set[int]] = None,
+) -> Dict[int, Dict[int, List[int]]]:
+    """Build the exact persistent-RF read-cycle index from effectful reads only.
+
+    The raw regfile trace contains every dynamic consumer. For the canonical
+    persistent RF model, a read whose analyzer masks are all zero neither
+    observes nor kills the fault. Such reads can be counted as masked mass by
+    the surrounding interval and omitted from suffix-mask boundaries. Reads with
+    semantic masks, DUE masks, trace masks, or static address-DUE masks are kept.
+    This is an exact aggregation, not sampling or a heuristic.
+    """
+
+    out_sets: Dict[int, Dict[int, Set[int]]] = defaultdict(lambda: defaultdict(set))
+
+    def _mark(tid: int, cycle: int, uid: int) -> None:
+        tid_i = int(tid)
+        if valid_threads is not None and tid_i not in valid_threads:
+            return
+        out_sets[int(uid)][tid_i].add(int(cycle))
+
+    for key, record in by_uid.items():
+        if len(key) != 3:
+            continue
+        tid, cycle, uid = (int(key[0]), int(key[1]), int(key[2]))
+        if _fast_mask_record_has_rf_effect(record):
+            _mark(tid, cycle, uid)
+
+    for key, mask in addr_static_due_by_uid.items():
+        if len(key) != 3:
+            continue
+        if (int(mask) & MASK64) == 0:
+            continue
+        tid, cycle, uid = (int(key[0]), int(key[1]), int(key[2]))
+        _mark(tid, cycle, uid)
+
+    for key, records in consumer_by_uid.items():
+        if len(key) != 3:
+            continue
+        if not any(_rf_consumer_record_has_rf_effect(rec) for rec in records):
+            continue
+        tid, cycle, uid = (int(key[0]), int(key[1]), int(key[2]))
+        _mark(tid, cycle, uid)
+
+    return {
+        int(uid): {int(tid): sorted(int(c) for c in cycles) for tid, cycles in per_tid.items()}
+        for uid, per_tid in out_sets.items()
+    }
+
+
+def _count_thread_reg_cycles(
+    index: Mapping[int, Mapping[int, Sequence[int]]],
+) -> int:
+    total = 0
+    for per_tid in index.values():
+        for cycles in per_tid.values():
+            total += len(cycles)
+    return int(total)
+
+
 def _trace_policy_for_unresolved_bits(
     trace_mask: int,
     *,
@@ -1978,6 +2229,13 @@ def bit_class_counts(
 
 
 def width_mask(width_bits: Any) -> int:
+    if type(width_bits) is int:
+        w = width_bits
+        if w <= 0:
+            return 0
+        if w >= 64:
+            return MASK64
+        return _WIDTH_MASK_TABLE[w]
     try:
         w = int(width_bits)
     except Exception:
@@ -1987,35 +2245,7 @@ def width_mask(width_bits: Any) -> int:
         return 0
     if w >= 64:
         return MASK64
-    return (1 << w) - 1
-
-
-def _cpp_classify_read_masks(**_kwargs: Any) -> Optional[Tuple[int, int, int, int, int, int, int]]:
-    return None
-
-
-def _cpp_classify_read_masks_many(
-    records: Sequence[FastMaskRecord],
-    *,
-    trace_expanding_policy: str,
-    trace_uncovered_mode: str,
-    trace_expanding_resolution_mode: str = "legacy",
-) -> Optional[List[Tuple[int, int, int, int, int, int, int]]]:
-    return None
-
-
-def _cpp_classify_site_masks(**_kwargs: Any) -> Optional[Tuple[int, int, int, int, int]]:
-    return None
-
-
-def _cpp_classify_site_masks_many(
-    records: Sequence[Any],
-    *,
-    trace_expanding_policy: str,
-    trace_uncovered_mode: str,
-    trace_expanding_resolution_mode: str = "legacy",
-) -> Optional[List[Tuple[int, int, int, int, int]]]:
-    return None
+    return _WIDTH_MASK_TABLE[w]
 
 
 def _final_due_sdc_masks_with_meta_fast_extended_many(
@@ -2172,18 +2402,12 @@ _BYTE_POPCOUNT = tuple(bin(i).count("1") for i in range(256))
 
 def popcount_u64(x: int) -> int:
     v = int(x) & MASK64
-    if hasattr(v, "bit_count"):
+    if v <= 0xFF:
+        return _BYTE_POPCOUNT[v]
+    try:
         return v.bit_count()  # type: ignore[attr-defined]
-    return (
-        _BYTE_POPCOUNT[v & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 8) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 16) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 24) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 32) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 40) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 48) & 0xFF]
-        + _BYTE_POPCOUNT[(v >> 56) & 0xFF]
-    )
+    except AttributeError:  # pragma: no cover - Python < 3.8 compatibility
+        return sum(_BYTE_POPCOUNT[byte] for byte in v.to_bytes(8, "little"))
 
 
 _RF_INTERVAL_ACCUM_FIELDS = (
@@ -2220,47 +2444,99 @@ def _empty_rf_interval_accum() -> Dict[str, int]:
 
 
 def _python_rf_interval_accumulate_many(
-    requests: Sequence[Mapping[str, Any]],
+    requests: Sequence[Any],
+    _to_int: Any = _stable_scalar_int,
+    _popcount_u64: Any = popcount_u64,
 ) -> Dict[str, int]:
+    # Bind scalar/popcount helpers as default arguments so this hot exact-Python
+    # reducer is immune to later analyzer globals carrying fields named like
+    # helper functions.  This preserves the exact arithmetic while avoiding the
+    # historical "str/tuple/dict object is not callable" failures caused by
+    # accidental global shadowing during large all-application runs.
     out = _empty_rf_interval_accum()
     for req in requests:
-        mass = int(req.get("mass", 0))
-        if mass <= 0:
-            continue
-        bit_count = int(req.get("bit_count", 0))
-        selected = int(req.get("selected_mask", 0)) & MASK64
-        due_mask = int(req.get("due_mask", 0)) & MASK64
-        sdc_mask = int(req.get("sdc_mask", 0)) & MASK64
-        unknown_mask = int(req.get("unknown_mask", 0)) & MASK64
-        trace_added_sdc_mask = (
-            int(req.get("trace_added_sdc_mask", 0)) & int(sdc_mask) & MASK64
-        )
-        trace_policy_used_mask = int(req.get("trace_policy_used_mask", 0)) & MASK64
-        trace_policy_override_mask = (
-            int(req.get("trace_policy_override_mask", 0)) & MASK64
-        )
-        trace_mask = int(req.get("trace_mask", 0)) & MASK64
-        semantic_due_mask = int(req.get("semantic_due_mask", 0)) & MASK64
-        addr_due_mask = int(req.get("addr_due_mask", 0)) & MASK64
-        addr_sdc_mask = int(req.get("addr_sdc_mask", 0)) & MASK64
-        addr_unknown_mask = int(req.get("addr_unknown_mask", 0)) & MASK64
-        addr_trace_div_mask = int(req.get("addr_trace_div_mask", 0)) & MASK64
+        if isinstance(req, tuple) and len(req) == 16:
+            (
+                mass,
+                bit_count,
+                selected,
+                due_mask,
+                sdc_mask,
+                unknown_mask,
+                trace_added_sdc_mask,
+                trace_policy_used_mask,
+                trace_policy_override_mask,
+                trace_mask,
+                semantic_due_mask,
+                addr_due_mask,
+                addr_sdc_mask,
+                addr_unknown_mask,
+                addr_trace_div_mask,
+                legacy_unknown_trace_uncovered,
+            ) = req
+            mass = int(mass)
+            if mass <= 0:
+                continue
+            bit_count = int(bit_count)
+            selected = int(selected) & MASK64
+            due_mask = int(due_mask) & MASK64
+            sdc_mask = int(sdc_mask) & MASK64
+            unknown_mask = int(unknown_mask) & MASK64
+            trace_added_sdc_mask = int(trace_added_sdc_mask) & sdc_mask & MASK64
+            trace_policy_used_mask = int(trace_policy_used_mask) & MASK64
+            trace_policy_override_mask = int(trace_policy_override_mask) & MASK64
+            trace_mask = int(trace_mask) & MASK64
+            semantic_due_mask = int(semantic_due_mask) & MASK64
+            addr_due_mask = int(addr_due_mask) & MASK64
+            addr_sdc_mask = int(addr_sdc_mask) & MASK64
+            addr_unknown_mask = int(addr_unknown_mask) & MASK64
+            addr_trace_div_mask = int(addr_trace_div_mask) & MASK64
+            legacy_unknown_trace_uncovered = bool(legacy_unknown_trace_uncovered)
+        else:
+            mass = _to_int(req.get("mass", 0))
+            if mass <= 0:
+                continue
+            bit_count = _to_int(req.get("bit_count", 0))
+            selected = _to_int(req.get("selected_mask", 0)) & MASK64
+            due_mask = _to_int(req.get("due_mask", 0)) & MASK64
+            sdc_mask = _to_int(req.get("sdc_mask", 0)) & MASK64
+            unknown_mask = _to_int(req.get("unknown_mask", 0)) & MASK64
+            trace_added_sdc_mask = (
+                _to_int(req.get("trace_added_sdc_mask", 0)) & sdc_mask & MASK64
+            )
+            trace_policy_used_mask = (
+                _to_int(req.get("trace_policy_used_mask", 0)) & MASK64
+            )
+            trace_policy_override_mask = (
+                _to_int(req.get("trace_policy_override_mask", 0)) & MASK64
+            )
+            trace_mask = _to_int(req.get("trace_mask", 0)) & MASK64
+            semantic_due_mask = _to_int(req.get("semantic_due_mask", 0)) & MASK64
+            addr_due_mask = _to_int(req.get("addr_due_mask", 0)) & MASK64
+            addr_sdc_mask = _to_int(req.get("addr_sdc_mask", 0)) & MASK64
+            addr_unknown_mask = _to_int(req.get("addr_unknown_mask", 0)) & MASK64
+            addr_trace_div_mask = (
+                _to_int(req.get("addr_trace_div_mask", 0)) & MASK64
+            )
+            legacy_unknown_trace_uncovered = bool(
+                req.get("legacy_unknown_trace_uncovered", False)
+            )
 
-        due_bits = popcount_u64(due_mask & selected)
-        sdc_bits = popcount_u64(sdc_mask & selected)
-        unknown_bits = popcount_u64(unknown_mask & selected)
-        trace_added_sdc_bits = popcount_u64(trace_added_sdc_mask & selected)
-        trace_policy_used_bits = popcount_u64(trace_policy_used_mask & selected)
-        trace_policy_override_bits = popcount_u64(
+        due_bits = _popcount_u64(due_mask & selected)
+        sdc_bits = _popcount_u64(sdc_mask & selected)
+        unknown_bits = _popcount_u64(unknown_mask & selected)
+        trace_added_sdc_bits = _popcount_u64(trace_added_sdc_mask & selected)
+        trace_policy_used_bits = _popcount_u64(trace_policy_used_mask & selected)
+        trace_policy_override_bits = _popcount_u64(
             trace_policy_override_mask & selected
         )
-        trace_policy_override_sdc_bits = popcount_u64(
+        trace_policy_override_sdc_bits = _popcount_u64(
             (trace_policy_override_mask & sdc_mask) & selected
         )
-        trace_policy_override_due_bits = popcount_u64(
+        trace_policy_override_due_bits = _popcount_u64(
             (trace_policy_override_mask & due_mask) & selected
         )
-        trace_policy_override_unknown_bits = popcount_u64(
+        trace_policy_override_unknown_bits = _popcount_u64(
             (trace_policy_override_mask & unknown_mask) & selected
         )
         trace_policy_override_masked_bits = max(
@@ -2270,19 +2546,19 @@ def _python_rf_interval_accumulate_many(
             - int(trace_policy_override_due_bits)
             - int(trace_policy_override_unknown_bits),
         )
-        trace_selected_bits = popcount_u64(trace_mask & selected)
-        semantic_due_bits = popcount_u64(semantic_due_mask & selected)
+        trace_selected_bits = _popcount_u64(trace_mask & selected)
+        semantic_due_bits = _popcount_u64(semantic_due_mask & selected)
         addr_trace_div_due_mask = addr_trace_div_mask & addr_due_mask & MASK64
         addr_trace_div_sdc_mask = addr_trace_div_mask & addr_sdc_mask & MASK64
         addr_oob_due_mask = addr_due_mask & (~addr_trace_div_due_mask) & MASK64
         addr_alias_sdc_mask = addr_sdc_mask & (~addr_trace_div_sdc_mask) & MASK64
-        addr_due_bits = popcount_u64(addr_due_mask & selected)
-        addr_sdc_bits = popcount_u64(addr_sdc_mask & selected)
-        addr_unknown_bits = popcount_u64((addr_unknown_mask & unknown_mask) & selected)
-        addr_oob_due_bits = popcount_u64(addr_oob_due_mask & selected)
-        addr_trace_div_due_bits = popcount_u64(addr_trace_div_due_mask & selected)
-        addr_alias_sdc_bits = popcount_u64(addr_alias_sdc_mask & selected)
-        addr_trace_div_sdc_bits = popcount_u64(addr_trace_div_sdc_mask & selected)
+        addr_due_bits = _popcount_u64(addr_due_mask & selected)
+        addr_sdc_bits = _popcount_u64(addr_sdc_mask & selected)
+        addr_unknown_bits = _popcount_u64((addr_unknown_mask & unknown_mask) & selected)
+        addr_oob_due_bits = _popcount_u64(addr_oob_due_mask & selected)
+        addr_trace_div_due_bits = _popcount_u64(addr_trace_div_due_mask & selected)
+        addr_alias_sdc_bits = _popcount_u64(addr_alias_sdc_mask & selected)
+        addr_trace_div_sdc_bits = _popcount_u64(addr_trace_div_sdc_mask & selected)
         if trace_selected_bits > 0:
             out["saw_trace_selected_bits"] = 1
 
@@ -2320,34 +2596,12 @@ def _python_rf_interval_accumulate_many(
         out["trace_policy_override_masked_bits"] += int(
             trace_policy_override_masked_bits
         )
-        if bool(req.get("legacy_unknown_trace_uncovered", False)):
+        if legacy_unknown_trace_uncovered:
             out["trace_uncovered_unknown_bits"] += int(trace_policy_used_bits)
             out["trace_uncovered_unknown_mass"] += int(mass) * int(
                 trace_policy_used_bits
             )
     return out
-
-
-def _cpp_rf_interval_accumulate_many(
-    requests: Sequence[Mapping[str, Any]],
-) -> Optional[Dict[str, int]]:
-    global _CPP_RF_INTERVAL_ACCUM_FAILED
-    if (
-        not requests
-        or not _CPP_RF_INTERVAL_ACCUM_ENABLED
-        or _CPP_RF_INTERVAL_ACCUM_FAILED
-    ):
-        return None
-    try:
-        accum = exact_cpp_backend.rf_interval_accumulate_many(  # type: ignore[attr-defined]
-            list(dict(req) for req in requests)
-        )
-    except Exception:
-        _CPP_RF_INTERVAL_ACCUM_FAILED = True
-        return None
-    if not isinstance(accum, dict):
-        return None
-    return {str(k): int(v) for k, v in accum.items()}
 
 
 def final_due_sdc_masks_for_site(
@@ -2417,7 +2671,7 @@ def merge_classification_record(
             raw = out.get(f)
             out[f] = dict(raw) if isinstance(raw, dict) else {}
         for f in DETAIL_SCALAR_FIELDS:
-            out[f] = str(out.get(f, "") or "")
+            out[f] = _stable_scalar_text(out.get(f, "") or "")
         return out
 
     out = dict(existing)
@@ -2441,8 +2695,8 @@ def merge_classification_record(
             merged_map.update(inc)
         out[f] = merged_map
     for f in DETAIL_SCALAR_FIELDS:
-        ex_val = str(existing.get(f, "") or "").strip()
-        inc_val = str(incoming.get(f, "") or "").strip()
+        ex_val = _stable_scalar_text(existing.get(f, "") or "").strip()
+        inc_val = _stable_scalar_text(incoming.get(f, "") or "").strip()
         out[f] = ex_val if ex_val else inc_val
     return out
 
@@ -2469,7 +2723,7 @@ def build_analyzer_indexes(
             continue
         tid = int(rec.get("thread_id", -1))
         cycle = int(rec.get("cycle"))
-        reg = str(rec.get("src_reg", ""))
+        reg = _stable_scalar_text(rec.get("src_reg", ""))
         uid = int(rec.get("src_reg_uid", -1))
 
         k_name = (tid, cycle, reg)
@@ -2486,7 +2740,7 @@ def build_analyzer_indexes(
 def _analyzer_mask_format(analyzer_output: Dict[str, Any]) -> str:
     meta = analyzer_output.get("exact_meta", {})
     if isinstance(meta, dict):
-        raw = str(meta.get("analyzer_mask_format", "")).strip().lower()
+        raw = _stable_scalar_text(meta.get("analyzer_mask_format", "")).strip().lower()
         if raw in ("int", "hex"):
             return raw
     return "hex"
@@ -2551,7 +2805,7 @@ def _decode_rf_read_event_for_indexes(
             return None
         tid = int(raw.get("thread_id", -1))
         cycle = int(cycle_raw)
-        reg = str(raw.get("src_reg", ""))
+        reg = _stable_scalar_text(raw.get("src_reg", ""))
         uid = int(raw.get("src_reg_uid", -1))
         packed = _normalize_fast_record(raw, mask_format=mask_format)
         event_index = int(raw.get("event_index", -1))
@@ -2566,7 +2820,7 @@ def _decode_rf_read_event_for_indexes(
         return (
             int(tid),
             int(cycle),
-            str(reg),
+            _stable_scalar_text(reg),
             int(uid),
             packed,
             int(event_index),
@@ -2603,7 +2857,7 @@ def _decode_rf_read_event_for_indexes(
     return (
         int(raw[1]),
         int(cycle),
-        str(raw[5]),
+        _stable_scalar_text(raw[5]),
         int(raw[6]),
         packed,
         int(raw[0]),
@@ -2799,7 +3053,7 @@ def _load_fast_rf_analyzer_indexes_cached(
         _consumer_by_uid,
         _consumer_by_name,
     ) = _load_fast_rf_indexes_cached(
-        str(analyzer_path_key),
+        _stable_scalar_text(analyzer_path_key),
         bool(normalize_trace_coverage),
     )
     return by_uid, by_name, reg_to_uids, addr_due_by_uid, addr_due_by_name
@@ -2822,7 +3076,7 @@ def _load_fast_rf_consumer_indexes_cached(
         consumer_by_uid,
         consumer_by_name,
     ) = _load_fast_rf_indexes_cached(
-        str(analyzer_path_key),
+        _stable_scalar_text(analyzer_path_key),
         bool(normalize_trace_coverage),
     )
     return consumer_by_uid, consumer_by_name
@@ -2842,7 +3096,7 @@ def _load_fast_rf_indexes_cached(
     Dict[Tuple[int, int, str], List[RFConsumerRecord]],
 ]:
     analyzer_any = _load_analyzer_output_for_compute_cached(
-        str(analyzer_path_key),
+        _stable_scalar_text(analyzer_path_key),
         bool(normalize_trace_coverage),
     )
     if not isinstance(analyzer_any, dict):
@@ -2915,77 +3169,94 @@ def _active_thread_count_segments_for_prefix(
     modulo-bias segment per active run instead of one row per thread.
     """
 
-    active_size = len(ids)
+    active_size = _stable_scalar_int(_BUILTIN_LEN(ids))
     if active_size <= 0:
         return []
-    domain_size_i = int(domain_size)
+    domain_size_i = _stable_scalar_int(domain_size)
     if domain_size_i <= 0:
         return None
-    q, r = divmod(domain_size_i, int(active_size))
+    q, r = divmod(domain_size_i, _stable_scalar_int(active_size))
 
     ranges: List[Tuple[int, int]] = []
-    if isinstance(ids, range) and int(ids.step) == 1:
-        ranges = [(int(ids.start), int(ids.stop))]
-    elif isinstance(ids, ThreadIdRanges):
-        ranges = [(int(start), int(stop)) for start, stop in ids.ranges]
+    if _BUILTIN_ISINSTANCE(ids, _BUILTIN_RANGE) and _builtins.int(ids.step) == 1:
+        ranges = [(_builtins.int(ids.start), _builtins.int(ids.stop))]
+    elif _BUILTIN_ISINSTANCE(ids, ThreadIdRanges):
+        ranges = [
+            (_builtins.int(start), _builtins.int(stop))
+            for start, stop in ids.ranges
+        ]
     else:
         # Fallback only for reasonably small legacy tuples/lists.  Large active
         # sets should arrive as range/ThreadIdRanges; expanding them here would
         # recreate the old hot path.
-        if int(active_size) > 4096:
+        if _stable_scalar_int(active_size) > 4096:
             return None
         start_tid: Optional[int] = None
         prev_tid: Optional[int] = None
         for tid_raw in ids:
-            tid = int(tid_raw)
+            tid = _builtins.int(tid_raw)
             if start_tid is None or prev_tid is None:
                 start_tid = tid
                 prev_tid = tid
-            elif tid == int(prev_tid) + 1:
+            elif tid == _builtins.int(prev_tid) + 1:
                 prev_tid = tid
             else:
-                ranges.append((int(start_tid), int(prev_tid) + 1))
+                ranges.append((_builtins.int(start_tid), _builtins.int(prev_tid) + 1))
                 start_tid = tid
                 prev_tid = tid
         if start_tid is not None and prev_tid is not None:
-            ranges.append((int(start_tid), int(prev_tid) + 1))
+            ranges.append((_builtins.int(start_tid), _builtins.int(prev_tid) + 1))
 
     segments: List[Tuple[int, int, int]] = []
     slot_base = 0
-    multiplicity_i = int(multiplicity)
+    multiplicity_i = _builtins.int(multiplicity)
     for start_raw, stop_raw in ranges:
-        start = int(start_raw)
-        stop = int(stop_raw)
-        run_len = int(stop) - int(start)
+        start = _builtins.int(start_raw)
+        stop = _builtins.int(stop_raw)
+        run_len = _builtins.int(stop) - _builtins.int(start)
         if run_len <= 0:
             continue
 
         # The first ``r`` active slots get q+1 seeds due to rand % active_size.
-        biased_len = min(run_len, max(0, int(r) - int(slot_base)))
+        biased_len = _BUILTIN_MIN(run_len, _BUILTIN_MAX(0, _builtins.int(r) - _builtins.int(slot_base)))
         if biased_len > 0 and q + 1 > 0:
             segments.append(
-                (int(start), int(start) + int(biased_len), multiplicity_i * (int(q) + 1))
+                (
+                    _builtins.int(start),
+                    _builtins.int(start) + _builtins.int(biased_len),
+                    multiplicity_i * (_builtins.int(q) + 1),
+                )
             )
 
-        normal_start = max(0, int(r) - int(slot_base))
+        normal_start = _BUILTIN_MAX(0, _builtins.int(r) - _builtins.int(slot_base))
         if normal_start < run_len and q > 0:
             segments.append(
-                (int(start) + int(normal_start), int(stop), multiplicity_i * int(q))
+                (
+                    _builtins.int(start) + _builtins.int(normal_start),
+                    _builtins.int(stop),
+                    multiplicity_i * _builtins.int(q),
+                )
             )
-        slot_base += int(run_len)
+        slot_base += _builtins.int(run_len)
 
     if not segments:
         return []
-    segments.sort(key=lambda row: (int(row[0]), int(row[1]), int(row[2])))
+    segments.sort(
+        key=lambda row: (
+            _builtins.int(row[0]),
+            _builtins.int(row[1]),
+            _builtins.int(row[2]),
+        )
+    )
     merged: List[Tuple[int, int, int]] = []
     for lo_raw, hi_raw, weight_raw in segments:
-        lo = int(lo_raw)
-        hi = int(hi_raw)
-        weight = int(weight_raw)
+        lo = _builtins.int(lo_raw)
+        hi = _builtins.int(hi_raw)
+        weight = _builtins.int(weight_raw)
         if hi <= lo or weight <= 0:
             continue
-        if merged and int(merged[-1][1]) == lo and int(merged[-1][2]) == weight:
-            merged[-1] = (int(merged[-1][0]), hi, weight)
+        if merged and _builtins.int(merged[-1][1]) == lo and _builtins.int(merged[-1][2]) == weight:
+            merged[-1] = (_builtins.int(merged[-1][0]), hi, weight)
         else:
             merged.append((lo, hi, weight))
     return merged
@@ -3009,33 +3280,45 @@ def _thread_cycle_weights_range_refined_prefix(
 
     if not include_thread_ids:
         return None
-    if thread_rand_max is None or int(thread_rand_max) <= 0:
+    if thread_rand_max is None or _builtins.int(thread_rand_max) <= 0:
         return None
-    min_tid = min(int(v) for v in include_thread_ids)
-    max_tid = max(int(v) for v in include_thread_ids)
+    min_tid = _BUILTIN_MIN(_builtins.int(v) for v in include_thread_ids)
+    max_tid = _BUILTIN_MAX(_builtins.int(v) for v in include_thread_ids)
     if max_tid < min_tid:
         return None
     # The interval-refinement representation is most effective and simplest
     # when the RF read-thread domain is dense, which is the common FI setting.
-    if len(include_thread_ids) != int(max_tid) - int(min_tid) + 1:
+    if _BUILTIN_LEN(include_thread_ids) != _builtins.int(max_tid) - _builtins.int(min_tid) + 1:
         return None
 
-    domain_size = int(thread_rand_max)
-    partitions: List[Tuple[int, int, int]] = [(int(min_tid), int(max_tid) + 1, 0)]
+    domain_size = _builtins.int(thread_rand_max)
+    partitions: List[Tuple[int, int, int]] = [
+        (_builtins.int(min_tid), _builtins.int(max_tid) + 1, 0)
+    ]
     # schedule node id -> (previous node id, cycle, weight)
     schedule_nodes: List[Optional[Tuple[int, int, int]]] = [None]
     extend_cache: Dict[Tuple[int, int, int], int] = {}
     inactive_base_mass = 0
 
     def extend_schedule(schedule_id: int, cycle: int, weight: int) -> int:
-        key = (int(schedule_id), int(cycle), int(weight))
+        key = (
+            _stable_scalar_int(schedule_id),
+            _stable_scalar_int(cycle),
+            _stable_scalar_int(weight),
+        )
         cached = extend_cache.get(key)
         if cached is not None:
-            return int(cached)
-        schedule_nodes.append((int(schedule_id), int(cycle), int(weight)))
-        new_id = len(schedule_nodes) - 1
-        extend_cache[key] = int(new_id)
-        return int(new_id)
+            return _stable_scalar_int(cached)
+        schedule_nodes.append(
+            (
+                _stable_scalar_int(schedule_id),
+                _stable_scalar_int(cycle),
+                _stable_scalar_int(weight),
+            )
+        )
+        new_id = _BUILTIN_LEN(schedule_nodes) - 1
+        extend_cache[key] = _stable_scalar_int(new_id)
+        return _stable_scalar_int(new_id)
 
     def append_partition(
         out: List[Tuple[int, int, int]],
@@ -3043,24 +3326,32 @@ def _thread_cycle_weights_range_refined_prefix(
         hi: int,
         schedule_id: int,
     ) -> None:
-        if int(hi) <= int(lo):
+        if _builtins.int(hi) <= _builtins.int(lo):
             return
-        if out and int(out[-1][1]) == int(lo) and int(out[-1][2]) == int(schedule_id):
-            out[-1] = (int(out[-1][0]), int(hi), int(schedule_id))
+        if (
+            out
+            and _builtins.int(out[-1][1]) == _builtins.int(lo)
+            and _builtins.int(out[-1][2]) == _builtins.int(schedule_id)
+        ):
+            out[-1] = (
+                _builtins.int(out[-1][0]),
+                _builtins.int(hi),
+                _builtins.int(schedule_id),
+            )
         else:
-            out.append((int(lo), int(hi), int(schedule_id)))
+            out.append((_builtins.int(lo), _builtins.int(hi), _builtins.int(schedule_id)))
 
     for rec in cycle_records:
-        multiplicity = int(rec.multiplicity)
+        multiplicity = _builtins.int(rec.multiplicity)
         active_ids = rec.active_thread_ids
-        active_size = len(active_ids)
+        active_size = _stable_scalar_int(_BUILTIN_LEN(active_ids))
         if active_size <= 0:
-            inactive_base_mass += int(multiplicity) * int(domain_size)
+            inactive_base_mass += _builtins.int(multiplicity) * _builtins.int(domain_size)
             continue
         segments = _active_thread_count_segments_for_prefix(
             active_ids,
-            int(domain_size),
-            int(multiplicity),
+            _builtins.int(domain_size),
+            _builtins.int(multiplicity),
         )
         if segments is None:
             return None
@@ -3069,40 +3360,51 @@ def _thread_cycle_weights_range_refined_prefix(
 
         new_partitions: List[Tuple[int, int, int]] = []
         seg_idx = 0
-        cycle_i = int(rec.cycle)
+        cycle_i = _builtins.int(rec.cycle)
         for part_lo, part_hi, schedule_id in partitions:
-            cursor = int(part_lo)
-            while seg_idx < len(segments) and int(segments[seg_idx][1]) <= int(part_lo):
+            cursor = _builtins.int(part_lo)
+            while (
+                seg_idx < _BUILTIN_LEN(segments)
+                and _builtins.int(segments[seg_idx][1]) <= _builtins.int(part_lo)
+            ):
                 seg_idx += 1
             scan_idx = seg_idx
-            while cursor < int(part_hi):
-                if scan_idx >= len(segments) or int(segments[scan_idx][0]) >= int(part_hi):
-                    append_partition(new_partitions, cursor, int(part_hi), int(schedule_id))
-                    cursor = int(part_hi)
+            while cursor < _builtins.int(part_hi):
+                if (
+                    scan_idx >= _BUILTIN_LEN(segments)
+                    or _builtins.int(segments[scan_idx][0]) >= _builtins.int(part_hi)
+                ):
+                    append_partition(
+                        new_partitions,
+                        cursor,
+                        _builtins.int(part_hi),
+                        _builtins.int(schedule_id),
+                    )
+                    cursor = _builtins.int(part_hi)
                     break
 
                 seg_lo, seg_hi, weight = segments[scan_idx]
-                seg_lo = int(seg_lo)
-                seg_hi = int(seg_hi)
-                weight = int(weight)
+                seg_lo = _builtins.int(seg_lo)
+                seg_hi = _builtins.int(seg_hi)
+                weight = _builtins.int(weight)
                 if cursor < seg_lo:
-                    gap_hi = min(int(part_hi), seg_lo)
-                    append_partition(new_partitions, cursor, gap_hi, int(schedule_id))
-                    cursor = int(gap_hi)
-                    if cursor >= int(part_hi):
+                    gap_hi = _BUILTIN_MIN(_builtins.int(part_hi), seg_lo)
+                    append_partition(new_partitions, cursor, gap_hi, _builtins.int(schedule_id))
+                    cursor = _builtins.int(gap_hi)
+                    if cursor >= _builtins.int(part_hi):
                         break
                 if seg_hi <= cursor:
                     scan_idx += 1
                     continue
 
-                overlap_hi = min(int(part_hi), seg_hi)
+                overlap_hi = _BUILTIN_MIN(_builtins.int(part_hi), seg_hi)
                 append_partition(
                     new_partitions,
                     cursor,
                     overlap_hi,
-                    extend_schedule(int(schedule_id), cycle_i, weight),
+                    extend_schedule(_builtins.int(schedule_id), cycle_i, weight),
                 )
-                cursor = int(overlap_hi)
+                cursor = _builtins.int(overlap_hi)
                 if cursor >= seg_hi:
                     scan_idx += 1
         partitions = new_partitions
@@ -3110,33 +3412,32 @@ def _thread_cycle_weights_range_refined_prefix(
     row_cache: Dict[int, Tuple[List[int], List[int], int]] = {}
 
     def materialize_row(schedule_id: int) -> Tuple[List[int], List[int], int]:
-        cached = row_cache.get(int(schedule_id))
+        cached = row_cache.get(_builtins.int(schedule_id))
         if cached is not None:
             return cached
         entries: List[Tuple[int, int]] = []
-        cursor = int(schedule_id)
+        cursor = _builtins.int(schedule_id)
         while cursor:
             node = schedule_nodes[cursor]
             if node is None:
                 break
             prev_id, cycle_i, weight_i = node
-            entries.append((int(cycle_i), int(weight_i)))
-            cursor = int(prev_id)
+            entries.append((_builtins.int(cycle_i), _builtins.int(weight_i)))
+            cursor = _builtins.int(prev_id)
         entries.reverse()
         if entries:
             monotonic = True
-            prev_cycle_check = int(entries[0][0])
+            prev_cycle_check = _builtins.int(entries[0][0])
             for cycle_i, _weight_i in entries[1:]:
-                if int(cycle_i) < int(prev_cycle_check):
+                if _builtins.int(cycle_i) < _builtins.int(prev_cycle_check):
                     monotonic = False
                     break
-                prev_cycle_check = int(cycle_i)
+                prev_cycle_check = _builtins.int(cycle_i)
             if not monotonic:
                 per_cycle: Dict[int, int] = {}
                 for cycle_i, weight_i in entries:
-                    per_cycle[int(cycle_i)] = int(per_cycle.get(int(cycle_i), 0)) + int(
-                        weight_i
-                    )
+                    cycle_key = _builtins.int(cycle_i)
+                    per_cycle[cycle_key] = _builtins.int(per_cycle.get(cycle_key, 0)) + _builtins.int(weight_i)
                 entries = sorted(per_cycle.items())
 
         cycles: List[int] = []
@@ -3146,41 +3447,41 @@ def _thread_cycle_weights_range_refined_prefix(
         accum = 0
         for cycle_i, weight_i in entries:
             if prev_cycle is None:
-                prev_cycle = int(cycle_i)
-                accum = int(weight_i)
-            elif int(cycle_i) == int(prev_cycle):
-                accum += int(weight_i)
+                prev_cycle = _builtins.int(cycle_i)
+                accum = _builtins.int(weight_i)
+            elif _builtins.int(cycle_i) == _builtins.int(prev_cycle):
+                accum += _builtins.int(weight_i)
             else:
-                cycles.append(int(prev_cycle))
-                total += int(accum)
-                prefix.append(int(total))
-                prev_cycle = int(cycle_i)
-                accum = int(weight_i)
+                cycles.append(_builtins.int(prev_cycle))
+                total += _builtins.int(accum)
+                prefix.append(_builtins.int(total))
+                prev_cycle = _builtins.int(cycle_i)
+                accum = _builtins.int(weight_i)
         if prev_cycle is not None:
-            cycles.append(int(prev_cycle))
-            total += int(accum)
-            prefix.append(int(total))
-        row = (cycles, prefix, int(total))
-        row_cache[int(schedule_id)] = row
+            cycles.append(_builtins.int(prev_cycle))
+            total += _builtins.int(accum)
+            prefix.append(_builtins.int(total))
+        row = (cycles, prefix, _builtins.int(total))
+        row_cache[_builtins.int(schedule_id)] = row
         return row
 
     thread_prefix: Dict[int, Tuple[List[int], List[int], int]] = {}
     for lo, hi, schedule_id in partitions:
-        row = materialize_row(int(schedule_id))
-        if int(row[2]) <= 0:
+        row = materialize_row(_builtins.int(schedule_id))
+        if _builtins.int(row[2]) <= 0:
             continue
-        for tid in range(int(lo), int(hi)):
-            thread_prefix[int(tid)] = row
+        for tid in _BUILTIN_RANGE(_builtins.int(lo), _builtins.int(hi)):
+            thread_prefix[_builtins.int(tid)] = row
 
     result = ThreadCycleWeightsDict()
     result._thread_prefix = thread_prefix
-    base_denominator = int(total_cycle_lines) * int(domain_size)
-    active_base_mass = int(base_denominator) - int(inactive_base_mass)
+    base_denominator = _builtins.int(total_cycle_lines) * _builtins.int(domain_size)
+    active_base_mass = _builtins.int(base_denominator) - _builtins.int(inactive_base_mass)
     return (
         result,
-        int(domain_size),
-        int(inactive_base_mass),
-        int(active_base_mass),
+        _builtins.int(domain_size),
+        _builtins.int(inactive_base_mass),
+        _builtins.int(active_base_mass),
     )
 
 
@@ -3232,23 +3533,39 @@ def _slot_counts_for_cycle_cached(
 def normalize_mem_space(space_raw: Any) -> Optional[str]:
     if space_raw is None:
         return None
-    s = str(space_raw).strip().lower().replace("-", "_")
+    if isinstance(space_raw, (list, tuple, set, frozenset)):
+        for item in space_raw:
+            norm = normalize_mem_space(item)
+            if norm is not None:
+                return norm
+        return None
+    if isinstance(space_raw, dict):
+        for key in ("space", "mem_space", "memory_space", "kind"):
+            if key in space_raw:
+                norm = normalize_mem_space(space_raw.get(key))
+                if norm is not None:
+                    return norm
+        return None
+    s = _stable_normalized_mem_space_text(space_raw)
     if not s:
         return None
-    if s in ("global", "gmem", "global_mem", "globalmem"):
+    if _stable_text_equals_any(s, ("global", "gmem", "global_mem", "globalmem")):
         return "global"
-    if s in ("local", "lmem", "local_mem", "localmem"):
+    if _stable_text_equals_any(s, ("local", "lmem", "local_mem", "localmem")):
         return "local"
-    if s in (
-        "shared",
-        "smem",
-        "lds",
-        "shared_mem",
-        "sharedmem",
-        "shmem",
+    if _stable_text_equals_any(
+        s,
+        (
+            "shared",
+            "smem",
+            "lds",
+            "shared_mem",
+            "sharedmem",
+            "shmem",
+        ),
     ):
         return "shared"
-    if s in ("const", "constant", "const_mem", "constant_mem"):
+    if _stable_text_equals_any(s, ("const", "constant", "const_mem", "constant_mem")):
         return "const"
     if "global" in s:
         return "global"
@@ -3266,29 +3583,29 @@ def canonical_space(space_raw: Any) -> Optional[str]:
 
 
 def canonical_raw_event_space(raw: Dict[str, Any]) -> Optional[str]:
-    opcode = str(raw.get("opcode", "")).strip().lower()
+    opcode = _stable_scalar_text(_mapping_get(raw, "opcode", "")).strip().lower()
     if ".param" in opcode or opcode.startswith("ld.param") or opcode.startswith("st.param"):
         return "param"
-    mem_space_raw = raw.get("mem_space")
+    mem_space_raw = _mapping_get(raw, "mem_space")
     if mem_space_raw is None:
-        mem_space_raw = raw.get("space")
+        mem_space_raw = _mapping_get(raw, "space")
     return canonical_space(mem_space_raw)
 
 
 def access_size_bytes_for_raw_event(ev: Dict[str, Any]) -> int:
-    kind = str(ev.get("kind", "")).strip().lower()
+    kind = _stable_scalar_text(_mapping_get(ev, "kind", "")).strip().lower()
     if kind == "store":
-        if ev.get("store_size_bytes") is not None:
-            return max(1, int(ev.get("store_size_bytes")))
-        if ev.get("mem_access_size_bytes") is not None:
-            return max(1, int(ev.get("mem_access_size_bytes")))
+        if _mapping_get(ev, "store_size_bytes") is not None:
+            return max(1, int(_mapping_get(ev, "store_size_bytes")))
+        if _mapping_get(ev, "mem_access_size_bytes") is not None:
+            return max(1, int(_mapping_get(ev, "mem_access_size_bytes")))
     elif kind == "load":
-        if ev.get("mem_access_size_bytes") is not None:
-            return max(1, int(ev.get("mem_access_size_bytes")))
-    if ev.get("mem_access_size_bytes") is not None:
-        return max(1, int(ev.get("mem_access_size_bytes")))
-    if ev.get("width_bits") is not None:
-        return max(1, (int(ev.get("width_bits")) + 7) // 8)
+        if _mapping_get(ev, "mem_access_size_bytes") is not None:
+            return max(1, int(_mapping_get(ev, "mem_access_size_bytes")))
+    if _mapping_get(ev, "mem_access_size_bytes") is not None:
+        return max(1, int(_mapping_get(ev, "mem_access_size_bytes")))
+    if _mapping_get(ev, "width_bits") is not None:
+        return max(1, (int(_mapping_get(ev, "width_bits")) + 7) // 8)
     return 1
 
 
@@ -3297,14 +3614,14 @@ def parse_trace_template(path: Path) -> Dict[str, Any]:
 
 
 def _template_ref_path(base_path: Path, ref_raw: Any) -> Path:
-    ref = Path(str(ref_raw))
+    ref = Path(_stable_scalar_text(ref_raw))
     if ref.is_absolute():
         return ref
     return base_path.parent / ref
 
 
 def _load_binary_analyzer_input_manifest(base_path: Path, manifest: Dict[str, Any]) -> Any:
-    fmt = str(manifest.get("binary_format", "")).strip().lower()
+    fmt = _stable_scalar_text(manifest.get("binary_format", "")).strip().lower()
     if fmt != "pickle_dict_v1":
         raise ValueError(
             f"{base_path}: unsupported analyzer input binary_format={fmt!r}"
@@ -3318,7 +3635,7 @@ def _load_binary_analyzer_input_manifest(base_path: Path, manifest: Dict[str, An
 
 
 def _load_columnar_analyzer_input_manifest(base_path: Path, manifest: Dict[str, Any]) -> Dict[str, Any]:
-    fmt = str(manifest.get("columnar_format", "")).strip().lower()
+    fmt = _stable_scalar_text(manifest.get("columnar_format", "")).strip().lower()
     if fmt != "pickle_events_columnar_v1":
         raise ValueError(
             f"{base_path}: unsupported analyzer input columnar_format={fmt!r}"
@@ -3335,7 +3652,7 @@ def _load_columnar_analyzer_input_manifest(base_path: Path, manifest: Dict[str, 
 
 
 def _columnar_analyzer_input_to_event_dicts(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if str(payload.get("format", "")).strip() != "exact_sdc_analyzer_events_columnar_v1":
+    if _stable_scalar_text(payload.get("format", "")).strip() != "exact_sdc_analyzer_events_columnar_v1":
         raise ValueError("unsupported analyzer input columnar payload")
     columns = payload.get("columns", {})
     if not isinstance(columns, dict):
@@ -3343,9 +3660,9 @@ def _columnar_analyzer_input_to_event_dicts(payload: Dict[str, Any]) -> List[Dic
     keys_raw = payload.get("keys")
     keys: List[str]
     if isinstance(keys_raw, list) and keys_raw:
-        keys = [str(key) for key in keys_raw if str(key)]
+        keys = [_stable_scalar_text(key) for key in keys_raw if _stable_scalar_text(key)]
     else:
-        keys = [str(key) for key in columns.keys()]
+        keys = [_stable_scalar_text(key) for key in columns.keys()]
     count = int(payload.get("count", 0))
     out: List[Dict[str, Any]] = []
     append = out.append
@@ -3381,13 +3698,13 @@ def _raw_event_memory_range_context(
     raw: Dict[str, Any],
     event_index: int,
 ) -> Optional[Tuple[str, int, int, Optional[int], Optional[int], Optional[int]]]:
-    kind = str(raw.get("kind", "")).strip().lower()
+    kind = _stable_scalar_text(_mapping_get(raw, "kind", "")).strip().lower()
     if kind not in ("load", "store"):
         return None
-    cspace = canonical_space(raw.get("mem_space") or raw.get("space"))
+    cspace = canonical_space(_mapping_get(raw, "mem_space") or _mapping_get(raw, "space"))
     if cspace is None:
         return None
-    addr_raw = raw.get("mem_addr", raw.get("base"))
+    addr_raw = _mapping_get(raw, "mem_addr", _mapping_get(raw, "base"))
     if addr_raw is None:
         return None
     try:
@@ -3399,7 +3716,7 @@ def _raw_event_memory_range_context(
         return None
 
     def opt_int(name: str) -> Optional[int]:
-        value = raw.get(name)
+        value = _mapping_get(raw, name)
         if value is None:
             return None
         try:
@@ -3408,7 +3725,7 @@ def _raw_event_memory_range_context(
             return None
 
     return (
-        str(cspace),
+        _stable_scalar_text(cspace),
         int(addr),
         int(size),
         opt_int("thread_id"),
@@ -3431,7 +3748,7 @@ def _parse_trace_template_cached(path_key: str) -> Dict[str, Any]:
         memory_ranges_raw = list(manifest.get("memory_ranges", []) or [])
         output_spec_raw = manifest.get("output_spec", [])
         use_columnar = (
-            str(os.environ.get("EXACT_SDC_TRACE_TEMPLATE_COLUMNAR", "1"))
+            _stable_scalar_text(os.environ.get("EXACT_SDC_TRACE_TEMPLATE_COLUMNAR", "1"))
             .strip()
             .lower()
             not in ("0", "false", "no", "off")
@@ -3488,6 +3805,15 @@ def _parse_trace_template_cached(path_key: str) -> Dict[str, Any]:
     events_raw = raw.get("events")
     if not isinstance(events_raw, list):
         raise ValueError(f"{path}: trace template missing events list")
+    normalized_events_raw: List[Any] = []
+    for raw_event in events_raw:
+        if _BUILTIN_TYPE(raw_event) is dict:
+            normalized_events_raw.append(raw_event)
+        elif _BUILTIN_ISINSTANCE(raw_event, Mapping):
+            normalized_events_raw.append(dict(raw_event))
+        else:
+            normalized_events_raw.append(raw_event)
+    events_raw = normalized_events_raw
     if not memory_ranges_raw:
         memory_ranges_raw = raw.get("memory_ranges", [])
     if memory_ranges_raw is None:
@@ -3533,7 +3859,7 @@ def _safe_int(raw: Any, default: int = 0) -> int:
 
 def _deep_get(obj: Any, path: str) -> Any:
     cur = obj
-    for part in str(path).split("."):
+    for part in _stable_scalar_text(path).split("."):
         if isinstance(cur, dict) and part in cur:
             cur = cur.get(part)
         else:
@@ -3543,7 +3869,7 @@ def _deep_get(obj: Any, path: str) -> Any:
 
 def _sampling_first(fi_space: Dict[str, Any], paths: Sequence[str]) -> Any:
     for path in paths:
-        val = _deep_get(fi_space, str(path))
+        val = _deep_get(fi_space, _stable_scalar_text(path))
         if val is not None:
             return val
     return None
@@ -3632,28 +3958,6 @@ def _thread_cycle_weights(
     )
 
 
-def _should_use_cpp_thread_cycle(
-    cycle_records: Sequence[CycleRecord],
-) -> bool:
-    if not _CPP_THREAD_CYCLE_ENABLED or _CPP_THREAD_CYCLE_FAILED:
-        return False
-    if _CPP_THREAD_CYCLE_FORCE:
-        return True
-    # The current C++ entrypoint requires eager Python marshalling of every
-    # cycle + active-thread list. For the storage workloads in this repo, that
-    # bridge cost dominates and is slower than the Python path once the cycle
-    # domain is even moderately large, so auto-mode keeps C++ only for tiny
-    # workloads unless the caller explicitly forces it.
-    if len(cycle_records) > _CPP_THREAD_CYCLE_AUTO_MAX_RECORDS:
-        return False
-    total_active_threads = 0
-    for rec in cycle_records:
-        total_active_threads += len(rec.active_thread_ids)
-        if total_active_threads > _CPP_THREAD_CYCLE_AUTO_MAX_TOTAL_ACTIVE_THREADS:
-            return False
-    return True
-
-
 @lru_cache(maxsize=16)
 def _thread_cycle_weights_cached(
     cycle_records: Tuple[CycleRecord, ...],
@@ -3700,71 +4004,14 @@ def _thread_cycle_weights_uncached(
     )
 
 
-def _should_use_cpp_thread_cycle(
-    cycle_records: Sequence[CycleRecord],
-) -> bool:
-    if not _CPP_THREAD_CYCLE_ENABLED or _CPP_THREAD_CYCLE_FAILED:
-        return False
-    if _CPP_THREAD_CYCLE_FORCE:
-        return True
-    # The current C++ entrypoint requires eager Python marshalling of every
-    # cycle + active-thread list. For the storage workloads in this repo, that
-    # bridge cost dominates and is slower than the Python path once the cycle
-    # domain is even moderately large, so auto-mode keeps C++ only for tiny
-    # workloads unless the caller explicitly forces it.
-    if len(cycle_records) > _CPP_THREAD_CYCLE_AUTO_MAX_RECORDS:
-        return False
-    total_active_threads = 0
-    for rec in cycle_records:
-        total_active_threads += len(rec.active_thread_ids)
-        if total_active_threads > _CPP_THREAD_CYCLE_AUTO_MAX_TOTAL_ACTIVE_THREADS:
-            return False
-    return True
-
-
 def _thread_cycle_weights_expanded_uncached(
     cycle_records: List[CycleRecord],
     thread_rands: Optional[List[int]],
     thread_rand_max: Optional[int],
 ) -> Tuple[Dict[int, Dict[int, int]], int, int, int]:
-    global _CPP_THREAD_CYCLE_FAILED
     total_cycle_lines = sum(rec.multiplicity for rec in cycle_records)
     if total_cycle_lines <= 0:
         raise ValueError("cycle multiplicity total is zero")
-
-    if _should_use_cpp_thread_cycle(cycle_records):
-        try:
-            cpp_result = exact_cpp_backend.thread_cycle_weights(
-                cycles=[int(rec.cycle) for rec in cycle_records],
-                multiplicities=[int(rec.multiplicity) for rec in cycle_records],
-                active_thread_ids_by_record=[
-                    [int(tid) for tid in rec.active_thread_ids] for rec in cycle_records
-                ],
-                seed_values=None if thread_rands is None else [int(v) for v in thread_rands],
-                thread_rand_max=None if thread_rand_max is None else int(thread_rand_max),
-            )
-        except Exception:
-            _CPP_THREAD_CYCLE_FAILED = True
-            cpp_result = None
-        if cpp_result is not None:
-            sorted_entries, seed_domain_size, inactive_base_mass, active_base_mass = cpp_result
-            thread_cycle_weights_cpp = ThreadCycleWeightsDict()
-            thread_cycle_weights_cpp._sorted_entries = list(sorted_entries)
-            for tid, cycle, weight in sorted_entries:
-                per_cycle = thread_cycle_weights_cpp.get(int(tid))
-                if per_cycle is None:
-                    per_cycle = {}
-                    thread_cycle_weights_cpp[int(tid)] = per_cycle
-                per_cycle[int(cycle)] = int(weight)
-            thread_cycle_weights_cpp._thread_prefix = build_thread_cycle_prefix(
-                thread_cycle_weights_cpp
-            )
-            return (
-                thread_cycle_weights_cpp,
-                int(seed_domain_size),
-                int(inactive_base_mass),
-                int(active_base_mass),
-            )
 
     inactive_base_mass = 0
     thread_cycle_weights = ThreadCycleWeightsDict()
@@ -3816,12 +4063,26 @@ def _thread_cycle_weights_expanded_uncached(
             inactive_base_mass += multiplicity_i * int(domain_size)
             continue
         for tid, count in tid_template:
-            per_cycle = weights_get(int(tid))
+            tid_i = int(tid)
+            cycle_key = int(cycle_i)
+            per_cycle = weights_get(tid_i)
             if per_cycle is None:
                 per_cycle = {}
-                thread_cycle_weights[int(tid)] = per_cycle
-            per_cycle[int(cycle_i)] = int(per_cycle.get(int(cycle_i), 0)) + (
-                multiplicity_i * int(count)
+                thread_cycle_weights[tid_i] = per_cycle
+            try:
+                previous_weight = int(per_cycle.get(cycle_key, 0))
+                count_weight = int(count)
+            except Exception as exc:
+                raise TypeError(
+                    "invalid thread-cycle weight scalar: "
+                    f"tid_type={type(tid).__name__} "
+                    f"cycle_type={type(cycle_i).__name__} "
+                    f"count_type={type(count).__name__} "
+                    f"per_cycle_type={type(per_cycle).__name__} "
+                    f"previous_type={type(per_cycle.get(cycle_key, 0)).__name__}"
+                ) from exc
+            per_cycle[cycle_key] = previous_weight + (
+                multiplicity_i * count_weight
             )
 
     assert seed_domain_size is not None
@@ -3874,7 +4135,7 @@ def _build_shared_trace_indexes(
         cta_id = raw.get("cta_id")
         if tid is not None and sm_id is not None and cta_id is not None:
             thread_to_scope[int(tid)] = (int(sm_id), int(cta_id))
-        kind = str(raw.get("kind", "")).strip().lower()
+        kind = _stable_scalar_text(raw.get("kind", "")).strip().lower()
         if kind not in ("store", "load"):
             continue
         pred_raw = raw.get("pred")
@@ -3920,7 +4181,7 @@ def _extract_rf_addr_source_regs(
     for raw in events_raw:
         if not isinstance(raw, dict):
             continue
-        kind = str(raw.get("kind", "")).strip().lower()
+        kind = _stable_scalar_text(raw.get("kind", "")).strip().lower()
         if kind not in ("load", "store"):
             continue
         cspace = canonical_space(raw.get("mem_space") or raw.get("space"))
@@ -3953,7 +4214,7 @@ def _extract_rf_addr_source_regs(
             if src_i < 0:
                 continue
             if src_i < len(src_regs_raw):
-                reg_name = str(src_regs_raw[src_i]).strip()
+                reg_name = _stable_scalar_text(src_regs_raw[src_i]).strip()
                 if reg_name:
                     reg_names.add(reg_name)
             if src_i < len(src_uids_raw):
@@ -3974,10 +4235,10 @@ def _rf_addr_observed_scope_key(
     if cspace_n is None:
         return None
     if cspace_n == "global":
-        return (str(cspace_n), None, None, None)
+        return (_stable_scalar_text(cspace_n), None, None, None)
     if cspace_n == "local":
         return (
-            str(cspace_n),
+            _stable_scalar_text(cspace_n),
             int(getattr(ev, "thread_id", -1)),
             (
                 int(getattr(ev, "cta_id"))
@@ -3988,7 +4249,7 @@ def _rf_addr_observed_scope_key(
         )
     if cspace_n == "shared":
         return (
-            str(cspace_n),
+            _stable_scalar_text(cspace_n),
             None,
             (
                 int(getattr(ev, "cta_id"))
@@ -4090,7 +4351,7 @@ def _build_rf_addr_event_eval_info(
             analysis_mod.event_effective_address_mask(ev, int(expr.width_bits))
         ) & MASK64
         expr_width_mask = int(analysis_mod.width_mask(int(expr.width_bits))) & MASK64
-        if str(getattr(expr, "op", "")).strip().upper() in ("IDENTITY", "ADDR_SUM"):
+        if _stable_scalar_text(getattr(expr, "op", "")).strip().upper() in ("IDENTITY", "ADDR_SUM"):
             base_raw_ea = int(analysis_mod.eval_ea_expr(ev)) & int(expr_width_mask)
             for src_i in getattr(expr, "src_indices", []):
                 src_i_int = int(src_i)
@@ -4118,7 +4379,7 @@ def _build_rf_addr_observed_intervals(
 ) -> RFAddrObservedIntervals:
     raw: Dict[RFAddrObservedIntervalKey, List[Tuple[int, int]]] = defaultdict(list)
     for ev in events:
-        if str(getattr(ev, "kind", "")).strip().lower() not in ("load", "store"):
+        if _stable_scalar_text(getattr(ev, "kind", "")).strip().lower() not in ("load", "store"):
             continue
         pred = getattr(ev, "pred", None)
         if pred is not None and int(getattr(pred, "val", 1)) == 0:
@@ -4195,9 +4456,10 @@ def _load_rf_addr_trace_context_cached(
     by_name: Dict[Tuple[int, int, str], List[RFAddrTraceRecord]] = defaultdict(list)
     observed_intervals = _build_rf_addr_observed_intervals(analysis_mod, events)
 
-    for ev in events:
-        event_by_index[int(ev.index)] = ev
-        if str(getattr(ev, "kind", "")).strip().lower() not in ("load", "store"):
+    for fallback_event_index, ev in enumerate(events):
+        ev_index = _stable_trace_event_index(ev, fallback_event_index)
+        event_by_index[ev_index] = ev
+        if _stable_scalar_text(getattr(ev, "kind", "")).strip().lower() not in ("load", "store"):
             continue
         if getattr(ev, "cycle", None) is None:
             continue
@@ -4221,11 +4483,13 @@ def _load_rf_addr_trace_context_cached(
             if influence_mask == 0:
                 continue
             rec = RFAddrTraceRecord(
-                event_index=int(ev.index),
+                event_index=ev_index,
                 src_index=int(src_i),
                 influence_mask=int(influence_mask) & MASK64,
             )
-            key_name = (int(ev.thread_id), int(ev.cycle), str(ev.src_regs[src_i]))
+            ev_thread_id = _stable_scalar_int(ev.thread_id)
+            ev_cycle = _stable_scalar_int(ev.cycle)
+            key_name = (ev_thread_id, ev_cycle, _stable_scalar_text(ev.src_regs[src_i]))
             by_name[key_name].append(rec)
             src_uid = (
                 int(ev.src_reg_uids[src_i])
@@ -4233,7 +4497,7 @@ def _load_rf_addr_trace_context_cached(
                 else -1
             )
             if src_uid >= 0:
-                key_uid = (int(ev.thread_id), int(ev.cycle), int(src_uid))
+                key_uid = (ev_thread_id, ev_cycle, int(src_uid))
                 by_uid[key_uid].append(rec)
 
     return (
@@ -4252,7 +4516,7 @@ def _analyzer_rf_requires_addr_trace_context(analyzer_output: Dict[str, Any]) ->
         return False
     mask_format = _analyzer_mask_format(analyzer_output)
     for raw_rec in read_events:
-        read_kind = str(_read_event_row_field(raw_rec, "read_kind", "")).strip().lower()
+        read_kind = _stable_scalar_text(_read_event_row_field(raw_rec, "read_kind", "")).strip().lower()
         if read_kind == "addr":
             return True
         for key in (
@@ -4436,7 +4700,7 @@ def _classify_rf_addr_masks_from_trace(
                     source = "addr_alias_sdc"
 
             if ((int(trace_mask) >> int(bit_idx)) & 1) != 0 and cls == "masked" and trace_target != "masked":
-                cls = str(trace_target)
+                cls = _stable_scalar_text(trace_target)
                 if cls == "due":
                     source = "rf_trace_divergence_due"
                 elif cls == "sdc":
@@ -4444,10 +4708,10 @@ def _classify_rf_addr_masks_from_trace(
                 else:
                     source = "trace_divergence_unknown"
 
-            prev_cls = str(bit_class.get(int(bit_idx), "masked"))
-            if int(precedence.get(str(cls), 0)) >= int(precedence.get(prev_cls, 0)):
-                bit_class[int(bit_idx)] = str(cls)
-                bit_source[int(bit_idx)] = str(source)
+            prev_cls = _stable_scalar_text(bit_class.get(int(bit_idx), "masked"))
+            if int(precedence.get(_stable_scalar_text(cls), 0)) >= int(precedence.get(prev_cls, 0)):
+                bit_class[int(bit_idx)] = _stable_scalar_text(cls)
+                bit_source[int(bit_idx)] = _stable_scalar_text(source)
 
     due_mask = 0
     sdc_mask = 0
@@ -4457,7 +4721,7 @@ def _classify_rf_addr_masks_from_trace(
     source_masks: Dict[str, int] = defaultdict(int)
     for bit_idx, cls in bit_class.items():
         one_bit = (1 << int(bit_idx)) & MASK64
-        source = str(bit_source.get(int(bit_idx), "rf_addr_masked"))
+        source = _stable_scalar_text(bit_source.get(int(bit_idx), "rf_addr_masked"))
         if cls == "due":
             due_mask |= int(one_bit)
         elif cls == "sdc":
@@ -4466,13 +4730,13 @@ def _classify_rf_addr_masks_from_trace(
             unknown_mask |= int(one_bit)
         else:
             masked_mask |= int(one_bit)
-        source_masks[str(source)] = int(source_masks.get(str(source), 0)) | int(one_bit)
-        if str(source).startswith("trace_divergence_") or str(source) == "rf_trace_divergence_due":
+        source_masks[_stable_scalar_text(source)] = int(source_masks.get(_stable_scalar_text(source), 0)) | int(one_bit)
+        if _stable_scalar_text(source).startswith("trace_divergence_") or _stable_scalar_text(source) == "rf_trace_divergence_due":
             trace_div_bits |= int(one_bit)
 
     source_bits: Dict[str, int] = {}
     for source, mask in source_masks.items():
-        source_bits[str(source)] = int(popcount_u64(int(mask) & MASK64))
+        source_bits[_stable_scalar_text(source)] = int(popcount_u64(int(mask) & MASK64))
 
     return (
         int(due_mask) & MASK64,
@@ -4633,8 +4897,8 @@ def _resolve_rf_domain_policy_info(
         final_total_bits = int(total_cycle_lines) * int(seed_domain_size) * int(final_per_seed)
 
     return {
-        "rf_domain_policy": str(policy),
-        "rf_domain_source": str(final_source),
+        "rf_domain_policy": _stable_scalar_text(policy),
+        "rf_domain_source": _stable_scalar_text(final_source),
         "rf_domain_bits_per_seed_final": int(max(0, final_per_seed)),
         "rf_domain_total_bits_final": int(max(0, final_total_bits)),
         "rf_domain_bits_per_seed_used_regs": int(max(0, used_per_seed)),
@@ -4819,7 +5083,7 @@ def _smem_touched_size_bits_from_trace_events(events_raw: Any) -> int:
     for raw in events_raw:
         if not isinstance(raw, dict):
             continue
-        kind = str(raw.get("kind", "")).strip().lower()
+        kind = _stable_scalar_text(raw.get("kind", "")).strip().lower()
         if kind not in ("load", "store"):
             continue
         if canonical_space(raw.get("mem_space") or raw.get("space")) != "shared":
@@ -4850,7 +5114,7 @@ def _resolve_smem_size_bits(
     memory_ranges: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     policy = _normalize_smem_domain_policy(getattr(args, "smem_domain_policy", "sampling_space"))
-    fc = str(fault_component).strip().lower()
+    fc = _stable_scalar_text(fault_component).strip().lower()
     sampling_bits = _first_positive_int(
         (
             _sampling_first(fi_space, (f"component_domains.{fc}.domain_bits_per_seed",)),
@@ -4951,8 +5215,8 @@ def _resolve_smem_size_bits(
         source = "default_1bit"
 
     return {
-        "smem_domain_policy": str(policy),
-        "smem_size_bits_source": str(source),
+        "smem_domain_policy": _stable_scalar_text(policy),
+        "smem_size_bits_source": _stable_scalar_text(source),
         "smem_size_bits_final": int(final_bits),
         "smem_domain_bits_per_seed_final": int(final_bits),
         "smem_domain_total_bits_final": int(max(0, sampling_total_bits)),
@@ -5161,9 +5425,9 @@ def _cycle_prefix_from_records(
 
 
 def _l2_line_key(mem_space: str, thread_id: int, line_addr: int) -> Tuple[str, int, int]:
-    if str(mem_space) == "local":
+    if _stable_scalar_text(mem_space) == "local":
         return ("local", int(thread_id), int(line_addr))
-    return (str(mem_space), -1, int(line_addr))
+    return (_stable_scalar_text(mem_space), -1, int(line_addr))
 
 
 def _l1d_line_key(
@@ -5172,9 +5436,9 @@ def _l1d_line_key(
     thread_id: int,
     line_addr: int,
 ) -> Tuple[str, int, int, int]:
-    if str(mem_space) == "local":
+    if _stable_scalar_text(mem_space) == "local":
         return ("local", int(sm_id), int(thread_id), int(line_addr))
-    return (str(mem_space), int(sm_id), -1, int(line_addr))
+    return (_stable_scalar_text(mem_space), int(sm_id), -1, int(line_addr))
 
 
 L1DByteCycleMasks = Tuple[
@@ -5247,7 +5511,7 @@ def _normalize_l1d_byte_history_signature(
 
 
 def _normalize_storage_group_mode(value: Any) -> str:
-    mode = str(value if value is not None else "legacy").strip().lower()
+    mode = _stable_scalar_text(value if value is not None else "legacy").strip().lower()
     if mode not in STORAGE_GROUP_MODES:
         raise ValueError(
             "storage_group_mode must be one of {}; got {!r}".format(
@@ -5509,7 +5773,7 @@ def _build_cache_data_segment_metric_plan_cached(
         rows_masks,
         selected_data_bits_mask=int(selected_data_bits_mask),
         addr_domain_enabled=bool(addr_domain_enabled),
-        trace_divergence_policy=str(trace_divergence_policy),
+        trace_divergence_policy=_stable_scalar_text(trace_divergence_policy),
     )
 
 
@@ -5527,13 +5791,13 @@ def _build_cache_data_segment_metric_plan(
             rows_masks,
             int(selected_data_bits_mask),
             bool(addr_domain_enabled),
-            str(trace_divergence_policy),
+            _stable_scalar_text(trace_divergence_policy),
         )
     return _build_cache_data_segment_metric_plan_from_masks(
         rows_masks,
         selected_data_bits_mask=int(selected_data_bits_mask),
         addr_domain_enabled=bool(addr_domain_enabled),
-        trace_divergence_policy=str(trace_divergence_policy),
+        trace_divergence_policy=_stable_scalar_text(trace_divergence_policy),
     )
 
 
@@ -5552,7 +5816,7 @@ def _sampling_component_int(
         return int(default)
     comp = fi_space.get("component_domains", {})
     if isinstance(comp, dict):
-        row = comp.get(str(component), {})
+        row = comp.get(_stable_scalar_text(component), {})
         if isinstance(row, dict) and key in row:
             try:
                 return int(row.get(key, default))
@@ -5578,7 +5842,7 @@ def _build_global_readonly_line_state(
     for idx, raw in enumerate(events_raw):
         if not isinstance(raw, dict):
             continue
-        kind = str(raw.get("kind", "")).strip().lower()
+        kind = _stable_scalar_text(raw.get("kind", "")).strip().lower()
         if kind not in ("load", "store"):
             continue
         pred_raw = raw.get("pred")
@@ -5591,7 +5855,7 @@ def _build_global_readonly_line_state(
         if addr_raw is None:
             continue
         try:
-            addr = int(parse_int(str(addr_raw)))
+            addr = int(parse_int(_stable_scalar_text(addr_raw)))
         except Exception:
             continue
         size_bytes = access_size_bytes_for_raw_event(raw)
@@ -5639,7 +5903,7 @@ def _build_global_readonly_line_state(
         if "dst_val" not in raw:
             continue
         try:
-            dst_val = int(parse_int(str(raw.get("dst_val")))) & MASK64
+            dst_val = int(parse_int(_stable_scalar_text(raw.get("dst_val")))) & MASK64
         except Exception:
             continue
         width_bits = int(raw.get("width_bits", size_bytes * 8))
@@ -5678,7 +5942,7 @@ def _filter_cache_fault_sites_by_trace_space(
     event_by_index: Dict[int, Dict[str, Any]],
     allowed_spaces: Sequence[str],
 ) -> List[Any]:
-    allowed = {str(v) for v in allowed_spaces}
+    allowed = {_stable_scalar_text(v) for v in allowed_spaces}
     out: List[Any] = []
     for rec in sites:
         if isinstance(rec, dict):
@@ -5701,8 +5965,8 @@ def _filter_cache_fault_sites_by_trace_space(
             if raw_space == "param":
                 continue
             if raw_space is not None:
-                effective_space = str(raw_space)
-        if str(effective_space) not in allowed:
+                effective_space = _stable_scalar_text(raw_space)
+        if _stable_scalar_text(effective_space) not in allowed:
             continue
         out.append(rec)
     return out
@@ -5719,19 +5983,19 @@ class SharedCacheTraceViews:
 
 @lru_cache(maxsize=None)
 def _trace_event_by_index_cached(trace_template_key: str) -> Dict[int, Dict[str, Any]]:
-    trace_template = _parse_trace_template_cached(str(trace_template_key))
+    trace_template = _parse_trace_template_cached(_stable_scalar_text(trace_template_key))
     trace_events_raw = trace_template.get("events", [])
     event_by_index: Dict[int, Dict[str, Any]] = {}
     if isinstance(trace_events_raw, list):
         for idx, raw in enumerate(trace_events_raw):
             if not isinstance(raw, dict):
                 continue
-            event_by_index[int(idx)] = raw
+            event_by_index[int(idx)] = raw if _BUILTIN_TYPE(raw) is dict else dict(raw)
     return event_by_index
 
 
 def _cache_fault_site_field_name(component: str) -> str:
-    comp = str(component).strip().lower()
+    comp = _stable_scalar_text(component).strip().lower()
     if comp == "l1d":
         return "l1d_fault_sites"
     if comp == "l2":
@@ -5757,19 +6021,19 @@ def _load_filtered_cache_fault_sites_for_compute_cached(
     normalize_trace_coverage: bool = False,
 ) -> Tuple[Any, ...]:
     analyzer_any = _load_analyzer_output_for_compute_cached(
-        str(analyzer_path_key),
+        _stable_scalar_text(analyzer_path_key),
         bool(normalize_trace_coverage),
     )
     if not isinstance(analyzer_any, dict):
         raise ValueError("analyzer output must be a JSON object")
-    normalized_component = str(component).strip().lower()
+    normalized_component = _stable_scalar_text(component).strip().lower()
     if normalized_component == "l2" and _analyzer_l2_sites_alias_l1d(analyzer_any):
         return tuple(
             _l1d_cache_site_record_as_l2(rec)
             for rec in _load_filtered_cache_fault_sites_for_compute_cached(
                 "l1d",
-                str(analyzer_path_key),
-                str(trace_template_key),
+                _stable_scalar_text(analyzer_path_key),
+                _stable_scalar_text(trace_template_key),
                 bool(normalize_trace_coverage),
             )
         )
@@ -5784,7 +6048,7 @@ def _load_filtered_cache_fault_sites_for_compute_cached(
     ]
     filtered = _filter_cache_fault_sites_by_trace_space(
         sites=candidate_sites,
-        event_by_index=_trace_event_by_index_cached(str(trace_template_key)),
+        event_by_index=_trace_event_by_index_cached(_stable_scalar_text(trace_template_key)),
         allowed_spaces=("global", "local"),
     )
     return tuple(filtered)
@@ -5798,7 +6062,7 @@ def _load_filtered_cache_fault_sites_for_compute(
     normalize_trace_coverage: bool = False,
 ) -> Tuple[Any, ...]:
     return _load_filtered_cache_fault_sites_for_compute_cached(
-        str(component).strip().lower(),
+        _stable_scalar_text(component).strip().lower(),
         _analyzer_output_cache_key(Path(analyzer_output)),
         _path_cache_key(Path(trace_template)),
         bool(normalize_trace_coverage),
@@ -5815,10 +6079,10 @@ def _load_cache_site_masks_for_compute_cached(
     trace_uncovered_mode: str,
     trace_expanding_resolution_mode: str,
 ) -> Optional[Tuple[Tuple[int, int, int, int, int], ...]]:
-    normalized_component = str(component).strip().lower()
+    normalized_component = _stable_scalar_text(component).strip().lower()
     if normalized_component == "l2":
         analyzer_any = _load_analyzer_output_for_compute_cached(
-            str(analyzer_path_key),
+            _stable_scalar_text(analyzer_path_key),
             bool(normalize_trace_coverage),
         )
         if not isinstance(analyzer_any, dict):
@@ -5826,36 +6090,30 @@ def _load_cache_site_masks_for_compute_cached(
         if _analyzer_l2_sites_alias_l1d(analyzer_any):
             return _load_cache_site_masks_for_compute_cached(
                 "l1d",
-                str(analyzer_path_key),
-                str(trace_template_key),
+                _stable_scalar_text(analyzer_path_key),
+                _stable_scalar_text(trace_template_key),
                 bool(normalize_trace_coverage),
-                str(trace_expanding_policy),
-                str(trace_uncovered_mode),
-                str(trace_expanding_resolution_mode),
+                _stable_scalar_text(trace_expanding_policy),
+                _stable_scalar_text(trace_uncovered_mode),
+                _stable_scalar_text(trace_expanding_resolution_mode),
             )
     sites = _load_filtered_cache_fault_sites_for_compute_cached(
         normalized_component,
-        str(analyzer_path_key),
-        str(trace_template_key),
+        _stable_scalar_text(analyzer_path_key),
+        _stable_scalar_text(trace_template_key),
         bool(normalize_trace_coverage),
     )
-    masks = _cpp_classify_site_masks_many(
-        sites,
-        trace_expanding_policy=str(trace_expanding_policy),
-        trace_uncovered_mode=str(trace_uncovered_mode),
-        trace_expanding_resolution_mode=str(trace_expanding_resolution_mode),
-    )
-    if masks is None:
-        return None
     return tuple(
-        (
-            int(row[0]),
-            int(row[1]),
-            int(row[2]),
-            int(row[3]),
-            int(row[4]),
+        tuple(
+            int(value)
+            for value in final_due_sdc_masks_for_site_extended(
+                rec=rec,
+                trace_expanding_policy=_stable_scalar_text(trace_expanding_policy),
+                trace_uncovered_mode=_stable_scalar_text(trace_uncovered_mode),
+                trace_expanding_resolution_mode=_stable_scalar_text(trace_expanding_resolution_mode),
+            )
         )
-        for row in masks
+        for rec in sites
     )
 
 
@@ -5870,13 +6128,13 @@ def _load_cache_site_masks_for_compute(
     trace_expanding_resolution_mode: str,
 ) -> Optional[Tuple[Tuple[int, int, int, int, int], ...]]:
     return _load_cache_site_masks_for_compute_cached(
-        str(component).strip().lower(),
+        _stable_scalar_text(component).strip().lower(),
         _analyzer_output_cache_key(Path(analyzer_output)),
         _path_cache_key(Path(trace_template)),
         bool(normalize_trace_coverage),
-        str(trace_expanding_policy),
-        str(trace_uncovered_mode),
-        str(trace_expanding_resolution_mode),
+        _stable_scalar_text(trace_expanding_policy),
+        _stable_scalar_text(trace_uncovered_mode),
+        _stable_scalar_text(trace_expanding_resolution_mode),
     )
 
 
@@ -5894,7 +6152,7 @@ def _build_shared_cache_trace_views(
     if build_l2 and int(l2_line_size_bytes) <= 0:
         raise ValueError("--l2-line-size-bytes must be > 0")
 
-    trace_template = _parse_trace_template_cached(str(trace_template_key))
+    trace_template = _parse_trace_template_cached(_stable_scalar_text(trace_template_key))
     trace_events_raw = trace_template.get("events", [])
     l1d_line_store_cycles: Dict[Tuple[str, int, int, int], Set[int]] = defaultdict(set)
     l1d_line_first_valid_cycle: Dict[Tuple[str, int, int, int], int] = {}
@@ -5905,7 +6163,7 @@ def _build_shared_cache_trace_views(
         for idx, raw in enumerate(trace_events_raw):
             if not isinstance(raw, dict):
                 continue
-            kind = str(raw.get("kind", "")).strip().lower()
+            kind = _stable_scalar_text(raw.get("kind", "")).strip().lower()
             if kind not in ("load", "store"):
                 continue
             pred_raw = raw.get("pred")
@@ -5934,7 +6192,7 @@ def _build_shared_cache_trace_views(
                         byte_addr = int(addr + byte_i)
                         line_addr = int(byte_addr // int(l1d_line_size_bytes))
                         line_key = _l1d_line_key(
-                            mem_space=str(mem_space),
+                            mem_space=_stable_scalar_text(mem_space),
                             sm_id=int(sm_id),
                             thread_id=int(thread_id),
                             line_addr=int(line_addr),
@@ -5951,7 +6209,7 @@ def _build_shared_cache_trace_views(
                     byte_addr = int(addr + byte_i)
                     line_addr = int(byte_addr // int(l2_line_size_bytes))
                     line_key = _l2_line_key(
-                        mem_space=str(mem_space),
+                        mem_space=_stable_scalar_text(mem_space),
                         thread_id=int(thread_id),
                         line_addr=int(line_addr),
                     )
@@ -5963,7 +6221,7 @@ def _build_shared_cache_trace_views(
                             l2_line_first_load_cycle[line_key] = int(cycle)
 
     return SharedCacheTraceViews(
-        event_by_index=_trace_event_by_index_cached(str(trace_template_key)),
+        event_by_index=_trace_event_by_index_cached(_stable_scalar_text(trace_template_key)),
         l1d_line_store_cycles_sorted={
             line_key: tuple(sorted(int(v) for v in rows))
             for line_key, rows in l1d_line_store_cycles.items()
@@ -5987,7 +6245,7 @@ def _load_shared_cache_trace_views_cached(
     build_l2: bool,
 ) -> SharedCacheTraceViews:
     return _build_shared_cache_trace_views(
-        str(trace_template_key),
+        _stable_scalar_text(trace_template_key),
         l1d_line_size_bytes=int(l1d_line_size_bytes),
         l1d_write_allocate=bool(l1d_write_allocate),
         l2_line_size_bytes=int(l2_line_size_bytes),
@@ -6001,16 +6259,16 @@ def _shared_cache_trace_view_targets_for_args(
 ) -> Tuple[bool, bool]:
     active_raw = getattr(args, "_batch_active_components", None)
     active_components = {
-        str(comp).strip().lower()
+        _stable_scalar_text(comp).strip().lower()
         for comp in (
             active_raw
             if isinstance(active_raw, (list, tuple, set, frozenset))
             else [getattr(args, "fault_component", "")]
         )
-        if str(comp).strip()
+        if _stable_scalar_text(comp).strip()
     }
     if not active_components:
-        active_components = {str(getattr(args, "fault_component", "")).strip().lower()}
+        active_components = {_stable_scalar_text(getattr(args, "fault_component", "")).strip().lower()}
     return ("l1d" in active_components), ("l2" in active_components)
 
 
@@ -6111,13 +6369,13 @@ def _parse_output_spec_ranges(
         if cspace is None:
             continue
         try:
-            base = int(parse_int(str(raw.get("base"))))
-            size = int(parse_int(str(raw.get("bytes"))))
+            base = int(parse_int(_stable_scalar_text(raw.get("base"))))
+            size = int(parse_int(_stable_scalar_text(raw.get("bytes"))))
         except Exception:
             continue
         if size <= 0:
             continue
-        out.append((str(cspace), int(base), int(size)))
+        out.append((_stable_scalar_text(cspace), int(base), int(size)))
     return out
 
 
@@ -6129,7 +6387,7 @@ def _raw_store_matches_output_ranges(
         return True
     if not output_ranges:
         return False
-    if str(raw.get("kind", "")).strip().lower() != "store":
+    if _stable_scalar_text(raw.get("kind", "")).strip().lower() != "store":
         return False
     cspace = canonical_space(raw.get("mem_space") or raw.get("space"))
     if cspace is None:
@@ -6182,12 +6440,12 @@ def _cache_tag_output_relevant_lookup_masks(
     multi-byte wrong-line value change as SDC.
     """
 
-    component = str(cache_component).strip().lower() or "l1d"
+    component = _stable_scalar_text(cache_component).strip().lower() or "l1d"
     expected_kind = "l2_load" if component == "l2" else "l1d_load"
-    scope_mode_n = str(scope_mode).strip().lower() or component
+    scope_mode_n = _stable_scalar_text(scope_mode).strip().lower() or component
     out: Dict[Tuple[int, int, int], Dict[int, int]] = defaultdict(dict)
     for rec in cache_sites:
-        if str(_cache_site_row_field(rec, "site_kind", "")) != expected_kind:
+        if _stable_scalar_text(_cache_site_row_field(rec, "site_kind", "")) != expected_kind:
             continue
         mem_space = canonical_space(_cache_site_row_field(rec, "mem_space"))
         if mem_space != "global":
@@ -6300,8 +6558,8 @@ def _exact_l1d_tag_counts_global_readonly_alias(
         for rec in l1d_sites
     ):
         return None
-    cache_component = str(cache_component).strip().lower() or "l1d"
-    scope_mode = str(scope_mode).strip().lower() or cache_component
+    cache_component = _stable_scalar_text(cache_component).strip().lower() or "l1d"
+    scope_mode = _stable_scalar_text(scope_mode).strip().lower() or cache_component
     nset = _sampling_component_int(fi_space, cache_component, "nset", 0)
     if nset <= 0:
         return None
@@ -6314,7 +6572,7 @@ def _exact_l1d_tag_counts_global_readonly_alias(
     line_states = _build_global_readonly_line_state(
         trace_template,
         int(line_size_bytes),
-        scope_mode=str(scope_mode),
+        scope_mode=_stable_scalar_text(scope_mode),
     )
     if not line_states:
         return {
@@ -6368,12 +6626,12 @@ def _exact_l1d_tag_counts_global_readonly_alias(
     relevant_lookup_masks = _cache_tag_output_relevant_lookup_masks(
         cache_sites=l1d_sites,
         line_size_bytes=int(line_size_bytes),
-        cache_component=str(cache_component),
-        scope_mode=str(scope_mode),
-        trace_expanding_policy=str(trace_expanding_policy),
-        trace_uncovered_mode=str(trace_uncovered_mode),
-        trace_expanding_resolution_mode=str(trace_expanding_resolution_mode),
-        trace_divergence_policy=str(trace_divergence_policy),
+        cache_component=_stable_scalar_text(cache_component),
+        scope_mode=_stable_scalar_text(scope_mode),
+        trace_expanding_policy=_stable_scalar_text(trace_expanding_policy),
+        trace_uncovered_mode=_stable_scalar_text(trace_uncovered_mode),
+        trace_expanding_resolution_mode=_stable_scalar_text(trace_expanding_resolution_mode),
+        trace_divergence_policy=_stable_scalar_text(trace_divergence_policy),
     )
 
     counts = {"masked": 0, "sdc": 0, "due": 0, "unknown": 0}
@@ -6477,8 +6735,8 @@ def _exact_l1d_tag_counts_global_readonly_alias(
                             "target_line": int(target_line),
                             "actual_tag_bit": int(bitpos),
                             "target_cycle": int(cyc),
-                            "classification": str(cls),
-                            "reason": str(reason),
+                            "classification": _stable_scalar_text(cls),
+                            "reason": _stable_scalar_text(reason),
                             "mass": int(mass),
                             "relevant_byte_count": int(len(relevant_offsets)),
                         }
@@ -6606,7 +6864,7 @@ def _infer_l1d_shaders_from_trace_and_sites(
         for raw in events_raw_infer:
             if not isinstance(raw, dict):
                 continue
-            kind = str(raw.get("kind", "")).strip().lower()
+            kind = _stable_scalar_text(raw.get("kind", "")).strip().lower()
             if kind not in ("load", "store"):
                 continue
             mem_space = canonical_space(raw.get("mem_space") or raw.get("space"))
@@ -6641,7 +6899,7 @@ def _resolve_l1d_shader_seed_list(
     trace_template: Dict[str, Any],
     l1d_sites: Sequence[Dict[str, Any]],
 ) -> Tuple[List[int], str, str]:
-    mode_raw = "" if raw_spec is None else str(raw_spec).strip()
+    mode_raw = "" if raw_spec is None else _stable_scalar_text(raw_spec).strip()
     mode_lc = mode_raw.lower()
     sampling_list = _parse_shader_domain_value(
         _sampling_first(
@@ -6666,7 +6924,7 @@ def _resolve_l1d_shader_seed_list(
         ),
         0,
     )
-    sampling_source_priority = str(
+    sampling_source_priority = _stable_scalar_text(
         _sampling_first(fi_space, ("source_priority.l1d_shaders",))
     ).strip().lower()
     inferred = _infer_l1d_shaders_from_trace_and_sites(trace_template, l1d_sites)
@@ -6785,14 +7043,14 @@ def _normalize_addr_range_entry(raw: Any) -> Optional[Dict[str, Any]]:
         if isinstance(base_raw, int):
             base = int(base_raw)
         else:
-            base = parse_int(str(base_raw))
+            base = parse_int(_stable_scalar_text(base_raw))
         size = int(raw.get("size"))
     except Exception:
         return None
     if size <= 0:
         return None
     out: Dict[str, Any] = {
-        "space": str(cspace),
+        "space": _stable_scalar_text(cspace),
         "base": int(base),
         "size": int(size),
     }
@@ -6900,7 +7158,7 @@ def _addr_access_validity(
     size_i = max(1, int(size_bytes))
     has_context = False
     for entry in ranges:
-        if str(entry.get("space", "")) != str(cspace):
+        if _stable_scalar_text(entry.get("space", "")) != _stable_scalar_text(cspace):
             continue
         if not _addr_range_context_match(
             entry,
@@ -6978,13 +7236,13 @@ def _add_source_mass(acc: Dict[str, float], key: str, mass: float) -> None:
         return
     if float(mass) == 0.0:
         return
-    acc[str(key)] = float(acc.get(str(key), 0.0)) + float(mass)
+    acc[_stable_scalar_text(key)] = float(acc.get(_stable_scalar_text(key), 0.0)) + float(mass)
 
 
 def _normalize_mass_map(acc: Dict[str, float]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for key in sorted(acc.keys()):
-        out[str(key)] = _normalize_numeric(float(acc.get(key, 0.0)))
+        out[_stable_scalar_text(key)] = _normalize_numeric(float(acc.get(key, 0.0)))
     return out
 
 
@@ -6993,9 +7251,9 @@ def _mass_map_to_bits_map(acc: Dict[str, float]) -> Dict[str, int]:
     for key in sorted(acc.keys()):
         val = float(acc.get(key, 0.0))
         if val <= 0.0:
-            out[str(key)] = 0
+            out[_stable_scalar_text(key)] = 0
         else:
-            out[str(key)] = int(round(val))
+            out[_stable_scalar_text(key)] = int(round(val))
     return out
 
 
@@ -7032,7 +7290,7 @@ def _classify_smem_addr_masks(
         if oob_exception_policy is not None
         else None
     )
-    source_prefix_n = str(source_prefix).strip() or "addr"
+    source_prefix_n = _stable_scalar_text(source_prefix).strip() or "addr"
     sel = int(selected_mask) & MASK64
     eff = int(effective_mask) & MASK64
     if eff == 0:
@@ -7072,14 +7330,14 @@ def _classify_smem_addr_masks(
                 cls = "sdc"
                 source = f"{source_prefix_n}_alias_sdc"
             elif oob_policy is not None:
-                cls = str(oob_policy)
+                cls = _stable_scalar_text(oob_policy)
                 source = f"{source_prefix_n}_oob_{cls}"
             else:
                 cls = "due"
                 source = f"{source_prefix_n}_oob_due"
 
         if ((int(trace_mask) >> bit_idx) & 1) != 0 and cls == "masked" and trace_target != "masked":
-            cls = str(trace_target)
+            cls = _stable_scalar_text(trace_target)
             source = f"trace_divergence_{cls}"
             trace_div_bits |= int(one_bit)
 
@@ -7091,14 +7349,14 @@ def _classify_smem_addr_masks(
             unknown_m |= int(one_bit)
         else:
             masked_m |= int(one_bit)
-        source_bits[str(source)] += 1
+        source_bits[_stable_scalar_text(source)] += 1
 
     return (
         int(due_m) & MASK64,
         int(sdc_m) & MASK64,
         int(unknown_m) & MASK64,
         int(masked_m) & MASK64,
-        {str(k): int(v) for k, v in sorted(source_bits.items())},
+        {_stable_scalar_text(k): int(v) for k, v in sorted(source_bits.items(), key=lambda item: _stable_scalar_text(item[0]))},
         int(trace_div_bits) & MASK64,
     )
 
@@ -7132,11 +7390,38 @@ def _classify_addr_masks_with_ranges(
         if oob_exception_policy is not None
         else None
     )
-    source_prefix_n = str(source_prefix).strip() or "addr"
+    source_prefix_n = _stable_scalar_text(source_prefix).strip() or "addr"
     cspace = canonical_space(mem_space)
     sel = int(selected_mask) & MASK64
     eff = int(effective_mask) & MASK64
     base_addr = int(addr) & int(eff if eff != 0 else MASK64)
+    access_size_i = max(1, int(access_size))
+    matching_addr_ranges: List[Tuple[int, int]] = []
+    has_matching_context = False
+    if cspace in ("global", "local", "shared", "const"):
+        # The address-fault bit loop mutates only the numeric address.  The
+        # memory space, dynamic context, and access size are invariant across all
+        # selected bits, so preselect the ranges whose context can apply once
+        # per site instead of redoing the same range/context scan for every
+        # bit.  This is algebraically identical to _addr_access_validity().
+        for entry in addr_ranges:
+            entry_space = entry.get("space", "")
+            if entry_space != cspace and canonical_space(entry_space) != cspace:
+                continue
+            if not _addr_range_context_match(
+                entry,
+                event_index=event_index,
+                cycle=cycle,
+                thread_id=thread_id,
+                cta_id=cta_id,
+                sm_id=sm_id,
+            ):
+                continue
+            has_matching_context = True
+            lo = int(entry.get("base", 0))
+            hi = int(lo + int(entry.get("size", 0)))
+            if hi > lo:
+                matching_addr_ranges.append((lo, hi))
     due_m = 0
     sdc_m = 0
     unknown_m = 0
@@ -7161,17 +7446,14 @@ def _classify_addr_masks_with_ranges(
                 cls = "masked"
                 source = f"{source_prefix_n}_masked"
             else:
-                valid, has_context = _addr_access_validity(
-                    ranges=addr_ranges,
-                    mem_space=mem_space,
-                    addr=mutated_addr,
-                    size_bytes=int(access_size),
-                    event_index=event_index,
-                    cycle=cycle,
-                    thread_id=thread_id,
-                    cta_id=cta_id,
-                    sm_id=sm_id,
-                )
+                has_context = bool(has_matching_context)
+                valid = False
+                if has_context:
+                    mutated_end = int(mutated_addr) + int(access_size_i)
+                    for lo, hi in matching_addr_ranges:
+                        if int(mutated_addr) >= int(lo) and int(mutated_end) <= int(hi):
+                            valid = True
+                            break
                 if has_context:
                     if valid:
                         if cspace == "shared" and live_addr_set is not None:
@@ -7181,7 +7463,7 @@ def _classify_addr_masks_with_ranges(
                             cls = "sdc"
                             source = f"{source_prefix_n}_alias_sdc"
                     elif oob_policy is not None:
-                        cls = str(oob_policy)
+                        cls = _stable_scalar_text(oob_policy)
                         source = f"{source_prefix_n}_oob_{cls}"
                     else:
                         cls = "due"
@@ -7195,7 +7477,7 @@ def _classify_addr_masks_with_ranges(
                         source = f"{source_prefix_n}_unknown_unbounded"
 
         if ((int(trace_mask) >> bit_idx) & 1) != 0 and cls == "masked" and trace_target != "masked":
-            cls = str(trace_target)
+            cls = _stable_scalar_text(trace_target)
             source = f"trace_divergence_{cls}"
             trace_div_bits |= int(one_bit)
 
@@ -7207,14 +7489,14 @@ def _classify_addr_masks_with_ranges(
             unknown_m |= int(one_bit)
         else:
             masked_m |= int(one_bit)
-        source_bits[str(source)] += 1
+        source_bits[_stable_scalar_text(source)] += 1
 
     return (
         int(due_m) & MASK64,
         int(sdc_m) & MASK64,
         int(unknown_m) & MASK64,
         int(masked_m) & MASK64,
-        {str(k): int(v) for k, v in sorted(source_bits.items())},
+        {_stable_scalar_text(k): int(v) for k, v in sorted(source_bits.items(), key=lambda item: _stable_scalar_text(item[0]))},
         int(trace_div_bits) & MASK64,
     )
 
@@ -7226,7 +7508,7 @@ def _build_shared_observed_addr_sets(
     for rec in smem_sites:
         if not isinstance(rec, dict):
             continue
-        if str(rec.get("site_kind", "")) not in ("smem_lds", "smem_rf"):
+        if _stable_scalar_text(rec.get("site_kind", "")) not in ("smem_lds", "smem_rf"):
             continue
         observed_mask = int(parse_mask(rec.get("observed_mask_this_site", 0))) & 0xFF
         if observed_mask == 0:
@@ -7247,7 +7529,7 @@ def _build_shared_escape_addr_sets(
     for rec in smem_sites:
         if not isinstance(rec, dict):
             continue
-        if str(rec.get("site_kind", "")) not in ("smem_lds", "smem_rf"):
+        if _stable_scalar_text(rec.get("site_kind", "")) not in ("smem_lds", "smem_rf"):
             continue
         shared_escape_mask = (
             int(parse_mask(rec.get("shared_store_escape_mask_this_site", 0))) & 0xFF
@@ -7317,7 +7599,7 @@ def _boundary_affected_prob_for_output(
 ) -> float:
     if same_cycle_effect_prob is not None:
         return float(same_cycle_effect_prob)
-    return 1.0 if str(consumer_compare).strip().lower() == "ge" else 0.0
+    return 1.0 if _stable_scalar_text(consumer_compare).strip().lower() == "ge" else 0.0
 
 
 def _boundary_meta_fields(
@@ -7425,9 +7707,9 @@ def _counts_to_rate_map(counts: Dict[str, float]) -> Dict[str, float]:
 def _normalize_fault_component_sequence(raw: str) -> List[str]:
     seen: Set[str] = set()
     out: List[str] = []
-    normalized = str(raw or "").replace(",", " ").replace(":", " ")
+    normalized = _stable_scalar_text(raw or "").replace(",", " ").replace(":", " ")
     for token in normalized.split():
-        comp = str(token).strip().lower()
+        comp = _stable_scalar_text(token).strip().lower()
         if not comp:
             continue
         if comp not in FAULT_COMPONENTS:
@@ -7449,7 +7731,7 @@ def _normalize_fault_component_sequence(raw: str) -> List[str]:
 def _parse_component_analyzer_mappings(entries: Sequence[str]) -> Dict[str, Path]:
     out: Dict[str, Path] = {}
     for raw in entries:
-        text = str(raw or "").strip()
+        text = _stable_scalar_text(raw or "").strip()
         if not text:
             continue
         comp_raw, sep, path_raw = text.partition("=")
@@ -7459,7 +7741,7 @@ def _parse_component_analyzer_mappings(entries: Sequence[str]) -> Dict[str, Path
                     text
                 )
             )
-        comp = str(comp_raw).strip().lower()
+        comp = _stable_scalar_text(comp_raw).strip().lower()
         if comp not in FAULT_COMPONENTS:
             raise ValueError(
                 "invalid --component-analyzer component {!r}; expected one of {}".format(
@@ -7467,12 +7749,12 @@ def _parse_component_analyzer_mappings(entries: Sequence[str]) -> Dict[str, Path
                     ", ".join(FAULT_COMPONENTS),
                 )
             )
-        path_text = str(path_raw).strip()
+        path_text = _stable_scalar_text(path_raw).strip()
         if not path_text:
             raise ValueError(
                 "invalid --component-analyzer entry {!r}; missing path".format(text)
             )
-        out[str(comp)] = Path(path_text)
+        out[_stable_scalar_text(comp)] = Path(path_text)
     return out
 
 
@@ -7484,10 +7766,10 @@ def _compute_exact_batch_component(
     out = finalize_exact_result(out, comp_args)
     _json_dump_path(Path(comp_args.output), out)
     return {
-        "fault_component": str(getattr(comp_args, "fault_component", "")),
-        "analyzer_output": str(Path(getattr(comp_args, "analyzer_output"))),
-        "output": str(Path(getattr(comp_args, "output"))),
-        "strict_fail_report": str(Path(getattr(comp_args, "strict_fail_report"))),
+        "fault_component": _stable_scalar_text(getattr(comp_args, "fault_component", "")),
+        "analyzer_output": _stable_scalar_text(Path(getattr(comp_args, "analyzer_output"))),
+        "output": _stable_scalar_text(Path(getattr(comp_args, "output"))),
+        "strict_fail_report": _stable_scalar_text(Path(getattr(comp_args, "strict_fail_report"))),
         "strict_ok": True,
         "strict_failed": False,
         "classification_counts": dict(
@@ -7503,56 +7785,66 @@ def _compute_exact_batch_component(
     }
 
 
-def _run_pickled_batch_component(argv: Sequence[str]) -> int:
+def _run_pickled_batch_components(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--_component-args-pickle", type=Path, required=True)
-    parser.add_argument("--_component-result-json", type=Path, required=True)
+    parser.add_argument("--_batch-args-pickle", type=Path, required=True)
+    parser.add_argument("--_batch-result-json", type=Path, required=True)
     args = parser.parse_args(list(argv))
-    with Path(args._component_args_pickle).open("rb") as handle:
-        comp_args = pickle.load(handle)
-    result = _compute_exact_batch_component(comp_args)
-    _json_dump_path(Path(args._component_result_json), result)
+    with Path(args._batch_args_pickle).open("rb") as handle:
+        component_args = pickle.load(handle)
+    if not isinstance(component_args, list):
+        raise ValueError("batch args pickle must contain a list")
+    results = []
+    for comp_args in component_args:
+        results.append(_compute_exact_batch_component(comp_args))
+    _json_dump_path(Path(args._batch_result_json), results)
     return 0
 
 
-def _compute_exact_batch_component_subprocess(
-    comp_args: argparse.Namespace,
+def _compute_exact_batch_components_subprocess(
+    component_args: Sequence[argparse.Namespace],
     *,
     scratch_dir: Path,
-) -> Dict[str, Any]:
-    """Run one batch component in a fresh interpreter, sequentially.
+) -> List[Dict[str, Any]]:
+    """Run all batch components in one fresh interpreter, sequentially.
 
-    The old batch path isolated component state in separate processes. Keep
-    that isolation without reintroducing concurrent component execution: the
-    parent starts exactly one child process,
-    waits for it, then moves to the next component.
+    This keeps the prior subprocess isolation from the parent process, but avoids
+    restarting Python and reloading the same trace/analyzer/cycle files once per
+    component. In-process loader caches can now be reused across rf/smem_rf/l1d/l2
+    while component execution remains strictly serial.
     """
 
     scratch_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-        prefix=f".exact_component_{getattr(comp_args, 'fault_component', 'component')}_",
-        dir=str(scratch_dir),
+        prefix=".exact_batch_",
+        dir=_stable_scalar_text(scratch_dir),
     ) as tmp_dir_raw:
         tmp_dir = Path(tmp_dir_raw)
-        args_pickle = tmp_dir / "args.pkl"
-        result_json = tmp_dir / "result.json"
+        args_pickle = tmp_dir / "batch_args.pkl"
+        result_json = tmp_dir / "batch_result.json"
         with args_pickle.open("wb") as handle:
-            pickle.dump(comp_args, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(list(component_args), handle, protocol=pickle.HIGHEST_PROTOCOL)
         subprocess.run(
             [
                 sys.executable,
-                str(Path(__file__).resolve()),
-                "--_component-args-pickle",
-                str(args_pickle),
-                "--_component-result-json",
-                str(result_json),
+                _stable_scalar_text(Path(__file__).resolve()),
+                "--_batch-args-pickle",
+                _stable_scalar_text(args_pickle),
+                "--_batch-result-json",
+                _stable_scalar_text(result_json),
             ],
             check=True,
         )
         result = _json_load_path(result_json)
-    if not isinstance(result, dict):
-        raise ValueError("batch component subprocess returned non-object result")
-    return result
+    if not isinstance(result, list):
+        raise ValueError("batch subprocess returned non-list result")
+    out: List[Dict[str, Any]] = []
+    for row in result:
+        if not isinstance(row, dict):
+            raise ValueError("batch subprocess returned non-object component result")
+        out.append(dict(row))
+    return out
+
 
 
 def compute_exact_batch(args: argparse.Namespace) -> Dict[str, Any]:
@@ -7571,7 +7863,7 @@ def compute_exact_batch(args: argparse.Namespace) -> Dict[str, Any]:
     strict_failed_components: List[str] = []
     component_args: List[argparse.Namespace] = []
     for comp in components:
-        comp_analyzer = analyzer_map.get(str(comp), default_analyzer)
+        comp_analyzer = analyzer_map.get(_stable_scalar_text(comp), default_analyzer)
         if comp_analyzer is None:
             raise ValueError(
                 "missing analyzer output for batch component {!r}; pass --analyzer-output "
@@ -7581,7 +7873,7 @@ def compute_exact_batch(args: argparse.Namespace) -> Dict[str, Any]:
         comp_report = output_dir / f"strict_fail_report_{comp}.json"
         comp_args = _clone_args_with(
             args,
-            fault_component=str(comp),
+            fault_component=_stable_scalar_text(comp),
             analyzer_output=Path(comp_analyzer),
             output=comp_output,
             strict_fail_report=comp_report,
@@ -7592,29 +7884,33 @@ def compute_exact_batch(args: argparse.Namespace) -> Dict[str, Any]:
         )
         component_args.append(comp_args)
 
-    subprocess_scratch_dir = output_dir / ".exact_component_subprocess"
-    results: List[Dict[str, Any]] = []
-    for comp_args in component_args:
-        results.append(
-            _compute_exact_batch_component_subprocess(
-                comp_args,
-                scratch_dir=subprocess_scratch_dir,
-            )
+    if _safe_env_bool_01("EXACT_BATCH_USE_SUBPROCESS", 0) == 1:
+        subprocess_scratch_dir = output_dir / ".exact_batch_subprocess"
+        results = _compute_exact_batch_components_subprocess(
+            component_args,
+            scratch_dir=subprocess_scratch_dir,
         )
+    else:
+        # Serial in-process batch execution avoids an extra Python interpreter,
+        # pickle round trip, and the observed nondeterministic child-process
+        # SIGSEGV on long all-application runs.  This does not introduce
+        # component parallelism: rf/smem/l1d/l2 still execute in the requested
+        # order, and loader/index caches are pure functions of their file paths.
+        results = [_compute_exact_batch_component(comp_args) for comp_args in component_args]
 
     for row in results:
-        comp = str(row.get("fault_component", "")).strip().lower()
+        comp = _stable_scalar_text(row.get("fault_component", "")).strip().lower()
         if not comp:
             raise ValueError("batch component result missing fault_component")
         if bool(row.pop("strict_failed", False)):
-            strict_failed_components.append(str(comp))
-        component_payloads[str(comp)] = dict(row)
+            strict_failed_components.append(_stable_scalar_text(comp))
+        component_payloads[_stable_scalar_text(comp)] = dict(row)
 
     return {
         "mode": "batch_exact_components",
         "components": component_payloads,
         "component_order": list(components),
-        "output_dir": str(output_dir),
+        "output_dir": _stable_scalar_text(output_dir),
         "strict_failed_components": list(strict_failed_components),
     }
 
@@ -7686,7 +7982,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
     rf_addr_source_reg_names, rf_addr_source_reg_uids = _extract_rf_addr_source_regs(
         rf_trace_template
     )
-    rf_addr_reg_policy_effective = str(rf_addr_reg_policy)
+    rf_addr_reg_policy_effective = _stable_scalar_text(rf_addr_reg_policy)
     rf_addr_reg_policy_warning = ""
     if (
         rf_addr_reg_policy_effective == "addr_regs_only"
@@ -7702,7 +7998,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
     def is_rf_addr_reg(label: str, uids: Sequence[int]) -> bool:
         if rf_addr_reg_policy_effective == "any_reg":
             return True
-        if str(label) in rf_addr_source_reg_names:
+        if _stable_scalar_text(label) in rf_addr_source_reg_names:
             return True
         for uid in uids:
             if int(uid) in rf_addr_source_reg_uids:
@@ -7752,7 +8048,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
                 _read_event_row_field(raw_rec, ADDR_STATIC_DUE_MASK_FIELD, 0),
                 analyzer_mask_format,
             )
-            if addr_due_mask == 0 and str(_read_event_row_field(raw_rec, "read_kind", "")).strip().lower() == "addr":
+            if addr_due_mask == 0 and _stable_scalar_text(_read_event_row_field(raw_rec, "read_kind", "")).strip().lower() == "addr":
                 addr_due_mask = _parse_mask_with_format(
                     _read_event_row_field(raw_rec, "due_mask_this_read", 0),
                     analyzer_mask_format,
@@ -7768,7 +8064,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
                 continue
             tid = int(_read_event_row_field(raw_rec, "thread_id", -1))
             cycle = int(_read_event_row_field(raw_rec, "cycle", 0))
-            reg = str(_read_event_row_field(raw_rec, "src_reg", ""))
+            reg = _stable_scalar_text(_read_event_row_field(raw_rec, "src_reg", ""))
             uid = int(_read_event_row_field(raw_rec, "src_reg_uid", -1))
             key_name = (tid, cycle, reg)
             rf_addr_due_observed_overlap_by_name[key_name] = (
@@ -7788,7 +8084,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
         args.cycles,
         args.active_threads_log,
         bool(getattr(args, "allow_missing_active_threads", False)),
-        str(getattr(args, "missing_active_threads_policy", "empty")),
+        _stable_scalar_text(getattr(args, "missing_active_threads_policy", "empty")),
     )
 
     register_labels = parse_register_list(args.registers)
@@ -7798,7 +8094,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
     datatype_bits = int(args.datatype_bits)
     if datatype_bits <= 0:
         raise ValueError("datatype_bits must be > 0")
-    trace_expanding_policy = str(args.trace_expanding_policy).strip().lower()
+    trace_expanding_policy = _stable_scalar_text(args.trace_expanding_policy).strip().lower()
     if trace_expanding_policy != CANONICAL_TRACE_EXPANDING_POLICY:
         raise ValueError(
             "trace_expanding_policy must be one of {}; got {!r}".format(
@@ -7809,7 +8105,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
     trace_uncovered_mode = _normalize_trace_uncovered_mode(
         getattr(args, "trace_uncovered_mode", "legacy_unknown")
     )
-    trace_expanding_resolution_mode = str(
+    trace_expanding_resolution_mode = _stable_scalar_text(
         getattr(args, "trace_expanding_resolution_mode", "legacy")
     ).strip().lower()
     if trace_expanding_resolution_mode != CANONICAL_TRACE_EXPANDING_RESOLUTION_MODE:
@@ -7843,6 +8139,20 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
     if thread_rands is None and thread_rand_max <= 0:
         raise ValueError("--thread-rand-max must be > 0 when --thread-rands is not set")
 
+    analyzer_exact_meta_for_uids = analyzer.get("exact_meta", {})
+    rf_register_uid_map_raw = (
+        analyzer_exact_meta_for_uids.get("rf_register_uid_map", {})
+        if isinstance(analyzer_exact_meta_for_uids, dict)
+        else {}
+    )
+    if isinstance(rf_register_uid_map_raw, Mapping):
+        for reg_name, raw_uids in rf_register_uid_map_raw.items():
+            if not isinstance(raw_uids, list):
+                continue
+            reg_to_uids.setdefault(_stable_scalar_text(reg_name), set()).update(
+                int(uid) for uid in raw_uids if int(uid) >= 0
+            )
+
     # register label -> uid set; if multiple uids share one label, injection
     # flips all of them (matching gpuFI register_name semantics).
     label_to_uids: Dict[str, List[int]] = {}
@@ -7861,12 +8171,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
         include_thread_ids=reads.keys(),
         prefix_only=True,
     )
-    thread_cycle_backend = (
-        "cpp" if _should_use_cpp_thread_cycle(cycle_records) else "python"
-    )
-    thread_cycle_backend = (
-        "cpp" if _should_use_cpp_thread_cycle(cycle_records) else "python"
-    )
+    thread_cycle_backend = "python"
     total_cycle_lines = sum(rec.multiplicity for rec in cycle_records)
     if total_cycle_lines <= 0:
         raise ValueError("cycle multiplicity total is zero")
@@ -7968,39 +8273,69 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
     boundary_bits_mass_total = 0
     saw_trace_selected_bits = False
     rf_interval_accum_backend_used = "none"
-    pending_rf_interval_reqs: List[Dict[str, Any]] = []
+    rf_interval_histogram_enabled = _safe_env_bool_01(
+        "SARA_RF_INTERVAL_HISTOGRAM", 1
+    ) == 1
+    pending_rf_interval_reqs: List[Any] = []
+    pending_rf_interval_hist: Dict[Tuple[int, ...], int] = {}
+    rf_interval_histogram_input_intervals = 0
+    rf_interval_histogram_unique_intervals = 0
+    rf_interval_histogram_elided_intervals = 0
     rf_grouped_final_mask_requests = 0
     rf_grouped_final_mask_hits = 0
     rf_grouped_consumer_signature_requests = 0
     rf_grouped_consumer_signature_hits = 0
+    rf_sdc_proof_source_signature_requests = 0
+    rf_sdc_proof_source_signature_hits = 0
+    rf_sdc_proof_source_bits_cache: Dict[
+        Tuple[int, Tuple[Tuple[str, int], ...]],
+        Tuple[Tuple[str, int], ...],
+    ] = {}
 
     def add_rf_sdc_proof_source_mass(
         mass: int,
         base_sdc_mask: int,
         source_masks: Mapping[str, int],
     ) -> None:
+        nonlocal rf_sdc_proof_source_signature_requests
+        nonlocal rf_sdc_proof_source_signature_hits
         selected_sdc = int(base_sdc_mask) & int(selected_bits_mask64) & MASK64
         if int(mass) <= 0 or selected_sdc == 0:
             return
-        disjoint = _disjoint_source_masks(
-            {
-                str(key): int(mask) & selected_sdc
+        source_signature = tuple(
+            sorted(
+                (
+                    _stable_scalar_text(key),
+                    int(mask) & selected_sdc & MASK64,
+                )
                 for key, mask in source_masks.items()
-                if int(mask) & selected_sdc
-            }
-        )
-        covered = 0
-        for source in RF_SDC_PROOF_SOURCE_KEYS:
-            mask_i = int(disjoint.get(source, 0)) & selected_sdc & MASK64
-            if mask_i == 0:
-                continue
-            covered |= mask_i
-            rf_sdc_proof_source_mass[source] += float(int(mass) * popcount_u64(mask_i))
-        residual = selected_sdc & (~covered) & MASK64
-        if residual:
-            rf_sdc_proof_source_mass["rf_other_exact_transfer"] += float(
-                int(mass) * popcount_u64(residual)
+                if int(mask) & selected_sdc & MASK64
             )
+        )
+        signature = (int(selected_sdc), source_signature)
+        rf_sdc_proof_source_signature_requests += 1
+        cached_bits = rf_sdc_proof_source_bits_cache.get(signature)
+        if cached_bits is None:
+            disjoint = _disjoint_source_masks(dict(source_signature))
+            covered = 0
+            bits_rows: List[Tuple[str, int]] = []
+            for source in RF_SDC_PROOF_SOURCE_KEYS:
+                mask_i = int(disjoint.get(source, 0)) & selected_sdc & MASK64
+                if mask_i == 0:
+                    continue
+                covered |= mask_i
+                bits_rows.append((_stable_scalar_text(source), int(popcount_u64(mask_i))))
+            residual = selected_sdc & (~covered) & MASK64
+            if residual:
+                bits_rows.append(("rf_other_exact_transfer", int(popcount_u64(residual))))
+            cached_bits = tuple(bits_rows)
+            rf_sdc_proof_source_bits_cache[signature] = cached_bits
+        else:
+            rf_sdc_proof_source_signature_hits += 1
+        for source, bits in cached_bits:
+            if int(bits) <= 0:
+                continue
+            rf_sdc_proof_source_mass[source] += float(int(mass) * int(bits))
 
     def apply_rf_interval_accum(accum: Mapping[str, Any]) -> None:
         nonlocal masked_num
@@ -8074,22 +8409,64 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
 
     def flush_rf_interval_accum() -> None:
         nonlocal rf_interval_accum_backend_used
-        if not pending_rf_interval_reqs:
-            return
-        pending = list(pending_rf_interval_reqs)
-        pending_rf_interval_reqs.clear()
-        accum = _cpp_rf_interval_accumulate_many(pending)
-        if accum is not None:
-            rf_interval_accum_backend_used = "cpp"
+        nonlocal rf_interval_histogram_unique_intervals
+        if rf_interval_histogram_enabled:
+            if not pending_rf_interval_hist:
+                return
+            pending = [
+                (int(mass), *signature)
+                for signature, mass in pending_rf_interval_hist.items()
+                if int(mass) > 0
+            ]
+            rf_interval_histogram_unique_intervals += int(len(pending))
+            pending_rf_interval_hist.clear()
         else:
-            accum = _python_rf_interval_accumulate_many(pending)
-            if rf_interval_accum_backend_used == "none":
-                rf_interval_accum_backend_used = "python"
+            if not pending_rf_interval_reqs:
+                return
+            pending = list(pending_rf_interval_reqs)
+            pending_rf_interval_reqs.clear()
+        accum = _python_rf_interval_accumulate_many(pending)
+        if rf_interval_accum_backend_used == "none":
+            rf_interval_accum_backend_used = (
+                "python_histogram" if rf_interval_histogram_enabled else "python"
+            )
         apply_rf_interval_accum(accum)
 
     def record_rf_interval(req: Dict[str, Any]) -> None:
+        nonlocal rf_interval_histogram_input_intervals
+        nonlocal rf_interval_histogram_elided_intervals
+        if rf_interval_histogram_enabled:
+            mass = int(req.get("mass", 0))
+            if mass <= 0:
+                return
+            signature = (
+                int(req.get("bit_count", 0)),
+                int(req.get("selected_mask", 0)) & MASK64,
+                int(req.get("due_mask", 0)) & MASK64,
+                int(req.get("sdc_mask", 0)) & MASK64,
+                int(req.get("unknown_mask", 0)) & MASK64,
+                int(req.get("trace_added_sdc_mask", 0)) & MASK64,
+                int(req.get("trace_policy_used_mask", 0)) & MASK64,
+                int(req.get("trace_policy_override_mask", 0)) & MASK64,
+                int(req.get("trace_mask", 0)) & MASK64,
+                int(req.get("semantic_due_mask", 0)) & MASK64,
+                int(req.get("addr_due_mask", 0)) & MASK64,
+                int(req.get("addr_sdc_mask", 0)) & MASK64,
+                int(req.get("addr_unknown_mask", 0)) & MASK64,
+                int(req.get("addr_trace_div_mask", 0)) & MASK64,
+                1 if bool(req.get("legacy_unknown_trace_uncovered", False)) else 0,
+            )
+            rf_interval_histogram_input_intervals += 1
+            if signature in pending_rf_interval_hist:
+                rf_interval_histogram_elided_intervals += 1
+                pending_rf_interval_hist[signature] += int(mass)
+            else:
+                pending_rf_interval_hist[signature] = int(mass)
+            if len(pending_rf_interval_hist) >= int(RF_INTERVAL_ACCUM_BATCH_SIZE):
+                flush_rf_interval_accum()
+            return
         pending_rf_interval_reqs.append(req)
-        if len(pending_rf_interval_reqs) >= int(_CPP_RF_INTERVAL_ACCUM_BATCH_SIZE):
+        if len(pending_rf_interval_reqs) >= int(RF_INTERVAL_ACCUM_BATCH_SIZE):
             flush_rf_interval_accum()
 
     ge_mode = args.consumer_compare == "ge"
@@ -8097,7 +8474,25 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
     min_cycle = -10**30
     max_cycle = 10**30
     rf_thread_ids = set(int(tid) for tid in thread_prefix.keys())
-    reads_by_uid = _invert_thread_reg_cycles(reads, valid_threads=rf_thread_ids)
+    raw_reads_by_uid = _invert_thread_reg_cycles(reads, valid_threads=rf_thread_ids)
+    raw_rf_read_cycle_count = _count_thread_reg_cycles(raw_reads_by_uid)
+    effective_read_pruning_enabled = (
+        persistent_rf_fault
+        and _safe_env_bool_01("SARA_RF_EFFECTIVE_READ_PRUNING", 1) == 1
+    )
+    if effective_read_pruning_enabled:
+        reads_by_uid = _build_persistent_rf_effective_reads_by_uid(
+            by_uid,
+            consumer_by_uid,
+            addr_static_due_by_uid,
+            valid_threads=rf_thread_ids,
+        )
+    else:
+        reads_by_uid = raw_reads_by_uid
+    effective_rf_read_cycle_count = _count_thread_reg_cycles(reads_by_uid)
+    pruned_rf_read_cycle_count = max(
+        0, int(raw_rf_read_cycle_count) - int(effective_rf_read_cycle_count)
+    )
     writes_by_uid = (
         _invert_thread_reg_cycles(writes, valid_threads=rf_thread_ids)
         if persistent_rf_fault
@@ -8353,9 +8748,9 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
                             for rec_fast in non_addr_fast_records
                         )
                     ),
-                    str(trace_expanding_policy),
-                    str(trace_uncovered_mode),
-                    str(trace_expanding_resolution_mode),
+                    _stable_scalar_text(trace_expanding_policy),
+                    _stable_scalar_text(trace_uncovered_mode),
+                    _stable_scalar_text(trace_expanding_resolution_mode),
                 )
                 cached_consumer_base = cache_consumer_base_masks_by_signature.get(
                     consumer_sig
@@ -8405,13 +8800,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
                 trace_policy_used_union |= int(trace_policy_used_i)
                 trace_union |= int(trace_mask_i)
                 trace_policy_override_union |= int(trace_policy_override_i)
-            for consumer, fast_rec in zip(non_addr_consumers, non_addr_fast_records):
-                masks_i = final_due_sdc_masks_with_meta_fast_extended(
-                    rec=fast_rec,
-                    trace_expanding_policy=trace_expanding_policy,
-                    trace_uncovered_mode=trace_uncovered_mode,
-                    trace_expanding_resolution_mode=trace_expanding_resolution_mode,
-                )
+            for consumer, masks_i in zip(non_addr_consumers, resolved_base_many):
                 sdc_mask_i = int(masks_i[1]) & MASK64
                 if sdc_mask_i == 0:
                     continue
@@ -8969,22 +9358,18 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
             "unknown": fraction(unknown_num, total_denominator),
         },
         "exact_meta": {
-            "cycles_file": str(args.cycles),
+            "cycles_file": _stable_scalar_text(args.cycles),
             "active_threads_log": (
-                str(args.active_threads_log) if args.active_threads_log is not None else None
+                _stable_scalar_text(args.active_threads_log) if args.active_threads_log is not None else None
             ),
             "thread_rand_max": thread_rand_max,
             "thread_rands": thread_rands if thread_rands is not None else "0..thread_rand_max-1",
-            "thread_cycle_backend_requested": (
-                "force"
-                if _CPP_THREAD_CYCLE_FORCE
-                else ("auto" if _CPP_THREAD_CYCLE_ENABLED else "disabled")
-            ),
-            "thread_cycle_backend_used": str(thread_cycle_backend),
+            "thread_cycle_backend_requested": "python",
+            "thread_cycle_backend_used": _stable_scalar_text(thread_cycle_backend),
             "register_count": reg_count,
             "rf_used_register_count": int(reg_count),
-            "rf_domain_policy": str(rf_domain_info.get("rf_domain_policy", "sampling_space")),
-            "rf_domain_source": str(rf_domain_info.get("rf_domain_source", "used")),
+            "rf_domain_policy": _stable_scalar_text(rf_domain_info.get("rf_domain_policy", "sampling_space")),
+            "rf_domain_source": _stable_scalar_text(rf_domain_info.get("rf_domain_source", "used")),
             "rf_domain_bits_per_seed_final": int(
                 rf_domain_info.get("rf_domain_bits_per_seed_final", reg_count * bit_count)
             ),
@@ -9017,8 +9402,16 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
             "datatype_bits": datatype_bits,
             "consumer_compare": args.consumer_compare,
             "rf_fault_model": args.rf_fault_model,
-            "rf_group_mode": str(storage_group_mode),
-            "rf_interval_accum_backend_used": str(rf_interval_accum_backend_used),
+            "rf_group_mode": _stable_scalar_text(storage_group_mode),
+            "rf_interval_accum_backend_used": _stable_scalar_text(rf_interval_accum_backend_used),
+            "rf_effective_read_pruning": bool(effective_read_pruning_enabled),
+            "rf_raw_read_cycle_count": int(raw_rf_read_cycle_count),
+            "rf_effective_read_cycle_count": int(effective_rf_read_cycle_count),
+            "rf_pruned_zero_effect_read_cycle_count": int(pruned_rf_read_cycle_count),
+            "rf_pruned_zero_effect_read_cycle_ratio": (
+                float(pruned_rf_read_cycle_count) / float(raw_rf_read_cycle_count)
+                if int(raw_rf_read_cycle_count) > 0 else 0.0
+            ),
             "rf_grouped_final_mask_requests": int(rf_grouped_final_mask_requests),
             "rf_grouped_final_mask_hits": int(rf_grouped_final_mask_hits),
             "rf_grouped_final_mask_entries": int(len(cache_final_masks_by_signature)),
@@ -9031,9 +9424,33 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
             "rf_grouped_consumer_signature_entries": int(
                 len(cache_consumer_base_masks_by_signature)
             ),
+            "rf_interval_histogram_enabled": bool(rf_interval_histogram_enabled),
+            "rf_interval_histogram_input_intervals": int(
+                rf_interval_histogram_input_intervals
+            ),
+            "rf_interval_histogram_unique_intervals": int(
+                rf_interval_histogram_unique_intervals
+            ),
+            "rf_interval_histogram_elided_intervals": int(
+                rf_interval_histogram_elided_intervals
+            ),
+            "rf_interval_histogram_elision_ratio": (
+                float(rf_interval_histogram_elided_intervals)
+                / float(rf_interval_histogram_input_intervals)
+                if int(rf_interval_histogram_input_intervals) > 0 else 0.0
+            ),
+            "rf_sdc_proof_source_signature_requests": int(
+                rf_sdc_proof_source_signature_requests
+            ),
+            "rf_sdc_proof_source_signature_hits": int(
+                rf_sdc_proof_source_signature_hits
+            ),
+            "rf_sdc_proof_source_signature_entries": int(
+                len(rf_sdc_proof_source_bits_cache)
+            ),
             "trace_expanding_policy": trace_expanding_policy,
-            "trace_expanding_resolution_mode": str(trace_expanding_resolution_mode),
-            "trace_uncovered_mode": str(trace_uncovered_mode),
+            "trace_expanding_resolution_mode": _stable_scalar_text(trace_expanding_resolution_mode),
+            "trace_uncovered_mode": _stable_scalar_text(trace_uncovered_mode),
             "trace_expanding_sdc_numerator": int(trace_expanding_sdc_numerator),
             "trace_policy_used_bits": int(trace_policy_used_bits),
             "trace_policy_used_mass": int(trace_policy_used_mass),
@@ -9088,15 +9505,15 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
             "due_source_bits": _mass_map_to_bits_map(rf_due_mass_by_source),
             "due_mass_by_source": _normalize_mass_map(rf_due_mass_by_source),
             "rf_due_bits_by_cause": dict(rf_due_bits_by_cause),
-            "rf_addr_reg_policy": str(rf_addr_reg_policy),
-            "rf_addr_reg_policy_effective": str(rf_addr_reg_policy_effective),
-            "rf_addr_reg_policy_warning": str(rf_addr_reg_policy_warning),
+            "rf_addr_reg_policy": _stable_scalar_text(rf_addr_reg_policy),
+            "rf_addr_reg_policy_effective": _stable_scalar_text(rf_addr_reg_policy_effective),
+            "rf_addr_reg_policy_warning": _stable_scalar_text(rf_addr_reg_policy_warning),
             "rf_addr_source_register_count": int(len(rf_addr_source_reg_names)),
             "rf_addr_source_uid_count": int(len(rf_addr_source_reg_uids)),
             "rf_addr_due_observed_overlap_bits": int(rf_addr_due_observed_overlap_bits),
             "rf_addr_due_observed_overlap_records": int(rf_addr_due_observed_overlap_records),
             **_boundary_meta_fields(
-                consumer_compare=str(args.consumer_compare),
+                consumer_compare=_stable_scalar_text(args.consumer_compare),
                 same_cycle_effect_prob=same_cycle_effect_prob,
                 boundary_events_count=int(boundary_events_count),
                 boundary_events_mass=float(boundary_events_mass),
@@ -9114,7 +9531,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
             "active_threads_empty_fill_cycles": int(
                 cycle_records_meta.get("active_threads_empty_fill_cycles", 0)
             ),
-            "missing_active_threads_policy": str(
+            "missing_active_threads_policy": _stable_scalar_text(
                 cycle_records_meta.get("missing_active_threads_policy", "empty")
             ),
             "semantic_error_reason_counts": dict(
@@ -9183,7 +9600,7 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
             "due_oracle_reason_details_top20": list(
                 analyzer_exact_meta.get("due_oracle_reason_details_top20", [])
             ),
-            "output_oracle_type": str(
+            "output_oracle_type": _stable_scalar_text(
                 analyzer_exact_meta.get("output_oracle_type", "")
             ),
             "output_oracle_has_output_spec": bool(
@@ -9212,18 +9629,6 @@ def compute_exact_rf(args: argparse.Namespace) -> Dict[str, Any]:
             ),
             "addr_observed_seed_suppressed_events": int(
                 analyzer_exact_meta.get("addr_observed_seed_suppressed_events", 0)
-            ),
-            "tol_output_store_seed_count": int(
-                analyzer_exact_meta.get("tol_output_store_seed_count", 0)
-            ),
-            "tol_float_backward_op_count": int(
-                analyzer_exact_meta.get("tol_float_backward_op_count", 0)
-            ),
-            "tol_memory_forward_byte_count": int(
-                analyzer_exact_meta.get("tol_memory_forward_byte_count", 0)
-            ),
-            "tol_fallback_count": int(
-                analyzer_exact_meta.get("tol_fallback_count", 0)
             ),
             "inactive_base_mass": int(inactive_base_mass),
             "active_base_mass": int(active_base_mass),
@@ -9280,14 +9685,14 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
         args.cycles,
         args.active_threads_log,
         bool(getattr(args, "allow_missing_active_threads", False)),
-        str(getattr(args, "missing_active_threads_policy", "empty")),
+        _stable_scalar_text(getattr(args, "missing_active_threads_policy", "empty")),
     )
     shared_scope_thread_ids_by_cycle: Dict[int, Tuple[int, ...]] = {}
     if args.active_threads_log is not None:
         shared_scope_thread_ids_by_cycle = load_shared_scope_thread_ids_log(
             args.active_threads_log
         )
-    trace_expanding_policy = str(args.trace_expanding_policy).strip().lower()
+    trace_expanding_policy = _stable_scalar_text(args.trace_expanding_policy).strip().lower()
     if trace_expanding_policy != CANONICAL_TRACE_EXPANDING_POLICY:
         raise ValueError(
             "trace_expanding_policy must be one of {}; got {!r}".format(
@@ -9298,7 +9703,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
     trace_uncovered_mode = _normalize_trace_uncovered_mode(
         getattr(args, "trace_uncovered_mode", "legacy_unknown")
     )
-    trace_expanding_resolution_mode = str(
+    trace_expanding_resolution_mode = _stable_scalar_text(
         getattr(args, "trace_expanding_resolution_mode", "legacy")
     ).strip().lower()
     if trace_expanding_resolution_mode != CANONICAL_TRACE_EXPANDING_RESOLUTION_MODE:
@@ -9327,7 +9732,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
         getattr(args, "smem_domain_policy", "sampling_space")
     )
     fi_space = _load_fi_sampling_space(getattr(args, "fi_sampling_space_path", None))
-    ge_mode = str(args.consumer_compare).strip().lower() == "ge"
+    ge_mode = _stable_scalar_text(args.consumer_compare).strip().lower() == "ge"
     same_cycle_effect_prob = _normalize_same_cycle_effect_prob(
         getattr(args, "same_cycle_effect_prob", None)
     )
@@ -9373,9 +9778,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
         inactive_base_mass,
         active_base_mass,
     ) = _thread_cycle_weights(cycle_records, thread_rands, thread_rand_max)
-    thread_cycle_backend = (
-        "cpp" if _should_use_cpp_thread_cycle(cycle_records) else "python"
-    )
+    thread_cycle_backend = "python"
 
     scope_cycle_weights: Dict[Tuple[int, int], Dict[int, int]] = {}
     scope_prefix: Dict[Tuple[int, int], Tuple[List[int], List[int], int]] = {}
@@ -9491,17 +9894,17 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
             )
         smem_site_mask_signature_requests += 1
         sig = (
-            str(rec.get("site_kind", "")),
-            int(rec.get("width_bits", 0)),
-            int(parse_mask(rec.get("observed_mask_this_site", 0))) & MASK64,
-            int(parse_mask(rec.get("due_mask_this_site", 0))) & MASK64,
-            int(parse_mask(rec.get("trace_expanding_mask_this_site", 0))) & MASK64,
-            int(parse_mask(rec.get("semantic_masked_mask_this_site", 0))) & MASK64,
-            int(parse_mask(rec.get("semantic_sdc_mask_this_site", 0))) & MASK64,
-            int(parse_mask(rec.get("semantic_due_mask_this_site", 0))) & MASK64,
-            str(trace_expanding_policy),
-            str(trace_uncovered_mode),
-            str(trace_expanding_resolution_mode),
+            _stable_scalar_text(_smem_site_row_field(rec, "site_kind", "")),
+            int(_smem_site_row_field(rec, "width_bits", 0)),
+            int(parse_mask(_smem_site_row_field(rec, "observed_mask_this_site", 0))) & MASK64,
+            int(parse_mask(_smem_site_row_field(rec, "due_mask_this_site", 0))) & MASK64,
+            int(parse_mask(_smem_site_row_field(rec, "trace_expanding_mask_this_site", 0))) & MASK64,
+            int(parse_mask(_smem_site_row_field(rec, "semantic_masked_mask_this_site", 0))) & MASK64,
+            int(parse_mask(_smem_site_row_field(rec, "semantic_sdc_mask_this_site", 0))) & MASK64,
+            int(parse_mask(_smem_site_row_field(rec, "semantic_due_mask_this_site", 0))) & MASK64,
+            _stable_scalar_text(trace_expanding_policy),
+            _stable_scalar_text(trace_uncovered_mode),
+            _stable_scalar_text(trace_expanding_resolution_mode),
         )
         cached_masks = smem_site_mask_signature_cache.get(sig)
         if cached_masks is not None:
@@ -9518,7 +9921,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
 
     if fault_component == "smem_lds":
         for rec in smem_sites:
-            if str(rec.get("site_kind", "")) != "smem_lds":
+            if _stable_scalar_text(rec.get("site_kind", "")) != "smem_lds":
                 continue
             tid = int(rec.get("thread_id", -1))
             cycle = int(rec.get("cycle", -1))
@@ -9646,7 +10049,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
                     addr=int(rec.get("addr", 0)),
                     selected_mask=int(selected_addr_bits_mask),
                     effective_mask=int(effective_mask),
-                    mem_space=str(
+                    mem_space=_stable_scalar_text(
                         canonical_space(rec.get("mem_space", "shared")) or "shared"
                     ),
                     access_size=int(access_size),
@@ -9666,7 +10069,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
                             int(rec.get("cta_id", -1)),
                         )
                     ),
-                    oob_exception_policy=str(smem_addr_exception_policy),
+                    oob_exception_policy=_stable_scalar_text(smem_addr_exception_policy),
                     source_prefix="smem_addr",
                 )
                 addr_due_bits = popcount_u64(int(addr_due_mask) & int(selected_addr_bits_mask))
@@ -9680,7 +10083,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
                 for skey, sval in addr_source_bits.items():
                     _add_source_mass(
                         due_source_mass,
-                        str(skey),
+                        _stable_scalar_text(skey),
                         float(int(mass) * int(sval)),
                     )
                 addr_trace_div_bits = popcount_u64(
@@ -9699,7 +10102,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
         ] = {}
 
         for rec in smem_sites:
-            site_kind = str(rec.get("site_kind", ""))
+            site_kind = _stable_scalar_text(rec.get("site_kind", ""))
             if site_kind == "smem_rf":
                 sm_id = rec.get("sm_id")
                 cta_id = rec.get("cta_id")
@@ -9741,19 +10144,19 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
                     else:
                         store_semantic_by_scope_addr_cycle[key] = {
                             "semantic_masked": (
-                                int(prev_store_masks.get("semantic_masked", 0))
+                                int(_mapping_get(prev_store_masks, "semantic_masked", 0))
                                 | int(semantic_masked_mask)
                             ) & 0xFF,
                             "semantic_sdc": (
-                                int(prev_store_masks.get("semantic_sdc", 0))
+                                int(_mapping_get(prev_store_masks, "semantic_sdc", 0))
                                 | int(semantic_sdc_mask)
                             ) & 0xFF,
                             "semantic_due": (
-                                int(prev_store_masks.get("semantic_due", 0))
+                                int(_mapping_get(prev_store_masks, "semantic_due", 0))
                                 | int(semantic_due_mask)
                             ) & 0xFF,
                             "semantic_unknown": (
-                                int(prev_store_masks.get("semantic_unknown", 0))
+                                int(_mapping_get(prev_store_masks, "semantic_unknown", 0))
                                 | int(semantic_unknown_mask)
                             ) & 0xFF,
                         }
@@ -9803,80 +10206,88 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
                 semantic_sdc_mask &= (~semantic_due_mask) & 0xFF
                 semantic_sdc_mask &= (~int(unknown_mask)) & 0xFF
 
-            event_index = int(rec.get("event_index", -1))
-            raw_ev_for_addr = event_by_index.get(event_index, {})
-            if raw_ev_for_addr:
-                effective_mask = _event_effective_address_mask_from_raw(raw_ev_for_addr)
-            else:
-                effective_mask = _event_effective_address_mask_from_raw(
-                    {"mem_space": rec.get("mem_space", "shared")}
-                )
-            (
-                selected_addr_bits_mask,
-                addr_bits_count,
-                addr_effective_bits,
-            ) = _resolve_selected_addr_bits(
-                effective_mask=int(effective_mask),
-                addr_bits_mode=addr_bits_mode,
-                addr_bits_explicit=addr_bits_explicit,
-            )
-            if int(addr_effective_bits) > 0:
-                addr_effective_bits_seen.add(int(addr_effective_bits))
-            addr_bits_count_seen.add(int(addr_bits_count))
-            (
-                addr_due_mask,
-                addr_sdc_mask,
-                addr_unknown_mask,
-                _addr_masked_mask,
-                addr_source_bits,
-                addr_trace_div_mask,
-            ) = _classify_addr_masks_with_ranges(
-                addr=int(rec.get("addr", 0)),
-                selected_mask=int(selected_addr_bits_mask),
-                effective_mask=int(effective_mask),
-                mem_space=str(
-                    canonical_space(rec.get("mem_space", "shared")) or "shared"
-                ),
-                access_size=max(1, int(rec.get("width_bits", 8)) // 8),
-                event_index=(
-                    int(event_index) if int(event_index) >= 0 else None
-                ),
-                cycle=int(rec.get("cycle", -1)) if int(rec.get("cycle", -1)) >= 0 else None,
-                thread_id=(
-                    int(rec.get("thread_id", -1))
-                    if int(rec.get("thread_id", -1)) >= 0
-                    else None
-                ),
-                cta_id=(
-                    int(rec.get("cta_id", -1)) if int(rec.get("cta_id", -1)) >= 0 else None
-                ),
-                sm_id=(
-                    int(rec.get("sm_id", -1)) if int(rec.get("sm_id", -1)) >= 0 else None
-                ),
-                addr_ranges=addr_ranges,
-                addr_fault_policy=addr_fault_policy,
-                addr_due_mode=addr_due_mode,
-                trace_mask=int(trace_mask_this_site),
-                trace_divergence_policy=trace_divergence_policy,
-                live_addr_set=shared_live_target_addr_sets.get(
-                    (
-                        int(rec.get("sm_id", -1)),
-                        int(rec.get("cta_id", -1)),
+            selected_addr_bits_mask = 0
+            addr_due_mask = 0
+            addr_sdc_mask = 0
+            addr_unknown_mask = 0
+            addr_trace_div_mask = 0
+            addr_oob_due_mask = 0
+            addr_alias_sdc_mask = 0
+            if addr_domain_enabled:
+                event_index = int(rec.get("event_index", -1))
+                raw_ev_for_addr = event_by_index.get(event_index, {})
+                if raw_ev_for_addr:
+                    effective_mask = _event_effective_address_mask_from_raw(raw_ev_for_addr)
+                else:
+                    effective_mask = _event_effective_address_mask_from_raw(
+                        {"mem_space": rec.get("mem_space", "shared")}
                     )
-                ),
-                oob_exception_policy=str(smem_addr_exception_policy),
-                source_prefix="smem_addr",
-            )
-            addr_oob_due_mask = (
-                int(addr_due_mask)
-                if int(addr_source_bits.get("smem_addr_oob_due", 0)) > 0
-                else 0
-            ) & MASK64
-            addr_alias_sdc_mask = (
-                int(addr_sdc_mask)
-                if int(addr_source_bits.get("smem_addr_alias_sdc", 0)) > 0
-                else 0
-            ) & MASK64
+                (
+                    selected_addr_bits_mask,
+                    addr_bits_count,
+                    addr_effective_bits,
+                ) = _resolve_selected_addr_bits(
+                    effective_mask=int(effective_mask),
+                    addr_bits_mode=addr_bits_mode,
+                    addr_bits_explicit=addr_bits_explicit,
+                )
+                if int(addr_effective_bits) > 0:
+                    addr_effective_bits_seen.add(int(addr_effective_bits))
+                addr_bits_count_seen.add(int(addr_bits_count))
+                (
+                    addr_due_mask,
+                    addr_sdc_mask,
+                    addr_unknown_mask,
+                    _addr_masked_mask,
+                    addr_source_bits,
+                    addr_trace_div_mask,
+                ) = _classify_addr_masks_with_ranges(
+                    addr=int(rec.get("addr", 0)),
+                    selected_mask=int(selected_addr_bits_mask),
+                    effective_mask=int(effective_mask),
+                    mem_space=_stable_scalar_text(
+                        canonical_space(rec.get("mem_space", "shared")) or "shared"
+                    ),
+                    access_size=max(1, int(rec.get("width_bits", 8)) // 8),
+                    event_index=(
+                        int(event_index) if int(event_index) >= 0 else None
+                    ),
+                    cycle=int(rec.get("cycle", -1)) if int(rec.get("cycle", -1)) >= 0 else None,
+                    thread_id=(
+                        int(rec.get("thread_id", -1))
+                        if int(rec.get("thread_id", -1)) >= 0
+                        else None
+                    ),
+                    cta_id=(
+                        int(rec.get("cta_id", -1)) if int(rec.get("cta_id", -1)) >= 0 else None
+                    ),
+                    sm_id=(
+                        int(rec.get("sm_id", -1)) if int(rec.get("sm_id", -1)) >= 0 else None
+                    ),
+                    addr_ranges=addr_ranges,
+                    addr_fault_policy=addr_fault_policy,
+                    addr_due_mode=addr_due_mode,
+                    trace_mask=int(trace_mask_this_site),
+                    trace_divergence_policy=trace_divergence_policy,
+                    live_addr_set=shared_live_target_addr_sets.get(
+                        (
+                            int(rec.get("sm_id", -1)),
+                            int(rec.get("cta_id", -1)),
+                        )
+                    ),
+                    oob_exception_policy=_stable_scalar_text(smem_addr_exception_policy),
+                    source_prefix="smem_addr",
+                )
+                addr_oob_due_mask = (
+                    int(addr_due_mask)
+                    if int(_mapping_get(addr_source_bits, "smem_addr_oob_due", 0)) > 0
+                    else 0
+                ) & MASK64
+                addr_alias_sdc_mask = (
+                    int(addr_sdc_mask)
+                    if int(_mapping_get(addr_source_bits, "smem_addr_alias_sdc", 0)) > 0
+                    else 0
+                ) & MASK64
 
             prev = load_masks_by_scope_addr_cycle.get(key)
             if prev is None:
@@ -9899,42 +10310,42 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
                 }
             else:
                 load_masks_by_scope_addr_cycle[key] = {
-                    "due": (int(prev.get("due", 0)) | int(due_mask)) & 0xFF,
-                    "sdc": (int(prev.get("sdc", 0)) | int(sdc_mask)) & 0xFF,
-                    "unknown": (int(prev.get("unknown", 0)) | int(unknown_mask)) & 0xFF,
+                    "due": (int(_mapping_get(prev, "due", 0)) | int(due_mask)) & 0xFF,
+                    "sdc": (int(_mapping_get(prev, "sdc", 0)) | int(sdc_mask)) & 0xFF,
+                    "unknown": (int(_mapping_get(prev, "unknown", 0)) | int(unknown_mask)) & 0xFF,
                     "semantic_sdc": (
-                        int(prev.get("semantic_sdc", 0)) | int(semantic_sdc_mask)
+                        int(_mapping_get(prev, "semantic_sdc", 0)) | int(semantic_sdc_mask)
                     ) & 0xFF,
                     "semantic_due": (
-                        int(prev.get("semantic_due", 0)) | int(semantic_due_mask)
+                        int(_mapping_get(prev, "semantic_due", 0)) | int(semantic_due_mask)
                     ) & 0xFF,
                     "trace_policy_used": (
-                        int(prev.get("trace_policy_used", 0)) | int(trace_policy_used_mask)
+                        int(_mapping_get(prev, "trace_policy_used", 0)) | int(trace_policy_used_mask)
                     ) & 0xFF,
                     "trace_policy_override": (
-                        int(prev.get("trace_policy_override", 0))
+                        int(_mapping_get(prev, "trace_policy_override", 0))
                         | int(trace_policy_override_mask)
                     ) & 0xFF,
                     "trace_div": (
-                        int(prev.get("trace_div", 0)) | int(trace_div_mask_this_site)
+                        int(_mapping_get(prev, "trace_div", 0)) | int(trace_div_mask_this_site)
                     ) & 0xFF,
                     "addr_selected_mask": (
-                        int(prev.get("addr_selected_mask", 0))
+                        int(_mapping_get(prev, "addr_selected_mask", 0))
                         | int(selected_addr_bits_mask)
                     ) & MASK64,
-                    "addr_due": (int(prev.get("addr_due", 0)) | int(addr_due_mask)) & MASK64,
-                    "addr_sdc": (int(prev.get("addr_sdc", 0)) | int(addr_sdc_mask)) & MASK64,
+                    "addr_due": (int(_mapping_get(prev, "addr_due", 0)) | int(addr_due_mask)) & MASK64,
+                    "addr_sdc": (int(_mapping_get(prev, "addr_sdc", 0)) | int(addr_sdc_mask)) & MASK64,
                     "addr_unknown": (
-                        int(prev.get("addr_unknown", 0)) | int(addr_unknown_mask)
+                        int(_mapping_get(prev, "addr_unknown", 0)) | int(addr_unknown_mask)
                     ) & MASK64,
                     "addr_trace_div": (
-                        int(prev.get("addr_trace_div", 0)) | int(addr_trace_div_mask)
+                        int(_mapping_get(prev, "addr_trace_div", 0)) | int(addr_trace_div_mask)
                     ) & MASK64,
                     "addr_oob_due": (
-                        int(prev.get("addr_oob_due", 0)) | int(addr_oob_due_mask)
+                        int(_mapping_get(prev, "addr_oob_due", 0)) | int(addr_oob_due_mask)
                     ) & MASK64,
                     "addr_alias_sdc": (
-                        int(prev.get("addr_alias_sdc", 0)) | int(addr_alias_sdc_mask)
+                        int(_mapping_get(prev, "addr_alias_sdc", 0)) | int(addr_alias_sdc_mask)
                     ) & MASK64,
                 }
 
@@ -10082,11 +10493,11 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
                             {},
                         )
 
-                        load_due_mask = int(load_row.get("due", 0)) & 0xFF
-                        load_sdc_mask = int(load_row.get("sdc", 0)) & 0xFF
-                        load_unknown_mask = int(load_row.get("unknown", 0)) & 0xFF
-                        load_semantic_sdc_mask = int(load_row.get("semantic_sdc", 0)) & 0xFF
-                        load_semantic_due_mask = int(load_row.get("semantic_due", 0)) & 0xFF
+                        load_due_mask = int(_mapping_get(load_row, "due", 0)) & 0xFF
+                        load_sdc_mask = int(_mapping_get(load_row, "sdc", 0)) & 0xFF
+                        load_unknown_mask = int(_mapping_get(load_row, "unknown", 0)) & 0xFF
+                        load_semantic_sdc_mask = int(_mapping_get(load_row, "semantic_sdc", 0)) & 0xFF
+                        load_semantic_due_mask = int(_mapping_get(load_row, "semantic_due", 0)) & 0xFF
                         event_due_mask = int(load_due_mask) & 0xFF
                         event_unknown_mask = int(load_unknown_mask) & 0xFF
                         event_semantic_due_mask = int(load_semantic_due_mask) & 0xFF
@@ -10106,28 +10517,28 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
                         event_semantic_due_mask &= int(event_due_mask) & 0xFF
 
                         trace_policy_used_mask = (
-                            int(load_row.get("trace_policy_used", 0)) & 0xFF
+                            int(_mapping_get(load_row, "trace_policy_used", 0)) & 0xFF
                         )
                         trace_policy_override_mask = int(
-                            load_row.get("trace_policy_override", 0)
+                            _mapping_get(load_row, "trace_policy_override", 0)
                         ) & 0xFF
-                        trace_div_mask = int(load_row.get("trace_div", 0)) & 0xFF
+                        trace_div_mask = int(_mapping_get(load_row, "trace_div", 0)) & 0xFF
                         addr_selected_mask = (
-                            int(load_row.get("addr_selected_mask", 0)) & MASK64
+                            int(_mapping_get(load_row, "addr_selected_mask", 0)) & MASK64
                         )
-                        addr_due_mask = int(load_row.get("addr_due", 0)) & MASK64
-                        addr_sdc_mask = int(load_row.get("addr_sdc", 0)) & MASK64
+                        addr_due_mask = int(_mapping_get(load_row, "addr_due", 0)) & MASK64
+                        addr_sdc_mask = int(_mapping_get(load_row, "addr_sdc", 0)) & MASK64
                         addr_unknown_mask = (
-                            int(load_row.get("addr_unknown", 0)) & MASK64
+                            int(_mapping_get(load_row, "addr_unknown", 0)) & MASK64
                         )
                         addr_oob_due_mask = (
-                            int(load_row.get("addr_oob_due", 0)) & MASK64
+                            int(_mapping_get(load_row, "addr_oob_due", 0)) & MASK64
                         )
                         addr_alias_sdc_mask = (
-                            int(load_row.get("addr_alias_sdc", 0)) & MASK64
+                            int(_mapping_get(load_row, "addr_alias_sdc", 0)) & MASK64
                         )
                         addr_trace_div_mask = (
-                            int(load_row.get("addr_trace_div", 0)) & MASK64
+                            int(_mapping_get(load_row, "addr_trace_div", 0)) & MASK64
                         )
 
                         suffix_due[idx] = int(suffix_due[idx + 1]) | int(event_due_mask)
@@ -10471,7 +10882,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
                 f"{masked_addr_num}"
             )
 
-    smem_error_propagation_model = str(
+    smem_error_propagation_model = _stable_scalar_text(
         getattr(args, "smem_error_propagation_model", CANONICAL_SMEM_ERROR_PROPAGATION_MODEL)
     )
     smem_sdc_mass_before = max(
@@ -10523,8 +10934,8 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
                 "due": _normalize_numeric(due_addr_num),
                 "unknown": _normalize_numeric(unknown_addr_num),
                 "den": int(addr_denominator),
-                "policy": str(addr_fault_policy),
-                "addr_due_mode": str(addr_due_mode),
+                "policy": _stable_scalar_text(addr_fault_policy),
+                "addr_due_mode": _stable_scalar_text(addr_due_mode),
             },
         },
     }
@@ -10588,32 +10999,28 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
             }
         },
         "exact_meta": {
-            "fault_component": str(fault_component),
-            "cycles_file": str(args.cycles),
+            "fault_component": _stable_scalar_text(fault_component),
+            "cycles_file": _stable_scalar_text(args.cycles),
             "active_threads_log": (
-                str(args.active_threads_log) if args.active_threads_log is not None else None
+                _stable_scalar_text(args.active_threads_log) if args.active_threads_log is not None else None
             ),
-            "trace_template": str(args.trace_template),
+            "trace_template": _stable_scalar_text(args.trace_template),
             "thread_rand_max": thread_rand_max,
             "thread_rands": thread_rands if thread_rands is not None else "0..thread_rand_max-1",
-            "thread_cycle_backend_requested": (
-                "force"
-                if _CPP_THREAD_CYCLE_FORCE
-                else ("auto" if _CPP_THREAD_CYCLE_ENABLED else "disabled")
-            ),
-            "thread_cycle_backend_used": str(thread_cycle_backend),
+            "thread_cycle_backend_requested": "python",
+            "thread_cycle_backend_used": _stable_scalar_text(thread_cycle_backend),
             "block_rand_max": int(block_rand_max) if block_rand_max is not None else None,
             "block_rands": block_rands if block_rands is not None else "0..block_rand_max-1",
             "block_seed_domain_size": int(block_seed_domain_size),
             "smem_size_bits": int(smem_size_bits),
             "smem_selected_bit_domain_size": int(smem_selected_bit_domain_size),
-            "smem_domain_policy": str(smem_domain_policy),
+            "smem_domain_policy": _stable_scalar_text(smem_domain_policy),
             "smem_domain_bits_per_seed_final": int(
                 smem_domain_diag.get("smem_domain_bits_per_seed_final", smem_size_bits)
             ),
             "smem_domain_total_bits_final": int(smem_domain_total_bits_final),
-            "smem_domain_units": str(smem_domain_diag.get("smem_domain_units", "bits")),
-            "smem_size_bits_source": str(smem_domain_diag.get("smem_size_bits_source", "")),
+            "smem_domain_units": _stable_scalar_text(smem_domain_diag.get("smem_domain_units", "bits")),
+            "smem_size_bits_source": _stable_scalar_text(smem_domain_diag.get("smem_size_bits_source", "")),
             "smem_size_bits_final": int(smem_domain_diag.get("smem_size_bits_final", smem_size_bits)),
             "smem_hw_size_bits": int(smem_domain_diag.get("smem_hw_size_bits", 0)),
             "smem_allocated_bits": int(smem_domain_diag.get("smem_allocated_bits", 0)),
@@ -10624,7 +11031,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
             "smem_sampling_space_total_bits": int(
                 smem_domain_diag.get("smem_sampling_space_total_bits", 0)
             ),
-            "smem_error_propagation_model": str(smem_error_propagation_model),
+            "smem_error_propagation_model": _stable_scalar_text(smem_error_propagation_model),
             "smem_memory_block_bytes": int(SMEM_MEMORY_BLOCK_BYTES),
             "smem_bit_index_realization": "gpgpusim_64bit_word_update",
             "smem_bit_index_boundary_aliasing": True,
@@ -10654,8 +11061,8 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
             ),
             "bit_count": int(bit_count),
             "datatype_bits": int(datatype_bits),
-            "consumer_compare": str(args.consumer_compare),
-            "smem_group_mode": str(storage_group_mode),
+            "consumer_compare": _stable_scalar_text(args.consumer_compare),
+            "smem_group_mode": _stable_scalar_text(storage_group_mode),
             "smem_site_mask_signature_requests": int(
                 smem_site_mask_signature_requests
             ),
@@ -10663,19 +11070,19 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
             "smem_site_mask_signature_entries": int(
                 len(smem_site_mask_signature_cache)
             ),
-            "trace_expanding_policy": str(trace_expanding_policy),
-            "trace_expanding_resolution_mode": str(trace_expanding_resolution_mode),
-            "trace_uncovered_mode": str(trace_uncovered_mode),
-            "trace_divergence_policy": str(trace_divergence_policy),
-            "addr_fault_policy": str(addr_fault_policy),
-            "addr_due_mode": str(addr_due_mode),
-            "addr_bits_mode": str(addr_bits_mode),
+            "trace_expanding_policy": _stable_scalar_text(trace_expanding_policy),
+            "trace_expanding_resolution_mode": _stable_scalar_text(trace_expanding_resolution_mode),
+            "trace_uncovered_mode": _stable_scalar_text(trace_uncovered_mode),
+            "trace_divergence_policy": _stable_scalar_text(trace_divergence_policy),
+            "addr_fault_policy": _stable_scalar_text(addr_fault_policy),
+            "addr_due_mode": _stable_scalar_text(addr_due_mode),
+            "addr_bits_mode": _stable_scalar_text(addr_bits_mode),
             "addr_bits_count": int(addr_bits_count_value),
             "addr_effective_bits": addr_effective_bits_value,
             "addr_effective_bits_max": (
                 int(max(addr_effective_bits_seen)) if addr_effective_bits_seen else 0
             ),
-            "smem_addr_exception_policy": str(smem_addr_exception_policy),
+            "smem_addr_exception_policy": _stable_scalar_text(smem_addr_exception_policy),
             "trace_policy_used_bits": int(trace_policy_used_bits),
             "trace_policy_used_mass": _normalize_numeric(trace_policy_used_mass),
             "trace_policy_override_bits": int(trace_policy_override_bits),
@@ -10716,7 +11123,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
             "due_source_bits": _mass_map_to_bits_map(due_source_mass),
             "due_mass_by_source": _normalize_mass_map(due_source_mass),
             **_boundary_meta_fields(
-                consumer_compare=str(args.consumer_compare),
+                consumer_compare=_stable_scalar_text(args.consumer_compare),
                 same_cycle_effect_prob=same_cycle_effect_prob,
                 boundary_events_count=int(boundary_events_count),
                 boundary_events_mass=float(boundary_events_mass),
@@ -10734,16 +11141,16 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
             "active_threads_empty_fill_cycles": int(
                 cycle_records_meta.get("active_threads_empty_fill_cycles", 0)
             ),
-            "missing_active_threads_policy": str(
+            "missing_active_threads_policy": _stable_scalar_text(
                 cycle_records_meta.get("missing_active_threads_policy", "empty")
             ),
             "addr_valid_ranges_path": (
-                str(args.addr_valid_ranges_path)
+                _stable_scalar_text(args.addr_valid_ranges_path)
                 if getattr(args, "addr_valid_ranges_path", None) is not None
                 else None
             ),
             "addr_valid_range_count": int(len(addr_ranges)),
-            "smem_addr_range_source": str(smem_addr_ranges_source),
+            "smem_addr_range_source": _stable_scalar_text(smem_addr_ranges_source),
             "seed_domain_size": int(seed_domain_size),
             "inactive_base_mass": int(inactive_base_mass),
             "active_base_mass": int(active_base_mass),
@@ -10813,7 +11220,7 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
             "due_oracle_reason_details_top20": list(
                 analyzer_exact_meta.get("due_oracle_reason_details_top20", [])
             ),
-            "output_oracle_type": str(
+            "output_oracle_type": _stable_scalar_text(
                 analyzer_exact_meta.get("output_oracle_type", "")
             ),
             "output_oracle_has_output_spec": bool(
@@ -10843,29 +11250,17 @@ def compute_exact_smem(args: argparse.Namespace, fault_component: str) -> Dict[s
             "addr_observed_seed_suppressed_events": int(
                 analyzer_exact_meta.get("addr_observed_seed_suppressed_events", 0)
             ),
-            "tol_output_store_seed_count": int(
-                analyzer_exact_meta.get("tol_output_store_seed_count", 0)
-            ),
-            "tol_float_backward_op_count": int(
-                analyzer_exact_meta.get("tol_float_backward_op_count", 0)
-            ),
-            "tol_memory_forward_byte_count": int(
-                analyzer_exact_meta.get("tol_memory_forward_byte_count", 0)
-            ),
-            "tol_fallback_count": int(
-                analyzer_exact_meta.get("tol_fallback_count", 0)
-            ),
             "shared_scope_count": int(len(scope_cycle_weights)),
-            "smem_scope_source": str(smem_scope_source),
+            "smem_scope_source": _stable_scalar_text(smem_scope_source),
             "smem_scope_count_hist_topk": list(smem_scope_count_hist_topk),
             "smem_scope_count_hist_total_cycles": int(smem_scope_count_hist_total_cycles),
             "smem_scope_count_hist_unique": int(smem_scope_count_hist_unique),
             "smem_fault_site_count": int(len(smem_sites)),
             "smem_rf_site_count": int(
-                sum(1 for rec in smem_sites if str(rec.get("site_kind", "")) == "smem_rf")
+                sum(1 for rec in smem_sites if _stable_scalar_text(rec.get("site_kind", "")) == "smem_rf")
             ),
             "smem_lds_site_count": int(
-                sum(1 for rec in smem_sites if str(rec.get("site_kind", "")) == "smem_lds")
+                sum(1 for rec in smem_sites if _stable_scalar_text(rec.get("site_kind", "")) == "smem_lds")
             ),
         },
     }
@@ -10902,13 +11297,13 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
         args.cycles,
         args.active_threads_log,
         bool(getattr(args, "allow_missing_active_threads", False)),
-        str(getattr(args, "missing_active_threads_policy", "empty")),
+        _stable_scalar_text(getattr(args, "missing_active_threads_policy", "empty")),
     )
     cycles_sorted, cycle_prefix, total_cycle_lines = _cycle_prefix_from_records(cycle_records)
     if total_cycle_lines <= 0:
         raise ValueError("cycle multiplicity total is zero")
 
-    trace_expanding_policy = str(args.trace_expanding_policy).strip().lower()
+    trace_expanding_policy = _stable_scalar_text(args.trace_expanding_policy).strip().lower()
     if trace_expanding_policy != CANONICAL_TRACE_EXPANDING_POLICY:
         raise ValueError(
             "trace_expanding_policy must be one of {}; got {!r}".format(
@@ -10919,7 +11314,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
     trace_uncovered_mode = _normalize_trace_uncovered_mode(
         getattr(args, "trace_uncovered_mode", "legacy_unknown")
     )
-    trace_expanding_resolution_mode = str(
+    trace_expanding_resolution_mode = _stable_scalar_text(
         getattr(args, "trace_expanding_resolution_mode", "legacy")
     ).strip().lower()
     if trace_expanding_resolution_mode != CANONICAL_TRACE_EXPANDING_RESOLUTION_MODE:
@@ -10953,7 +11348,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
     addr_bits_mode, addr_bits_explicit = _parse_addr_bits_spec(
         getattr(args, "addr_bits", "auto")
     )
-    ge_mode = str(args.consumer_compare).strip().lower() == "ge"
+    ge_mode = _stable_scalar_text(args.consumer_compare).strip().lower() == "ge"
     same_cycle_effect_prob = _normalize_same_cycle_effect_prob(
         getattr(args, "same_cycle_effect_prob", None)
     )
@@ -11062,7 +11457,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
         Tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int],
     ] = {}
     for rec_idx, rec in enumerate(l1d_sites):
-        if str(_cache_site_row_field(rec, "site_kind", "")) != "l1d_load":
+        if _stable_scalar_text(_cache_site_row_field(rec, "site_kind", "")) != "l1d_load":
             continue
         mem_space = canonical_space(_cache_site_row_field(rec, "mem_space"))
         if mem_space not in ("global", "local"):
@@ -11077,7 +11472,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
         line_addr = int(addr // int(l1d_line_size_bytes))
         byte_off = int(addr % int(l1d_line_size_bytes))
         line_key = _l1d_line_key(
-            mem_space=str(mem_space),
+            mem_space=_stable_scalar_text(mem_space),
             sm_id=int(sm_id),
             thread_id=int(thread_id),
             line_addr=int(line_addr),
@@ -11167,7 +11562,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
                 addr=int(_cache_site_row_field(rec, "addr", 0)),
                 selected_mask=int(selected_addr_bits_mask),
                 effective_mask=int(effective_mask),
-                mem_space=str(mem_space),
+                mem_space=_stable_scalar_text(mem_space),
                 access_size=int(access_size),
                 event_index=event_index if event_index >= 0 else None,
                 cycle=int(_cache_site_row_field(rec, "cycle", -1))
@@ -11196,10 +11591,14 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
             addr_source_bits = {}
             addr_trace_div_mask = 0
         addr_oob_due_mask = (
-            int(addr_due_mask) if int(addr_source_bits.get("addr_oob_due", 0)) > 0 else 0
+            int(addr_due_mask)
+            if int(_mapping_get(addr_source_bits, "addr_oob_due", 0)) > 0
+            else 0
         ) & MASK64
         addr_alias_sdc_mask = (
-            int(addr_sdc_mask) if int(addr_source_bits.get("addr_alias_sdc", 0)) > 0 else 0
+            int(addr_sdc_mask)
+            if int(_mapping_get(addr_source_bits, "addr_alias_sdc", 0)) > 0
+            else 0
         ) & MASK64
         key = (line_key, int(byte_off), int(cycle))
         prev = byte_cycle_masks.get(key)
@@ -11393,7 +11792,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
                         _cache_history_masks_key(seg_rows),
                         int(selected_data_bits_mask),
                         bool(addr_domain_enabled),
-                        str(trace_divergence_policy),
+                        _stable_scalar_text(trace_divergence_policy),
                     )
                     seg_metrics = l1d_segment_plan_cache.get(seg_plan_key)
                     if seg_metrics is None:
@@ -11401,7 +11800,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
                             seg_plan_key[0],
                             selected_data_bits_mask=int(selected_data_bits_mask),
                             addr_domain_enabled=bool(addr_domain_enabled),
-                            trace_divergence_policy=str(trace_divergence_policy),
+                            trace_divergence_policy=_stable_scalar_text(trace_divergence_policy),
                         )
                         l1d_segment_plan_cache[seg_plan_key] = seg_metrics
                     else:
@@ -11411,7 +11810,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
                         seg_rows,
                         selected_data_bits_mask=int(selected_data_bits_mask),
                         addr_domain_enabled=bool(addr_domain_enabled),
-                        trace_divergence_policy=str(trace_divergence_policy),
+                        trace_divergence_policy=_stable_scalar_text(trace_divergence_policy),
                         use_cache=False,
                     )
 
@@ -11675,9 +12074,9 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
                 "due": int(due_tag_num),
                 "unknown": int(unknown_tag_num),
                 "den": int(tag_denominator),
-                "policy": str(cache_tag_class_policy),
+                "policy": _stable_scalar_text(cache_tag_class_policy),
                 "exact_mode": (
-                    str(tag_exact_info.get("mode", ""))
+                    _stable_scalar_text(tag_exact_info.get("mode", ""))
                     if isinstance(tag_exact_info, dict)
                     else "policy_only"
                 ),
@@ -11688,8 +12087,8 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
                 "due": int(due_addr_num),
                 "unknown": int(unknown_addr_num),
                 "den": int(addr_denominator),
-                "policy": str(addr_fault_policy),
-                "addr_due_mode": str(addr_due_mode),
+                "policy": _stable_scalar_text(addr_fault_policy),
+                "addr_due_mode": _stable_scalar_text(addr_due_mode),
             },
         },
     }
@@ -11721,11 +12120,11 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
         },
         "exact_meta": {
             "fault_component": "l1d",
-            "cycles_file": str(args.cycles),
+            "cycles_file": _stable_scalar_text(args.cycles),
             "active_threads_log": (
-                str(args.active_threads_log) if args.active_threads_log is not None else None
+                _stable_scalar_text(args.active_threads_log) if args.active_threads_log is not None else None
             ),
-            "trace_template": str(args.trace_template),
+            "trace_template": _stable_scalar_text(args.trace_template),
             "l1d_size_bits": int(l1d_size_bits),
             "l1d_line_size_bytes": int(l1d_line_size_bytes),
             "l1d_tag_bits": int(l1d_tag_bits),
@@ -11737,27 +12136,27 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
             "l1d_selected_tag_bit_domain_size": int(selected_l1d_tag_bit_domain_size),
             "l1d_shaders": [int(v) for v in shader_seed_list],
             "l1d_shader_seed_domain_size": int(shader_seed_domain_size),
-            "shader_scope_mode": str(shader_scope_mode),
-            "shader_scope_source": str(shader_scope_source),
+            "shader_scope_mode": _stable_scalar_text(shader_scope_mode),
+            "shader_scope_source": _stable_scalar_text(shader_scope_source),
             "shader_scope_count": int(shader_seed_domain_size),
             "bit_count": int(bit_count),
             "datatype_bits": int(datatype_bits),
-            "consumer_compare": str(args.consumer_compare),
-            "trace_expanding_policy": str(trace_expanding_policy),
-            "trace_expanding_resolution_mode": str(trace_expanding_resolution_mode),
-            "trace_uncovered_mode": str(trace_uncovered_mode),
-            "trace_divergence_policy": str(trace_divergence_policy),
-            "addr_fault_policy": str(addr_fault_policy),
-            "addr_due_mode": str(addr_due_mode),
-            "addr_bits_mode": str(addr_bits_mode),
+            "consumer_compare": _stable_scalar_text(args.consumer_compare),
+            "trace_expanding_policy": _stable_scalar_text(trace_expanding_policy),
+            "trace_expanding_resolution_mode": _stable_scalar_text(trace_expanding_resolution_mode),
+            "trace_uncovered_mode": _stable_scalar_text(trace_uncovered_mode),
+            "trace_divergence_policy": _stable_scalar_text(trace_divergence_policy),
+            "addr_fault_policy": _stable_scalar_text(addr_fault_policy),
+            "addr_due_mode": _stable_scalar_text(addr_due_mode),
+            "addr_bits_mode": _stable_scalar_text(addr_bits_mode),
             "addr_bits_count": int(addr_bits_count_value),
             "addr_effective_bits": addr_effective_bits_value,
             "addr_effective_bits_max": (
                 int(max(addr_effective_bits_seen)) if addr_effective_bits_seen else 0
             ),
-            "cache_tag_class_policy": str(cache_tag_class_policy),
+            "cache_tag_class_policy": _stable_scalar_text(cache_tag_class_policy),
             "cache_tag_exact_mode": (
-                str(tag_exact_info.get("mode", ""))
+                _stable_scalar_text(tag_exact_info.get("mode", ""))
                 if isinstance(tag_exact_info, dict)
                 else "policy_only"
             ),
@@ -11777,7 +12176,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
                 else 0
             ),
             "cache_tag_fallback_reason": (
-                str(tag_exact_info.get("fallback_reason", ""))
+                _stable_scalar_text(tag_exact_info.get("fallback_reason", ""))
                 if isinstance(tag_exact_info, dict)
                 else ""
             ),
@@ -11851,7 +12250,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
             "due_source_bits": _mass_map_to_bits_map(due_source_mass),
             "due_mass_by_source": _normalize_mass_map(due_source_mass),
             **_boundary_meta_fields(
-                consumer_compare=str(args.consumer_compare),
+                consumer_compare=_stable_scalar_text(args.consumer_compare),
                 same_cycle_effect_prob=same_cycle_effect_prob,
                 boundary_events_count=int(boundary_events_count),
                 boundary_events_mass=float(boundary_events_mass),
@@ -11869,11 +12268,11 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
             "active_threads_empty_fill_cycles": int(
                 cycle_records_meta.get("active_threads_empty_fill_cycles", 0)
             ),
-            "missing_active_threads_policy": str(
+            "missing_active_threads_policy": _stable_scalar_text(
                 cycle_records_meta.get("missing_active_threads_policy", "empty")
             ),
             "addr_valid_ranges_path": (
-                str(args.addr_valid_ranges_path)
+                _stable_scalar_text(args.addr_valid_ranges_path)
                 if getattr(args, "addr_valid_ranges_path", None) is not None
                 else None
             ),
@@ -11884,7 +12283,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
             "l1d_byte_history_group_reduction": float(
                 l1d_byte_history_group_reduction
             ),
-            "l1d_segment_group_mode": str(storage_group_mode),
+            "l1d_segment_group_mode": _stable_scalar_text(storage_group_mode),
             "l1d_segment_plan_requests": int(l1d_segment_plan_requests),
             "l1d_segment_plan_hits": int(l1d_segment_plan_hits),
             "l1d_segment_plan_entries": int(len(l1d_segment_plan_cache)),
@@ -11894,14 +12293,14 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
                 sum(
                     1
                     for rec in l1d_sites
-                    if str(_cache_site_row_field(rec, "site_kind", "")) == "l1d_load"
+                    if _stable_scalar_text(_cache_site_row_field(rec, "site_kind", "")) == "l1d_load"
                 )
             ),
             "l1d_store_site_count": int(
                 sum(
                     1
                     for rec in l1d_sites
-                    if str(_cache_site_row_field(rec, "site_kind", "")) == "l1d_store"
+                    if _stable_scalar_text(_cache_site_row_field(rec, "site_kind", "")) == "l1d_store"
                 )
             ),
             "semantic_error_reason_counts": dict(
@@ -11970,7 +12369,7 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
             "due_oracle_reason_details_top20": list(
                 analyzer_exact_meta.get("due_oracle_reason_details_top20", [])
             ),
-            "output_oracle_type": str(
+            "output_oracle_type": _stable_scalar_text(
                 analyzer_exact_meta.get("output_oracle_type", "")
             ),
             "output_oracle_has_output_spec": bool(
@@ -11999,18 +12398,6 @@ def compute_exact_l1d(args: argparse.Namespace) -> Dict[str, Any]:
             ),
             "addr_observed_seed_suppressed_events": int(
                 analyzer_exact_meta.get("addr_observed_seed_suppressed_events", 0)
-            ),
-            "tol_output_store_seed_count": int(
-                analyzer_exact_meta.get("tol_output_store_seed_count", 0)
-            ),
-            "tol_float_backward_op_count": int(
-                analyzer_exact_meta.get("tol_float_backward_op_count", 0)
-            ),
-            "tol_memory_forward_byte_count": int(
-                analyzer_exact_meta.get("tol_memory_forward_byte_count", 0)
-            ),
-            "tol_fallback_count": int(
-                analyzer_exact_meta.get("tol_fallback_count", 0)
             ),
         },
     }
@@ -12048,13 +12435,13 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
         args.cycles,
         args.active_threads_log,
         bool(getattr(args, "allow_missing_active_threads", False)),
-        str(getattr(args, "missing_active_threads_policy", "empty")),
+        _stable_scalar_text(getattr(args, "missing_active_threads_policy", "empty")),
     )
     cycles_sorted, cycle_prefix, total_cycle_lines = _cycle_prefix_from_records(cycle_records)
     if total_cycle_lines <= 0:
         raise ValueError("cycle multiplicity total is zero")
 
-    trace_expanding_policy = str(args.trace_expanding_policy).strip().lower()
+    trace_expanding_policy = _stable_scalar_text(args.trace_expanding_policy).strip().lower()
     if trace_expanding_policy != CANONICAL_TRACE_EXPANDING_POLICY:
         raise ValueError(
             "trace_expanding_policy must be one of {}; got {!r}".format(
@@ -12065,7 +12452,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
     trace_uncovered_mode = _normalize_trace_uncovered_mode(
         getattr(args, "trace_uncovered_mode", "legacy_unknown")
     )
-    trace_expanding_resolution_mode = str(
+    trace_expanding_resolution_mode = _stable_scalar_text(
         getattr(args, "trace_expanding_resolution_mode", "legacy")
     ).strip().lower()
     if trace_expanding_resolution_mode != CANONICAL_TRACE_EXPANDING_RESOLUTION_MODE:
@@ -12099,7 +12486,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
     addr_bits_mode, addr_bits_explicit = _parse_addr_bits_spec(
         getattr(args, "addr_bits", "auto")
     )
-    ge_mode = str(args.consumer_compare).strip().lower() == "ge"
+    ge_mode = _stable_scalar_text(args.consumer_compare).strip().lower() == "ge"
     same_cycle_effect_prob = _normalize_same_cycle_effect_prob(
         getattr(args, "same_cycle_effect_prob", None)
     )
@@ -12177,7 +12564,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
         Tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int],
     ] = {}
     for rec_idx, rec in enumerate(l2_sites):
-        if str(_cache_site_row_field(rec, "site_kind", "")) != "l2_load":
+        if _stable_scalar_text(_cache_site_row_field(rec, "site_kind", "")) != "l2_load":
             continue
         mem_space = canonical_space(_cache_site_row_field(rec, "mem_space"))
         if mem_space not in ("global", "local"):
@@ -12188,7 +12575,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
         line_addr = int(addr // int(l2_line_size_bytes))
         byte_off = int(addr % int(l2_line_size_bytes))
         line_key = _l2_line_key(
-            mem_space=str(mem_space),
+            mem_space=_stable_scalar_text(mem_space),
             thread_id=int(thread_id),
             line_addr=int(line_addr),
         )
@@ -12276,7 +12663,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
                 addr=int(_cache_site_row_field(rec, "addr", 0)),
                 selected_mask=int(selected_addr_bits_mask),
                 effective_mask=int(effective_mask),
-                mem_space=str(mem_space),
+                mem_space=_stable_scalar_text(mem_space),
                 access_size=int(access_size),
                 event_index=event_index if event_index >= 0 else None,
                 cycle=int(_cache_site_row_field(rec, "cycle", -1))
@@ -12305,10 +12692,14 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
             addr_source_bits = {}
             addr_trace_div_mask = 0
         addr_oob_due_mask = (
-            int(addr_due_mask) if int(addr_source_bits.get("addr_oob_due", 0)) > 0 else 0
+            int(addr_due_mask)
+            if int(_mapping_get(addr_source_bits, "addr_oob_due", 0)) > 0
+            else 0
         ) & MASK64
         addr_alias_sdc_mask = (
-            int(addr_sdc_mask) if int(addr_source_bits.get("addr_alias_sdc", 0)) > 0 else 0
+            int(addr_sdc_mask)
+            if int(_mapping_get(addr_source_bits, "addr_alias_sdc", 0)) > 0
+            else 0
         ) & MASK64
         key = (line_key, int(byte_off), int(cycle))
         prev = byte_cycle_masks.get(key)
@@ -12356,7 +12747,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
     if global_prefill and cycles_sorted:
         prefill_cycle = int(cycles_sorted[0])
         for line_key in list(line_first_load_cycle.keys()):
-            if isinstance(line_key, tuple) and len(line_key) >= 1 and str(line_key[0]) == "global":
+            if isinstance(line_key, tuple) and len(line_key) >= 1 and _stable_scalar_text(line_key[0]) == "global":
                 if int(line_first_load_cycle.get(line_key, prefill_cycle)) > int(prefill_cycle):
                     line_first_load_cycle[line_key] = int(prefill_cycle)
 
@@ -12501,7 +12892,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
                         _cache_history_masks_key(seg_rows),
                         int(selected_data_bits_mask),
                         bool(addr_domain_enabled),
-                        str(trace_divergence_policy),
+                        _stable_scalar_text(trace_divergence_policy),
                     )
                     seg_metrics = l2_segment_plan_cache.get(seg_plan_key)
                     if seg_metrics is None:
@@ -12509,7 +12900,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
                             seg_plan_key[0],
                             selected_data_bits_mask=int(selected_data_bits_mask),
                             addr_domain_enabled=bool(addr_domain_enabled),
-                            trace_divergence_policy=str(trace_divergence_policy),
+                            trace_divergence_policy=_stable_scalar_text(trace_divergence_policy),
                         )
                         l2_segment_plan_cache[seg_plan_key] = seg_metrics
                     else:
@@ -12519,7 +12910,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
                         seg_rows,
                         selected_data_bits_mask=int(selected_data_bits_mask),
                         addr_domain_enabled=bool(addr_domain_enabled),
-                        trace_divergence_policy=str(trace_divergence_policy),
+                        trace_divergence_policy=_stable_scalar_text(trace_divergence_policy),
                         use_cache=False,
                     )
 
@@ -12777,9 +13168,9 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
                 "due": int(due_tag_num),
                 "unknown": int(unknown_tag_num),
                 "den": int(tag_denominator),
-                "policy": str(cache_tag_class_policy),
+                "policy": _stable_scalar_text(cache_tag_class_policy),
                 "exact_mode": (
-                    str(tag_exact_info.get("mode", ""))
+                    _stable_scalar_text(tag_exact_info.get("mode", ""))
                     if isinstance(tag_exact_info, dict)
                     else "policy_only"
                 ),
@@ -12790,8 +13181,8 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
                 "due": int(due_addr_num),
                 "unknown": int(unknown_addr_num),
                 "den": int(addr_denominator),
-                "policy": str(addr_fault_policy),
-                "addr_due_mode": str(addr_due_mode),
+                "policy": _stable_scalar_text(addr_fault_policy),
+                "addr_due_mode": _stable_scalar_text(addr_due_mode),
             },
         },
     }
@@ -12823,11 +13214,11 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
         },
         "exact_meta": {
             "fault_component": "l2",
-            "cycles_file": str(args.cycles),
+            "cycles_file": _stable_scalar_text(args.cycles),
             "active_threads_log": (
-                str(args.active_threads_log) if args.active_threads_log is not None else None
+                _stable_scalar_text(args.active_threads_log) if args.active_threads_log is not None else None
             ),
-            "trace_template": str(args.trace_template),
+            "trace_template": _stable_scalar_text(args.trace_template),
             "l2_size_bits": int(l2_size_bits),
             "l2_line_size_bytes": int(l2_line_size_bytes),
             "l2_tag_bits": int(l2_tag_bits),
@@ -12840,22 +13231,22 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
             "l2_selected_tag_bit_domain_size": int(selected_l2_tag_bit_domain_size),
             "bit_count": int(bit_count),
             "datatype_bits": int(datatype_bits),
-            "consumer_compare": str(args.consumer_compare),
-            "trace_expanding_policy": str(trace_expanding_policy),
-            "trace_expanding_resolution_mode": str(trace_expanding_resolution_mode),
-            "trace_uncovered_mode": str(trace_uncovered_mode),
-            "trace_divergence_policy": str(trace_divergence_policy),
-            "addr_fault_policy": str(addr_fault_policy),
-            "addr_due_mode": str(addr_due_mode),
-            "addr_bits_mode": str(addr_bits_mode),
+            "consumer_compare": _stable_scalar_text(args.consumer_compare),
+            "trace_expanding_policy": _stable_scalar_text(trace_expanding_policy),
+            "trace_expanding_resolution_mode": _stable_scalar_text(trace_expanding_resolution_mode),
+            "trace_uncovered_mode": _stable_scalar_text(trace_uncovered_mode),
+            "trace_divergence_policy": _stable_scalar_text(trace_divergence_policy),
+            "addr_fault_policy": _stable_scalar_text(addr_fault_policy),
+            "addr_due_mode": _stable_scalar_text(addr_due_mode),
+            "addr_bits_mode": _stable_scalar_text(addr_bits_mode),
             "addr_bits_count": int(addr_bits_count_value),
             "addr_effective_bits": addr_effective_bits_value,
             "addr_effective_bits_max": (
                 int(max(addr_effective_bits_seen)) if addr_effective_bits_seen else 0
             ),
-            "cache_tag_class_policy": str(cache_tag_class_policy),
+            "cache_tag_class_policy": _stable_scalar_text(cache_tag_class_policy),
             "cache_tag_exact_mode": (
-                str(tag_exact_info.get("mode", ""))
+                _stable_scalar_text(tag_exact_info.get("mode", ""))
                 if isinstance(tag_exact_info, dict)
                 else "policy_only"
             ),
@@ -12875,7 +13266,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
                 else 0
             ),
             "cache_tag_fallback_reason": (
-                str(tag_exact_info.get("fallback_reason", ""))
+                _stable_scalar_text(tag_exact_info.get("fallback_reason", ""))
                 if isinstance(tag_exact_info, dict)
                 else ""
             ),
@@ -12949,7 +13340,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
             "due_source_bits": _mass_map_to_bits_map(due_source_mass),
             "due_mass_by_source": _normalize_mass_map(due_source_mass),
             **_boundary_meta_fields(
-                consumer_compare=str(args.consumer_compare),
+                consumer_compare=_stable_scalar_text(args.consumer_compare),
                 same_cycle_effect_prob=same_cycle_effect_prob,
                 boundary_events_count=int(boundary_events_count),
                 boundary_events_mass=float(boundary_events_mass),
@@ -12967,11 +13358,11 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
             "active_threads_empty_fill_cycles": int(
                 cycle_records_meta.get("active_threads_empty_fill_cycles", 0)
             ),
-            "missing_active_threads_policy": str(
+            "missing_active_threads_policy": _stable_scalar_text(
                 cycle_records_meta.get("missing_active_threads_policy", "empty")
             ),
             "addr_valid_ranges_path": (
-                str(args.addr_valid_ranges_path)
+                _stable_scalar_text(args.addr_valid_ranges_path)
                 if getattr(args, "addr_valid_ranges_path", None) is not None
                 else None
             ),
@@ -12982,7 +13373,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
             "l2_byte_history_group_reduction": float(
                 l2_byte_history_group_reduction
             ),
-            "l2_group_mode": str(storage_group_mode),
+            "l2_group_mode": _stable_scalar_text(storage_group_mode),
             "l2_segment_plan_requests": int(l2_segment_plan_requests),
             "l2_segment_plan_hits": int(l2_segment_plan_hits),
             "l2_segment_plan_entries": int(len(l2_segment_plan_cache)),
@@ -12991,14 +13382,14 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
                 sum(
                     1
                     for rec in l2_sites
-                    if str(_cache_site_row_field(rec, "site_kind", "")) == "l2_load"
+                    if _stable_scalar_text(_cache_site_row_field(rec, "site_kind", "")) == "l2_load"
                 )
             ),
             "l2_store_site_count": int(
                 sum(
                     1
                     for rec in l2_sites
-                    if str(_cache_site_row_field(rec, "site_kind", "")) == "l2_store"
+                    if _stable_scalar_text(_cache_site_row_field(rec, "site_kind", "")) == "l2_store"
                 )
             ),
             "semantic_error_reason_counts": dict(
@@ -13067,7 +13458,7 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
             "due_oracle_reason_details_top20": list(
                 analyzer_exact_meta.get("due_oracle_reason_details_top20", [])
             ),
-            "output_oracle_type": str(
+            "output_oracle_type": _stable_scalar_text(
                 analyzer_exact_meta.get("output_oracle_type", "")
             ),
             "output_oracle_has_output_spec": bool(
@@ -13096,18 +13487,6 @@ def compute_exact_l2(args: argparse.Namespace) -> Dict[str, Any]:
             ),
             "addr_observed_seed_suppressed_events": int(
                 analyzer_exact_meta.get("addr_observed_seed_suppressed_events", 0)
-            ),
-            "tol_output_store_seed_count": int(
-                analyzer_exact_meta.get("tol_output_store_seed_count", 0)
-            ),
-            "tol_float_backward_op_count": int(
-                analyzer_exact_meta.get("tol_float_backward_op_count", 0)
-            ),
-            "tol_memory_forward_byte_count": int(
-                analyzer_exact_meta.get("tol_memory_forward_byte_count", 0)
-            ),
-            "tol_fallback_count": int(
-                analyzer_exact_meta.get("tol_fallback_count", 0)
             ),
         },
     }
@@ -13141,13 +13520,13 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
         args.cycles,
         args.active_threads_log,
         True,
-        str(getattr(args, "missing_active_threads_policy", "empty")),
+        _stable_scalar_text(getattr(args, "missing_active_threads_policy", "empty")),
     )
     cycles_sorted, cycle_prefix, _total_cycle_lines = _cycle_prefix_from_records(cycle_records)
     if not cycles_sorted:
         raise ValueError("cycle multiplicity total is zero")
 
-    trace_expanding_policy = str(args.trace_expanding_policy).strip().lower()
+    trace_expanding_policy = _stable_scalar_text(args.trace_expanding_policy).strip().lower()
     if trace_expanding_policy != CANONICAL_TRACE_EXPANDING_POLICY:
         raise ValueError(
             "trace_expanding_policy must be one of {}; got {!r}".format(
@@ -13158,7 +13537,7 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
     trace_uncovered_mode = _normalize_trace_uncovered_mode(
         getattr(args, "trace_uncovered_mode", "legacy_unknown")
     )
-    trace_expanding_resolution_mode = str(
+    trace_expanding_resolution_mode = _stable_scalar_text(
         getattr(args, "trace_expanding_resolution_mode", "legacy")
     ).strip().lower()
     if trace_expanding_resolution_mode != CANONICAL_TRACE_EXPANDING_RESOLUTION_MODE:
@@ -13171,7 +13550,7 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
     trace_divergence_policy = _normalize_trace_divergence_policy(
         getattr(args, "trace_divergence_policy", CANONICAL_TRACE_DIVERGENCE_POLICY)
     )
-    ge_mode = str(args.consumer_compare).strip().lower() == "ge"
+    ge_mode = _stable_scalar_text(args.consumer_compare).strip().lower() == "ge"
     same_cycle_effect_prob = _normalize_same_cycle_effect_prob(
         getattr(args, "same_cycle_effect_prob", None)
     )
@@ -13184,7 +13563,7 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
         rec
         for rec in l1d_sites
         if canonical_space(_cache_site_row_field(rec, "mem_space")) == "global"
-        and str(_cache_site_row_field(rec, "site_kind", "")) in ("l1d_load", "l1d_store")
+        and _stable_scalar_text(_cache_site_row_field(rec, "site_kind", "")) in ("l1d_load", "l1d_store")
     ]
     if not gmem_sites:
         raise ValueError("gmem requires global load/store fault sites in analyzer output")
@@ -13202,7 +13581,7 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
     for rec in gmem_sites:
         addr = int(_cache_site_row_field(rec, "addr", 0))
         cycle = int(_cache_site_row_field(rec, "cycle", -1))
-        site_kind = str(_cache_site_row_field(rec, "site_kind", ""))
+        site_kind = _stable_scalar_text(_cache_site_row_field(rec, "site_kind", ""))
         if site_kind == "l1d_store":
             byte_store_cycles[int(addr)].add(int(cycle))
             prev_store = byte_first_store_cycle.get(int(addr))
@@ -13385,7 +13764,7 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
                     _cache_history_masks_key(seg_rows),
                     int(selected_data_bits_mask),
                     False,
-                    str(trace_divergence_policy),
+                    _stable_scalar_text(trace_divergence_policy),
                 )
                 seg_metrics = gmem_segment_plan_cache.get(seg_plan_key)
                 if seg_metrics is None:
@@ -13393,7 +13772,7 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
                         seg_plan_key[0],
                         selected_data_bits_mask=int(selected_data_bits_mask),
                         addr_domain_enabled=False,
-                        trace_divergence_policy=str(trace_divergence_policy),
+                        trace_divergence_policy=_stable_scalar_text(trace_divergence_policy),
                     )
                     gmem_segment_plan_cache[seg_plan_key] = seg_metrics
                 else:
@@ -13403,7 +13782,7 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
                     seg_rows,
                     selected_data_bits_mask=int(selected_data_bits_mask),
                     addr_domain_enabled=False,
-                    trace_divergence_policy=str(trace_divergence_policy),
+                    trace_divergence_policy=_stable_scalar_text(trace_divergence_policy),
                     use_cache=False,
                 )
 
@@ -13540,18 +13919,18 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
         },
         "exact_meta": {
             "fault_component": "gmem",
-            "cycles_file": str(args.cycles),
+            "cycles_file": _stable_scalar_text(args.cycles),
             "active_threads_log": (
-                str(args.active_threads_log) if args.active_threads_log is not None else None
+                _stable_scalar_text(args.active_threads_log) if args.active_threads_log is not None else None
             ),
-            "trace_template": str(args.trace_template),
+            "trace_template": _stable_scalar_text(args.trace_template),
             "bit_count": int(selected_data_bits_count),
             "datatype_bits": int(args.datatype_bits),
-            "consumer_compare": str(args.consumer_compare),
-            "trace_expanding_policy": str(trace_expanding_policy),
-            "trace_expanding_resolution_mode": str(trace_expanding_resolution_mode),
-            "trace_uncovered_mode": str(trace_uncovered_mode),
-            "trace_divergence_policy": str(trace_divergence_policy),
+            "consumer_compare": _stable_scalar_text(args.consumer_compare),
+            "trace_expanding_policy": _stable_scalar_text(trace_expanding_policy),
+            "trace_expanding_resolution_mode": _stable_scalar_text(trace_expanding_resolution_mode),
+            "trace_uncovered_mode": _stable_scalar_text(trace_uncovered_mode),
+            "trace_divergence_policy": _stable_scalar_text(trace_divergence_policy),
             "addr_fault_policy": "not_applicable",
             "addr_due_mode": "not_applicable",
             "addr_bits_mode": "not_applicable",
@@ -13589,7 +13968,7 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
             "due_source_bits": _mass_map_to_bits_map(due_source_mass),
             "due_mass_by_source": _normalize_mass_map(due_source_mass),
             **_boundary_meta_fields(
-                consumer_compare=str(args.consumer_compare),
+                consumer_compare=_stable_scalar_text(args.consumer_compare),
                 same_cycle_effect_prob=same_cycle_effect_prob,
                 boundary_events_count=int(boundary_events_count),
                 boundary_events_mass=float(boundary_events_mass),
@@ -13607,12 +13986,12 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
             "active_threads_empty_fill_cycles": int(
                 cycle_records_meta.get("active_threads_empty_fill_cycles", 0)
             ),
-            "missing_active_threads_policy": str(
+            "missing_active_threads_policy": _stable_scalar_text(
                 cycle_records_meta.get("missing_active_threads_policy", "empty")
             ),
             "gmem_byte_count": int(len(byte_histories)),
             "gmem_version_group_count": int(len(grouped_histories)),
-            "gmem_group_mode": str(storage_group_mode),
+            "gmem_group_mode": _stable_scalar_text(storage_group_mode),
             "gmem_segment_plan_requests": int(gmem_segment_plan_requests),
             "gmem_segment_plan_hits": int(gmem_segment_plan_hits),
             "gmem_segment_plan_entries": int(len(gmem_segment_plan_cache)),
@@ -13621,17 +14000,17 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
                 sum(
                     1
                     for rec in gmem_sites
-                    if str(_cache_site_row_field(rec, "site_kind", "")) == "l1d_load"
+                    if _stable_scalar_text(_cache_site_row_field(rec, "site_kind", "")) == "l1d_load"
                 )
             ),
             "gmem_store_site_count": int(
                 sum(
                     1
                     for rec in gmem_sites
-                    if str(_cache_site_row_field(rec, "site_kind", "")) == "l1d_store"
+                    if _stable_scalar_text(_cache_site_row_field(rec, "site_kind", "")) == "l1d_store"
                 )
             ),
-            "output_oracle_type": str(analyzer_exact_meta.get("output_oracle_type", "")),
+            "output_oracle_type": _stable_scalar_text(analyzer_exact_meta.get("output_oracle_type", "")),
             "output_oracle_has_output_spec": bool(output_spec_entry_count > 0),
             "output_oracle_spec_entry_count": int(output_spec_entry_count),
             "output_oracle_spec_total_bytes": int(output_spec_total_bytes),
@@ -13647,7 +14026,7 @@ def compute_exact_gmem(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def _compute_exact_single(args: argparse.Namespace) -> Dict[str, Any]:
-    fault_component = str(args.fault_component).strip().lower()
+    fault_component = _stable_scalar_text(args.fault_component).strip().lower()
     if fault_component not in FAULT_COMPONENTS:
         raise ValueError(
             "fault_component must be one of {}; got {!r}".format(
@@ -13736,8 +14115,8 @@ def compute_exact(args: argparse.Namespace) -> Dict[str, Any]:
             boundary_bits_mass_total = float(boundary_events_mass) * float(bit_count_hint)
 
     if not isinstance(meta_blended.get("fault_component"), str):
-        meta_blended["fault_component"] = str(getattr(args, "fault_component", ""))
-    meta_blended["consumer_compare"] = str(args.consumer_compare)
+        meta_blended["fault_component"] = _stable_scalar_text(getattr(args, "fault_component", ""))
+    meta_blended["consumer_compare"] = _stable_scalar_text(args.consumer_compare)
     meta_blended["same_cycle_effect_prob"] = _normalize_numeric(float(same_cycle_effect_prob))
     meta_blended["same_cycle_effect_prob_mode"] = "blended_gt_ge"
     meta_blended["classification_counts_gt"] = {
@@ -13844,14 +14223,14 @@ def _normalize_count_num(value: float) -> Any:
 
 
 def _safe_env_bool_01(name: str, default: int) -> int:
-    raw = str(os.environ.get(name, str(default))).strip()
+    raw = _stable_scalar_text(os.environ.get(name, _stable_scalar_text(default))).strip()
     if raw in ("0", "1"):
         return int(raw)
     return int(default)
 
 
 def _safe_env_optional_float_01(name: str) -> Optional[float]:
-    raw = str(os.environ.get(name, "")).strip()
+    raw = _stable_scalar_text(os.environ.get(name, "")).strip()
     if raw == "":
         return None
     try:
@@ -13868,7 +14247,7 @@ def _safe_env_optional_float_01(name: str) -> Optional[float]:
 
 
 def _safe_env_float_01(name: str, default: float) -> float:
-    raw = str(os.environ.get(name, str(default))).strip()
+    raw = _stable_scalar_text(os.environ.get(name, _stable_scalar_text(default))).strip()
     try:
         value = float(raw)
     except Exception:
@@ -13880,8 +14259,8 @@ def _safe_env_float_01(name: str, default: float) -> float:
 
 def _cli_option_present(argv: Sequence[str], option: str) -> bool:
     for tok in argv:
-        tok_s = str(tok).strip()
-        if tok_s == str(option) or tok_s.startswith(str(option) + "="):
+        tok_s = _stable_scalar_text(tok).strip()
+        if tok_s == _stable_scalar_text(option) or tok_s.startswith(_stable_scalar_text(option) + "="):
             return True
     return False
 
@@ -13893,7 +14272,7 @@ def reject_removed_exact_semantic_overrides(
     argv_seq = list(sys.argv[1:] if argv is None else argv)
     env_map = dict(os.environ if environ is None else environ)
     used_options = [opt for opt in REMOVED_SEMANTIC_OPTIONS if _cli_option_present(argv_seq, opt)]
-    used_env = [name for name in REMOVED_SEMANTIC_ENV_VARS if str(name) in env_map]
+    used_env = [name for name in REMOVED_SEMANTIC_ENV_VARS if _stable_scalar_text(name) in env_map]
     if not used_options and not used_env:
         return
     lines = [
@@ -13946,7 +14325,7 @@ def apply_canonical_exact_semantics(args: argparse.Namespace) -> argparse.Namesp
 def _auto_enable_sampling_space_domain_switches(args: argparse.Namespace) -> Dict[str, bool]:
     forced_rf = False
     forced_smem = False
-    fault_component = str(getattr(args, "fault_component", "")).strip().lower()
+    fault_component = _stable_scalar_text(getattr(args, "fault_component", "")).strip().lower()
     use_global = bool(int(getattr(args, "use_sampling_space_domain", 0)))
 
     rf_policy = _normalize_rf_domain_policy(
@@ -14000,7 +14379,7 @@ def _collect_unknown_reason_counts(meta: Dict[str, Any], unknown_raw: float) -> 
     semantic_unknown = meta.get("semantic_unknown_reason_counts", {})
     if isinstance(semantic_unknown, dict):
         for k, v in semantic_unknown.items():
-            key = str(k).strip() or "unknown"
+            key = _stable_scalar_text(k).strip() or "unknown"
             try:
                 out[key] += int(v)
             except Exception:
@@ -14118,8 +14497,8 @@ def _extract_missing_memory_samples(samples: List[Dict[str, Any]]) -> List[Dict[
     for row in samples:
         if not isinstance(row, dict):
             continue
-        reason = str(row.get("reason", "")).strip().lower()
-        etype = str(
+        reason = _stable_scalar_text(row.get("reason", "")).strip().lower()
+        etype = _stable_scalar_text(
             row.get("faulted_error_type")
             or row.get("golden_error_type")
             or row.get("error_type")
@@ -14130,7 +14509,7 @@ def _extract_missing_memory_samples(samples: List[Dict[str, Any]]) -> List[Dict[
             "uninitializedload",
         ):
             continue
-        msg = str(
+        msg = _stable_scalar_text(
             row.get("message")
             or row.get("faulted_error")
             or row.get("golden_error")
@@ -14139,12 +14518,12 @@ def _extract_missing_memory_samples(samples: List[Dict[str, Any]]) -> List[Dict[
         m = patt.search(msg)
         if m is None:
             continue
-        missing_raw = [tok.strip() for tok in str(m.group(4)).split(",") if tok.strip()]
+        missing_raw = [tok.strip() for tok in _stable_scalar_text(m.group(4)).split(",") if tok.strip()]
         out.append(
             {
-                "space": str(m.group(1)),
+                "space": _stable_scalar_text(m.group(1)),
                 "addr": f"0x{int(m.group(2), 16):016x}",
-                "pc": str(m.group(3)),
+                "pc": _stable_scalar_text(m.group(3)),
                 "missing_addrs": missing_raw[:8],
             }
         )
@@ -14158,19 +14537,19 @@ def _extract_unsupported_opcode_samples(samples: List[Dict[str, Any]]) -> List[D
     for row in samples:
         if not isinstance(row, dict):
             continue
-        msg = str(
+        msg = _stable_scalar_text(
             row.get("message")
             or row.get("faulted_error")
             or row.get("golden_error")
             or ""
         ).lower()
-        etype = str(
+        etype = _stable_scalar_text(
             row.get("faulted_error_type")
             or row.get("golden_error_type")
             or row.get("error_type")
             or ""
         )
-        if "unsupported opcode" not in msg and str(etype) != "NotImplementedError":
+        if "unsupported opcode" not in msg and _stable_scalar_text(etype) != "NotImplementedError":
             continue
         out.append(
             {
@@ -14190,7 +14569,7 @@ def _extract_unsupported_opcode_samples(samples: List[Dict[str, Any]]) -> List[D
 def _summary_component_ref(summary: Any, fault_component: str) -> Optional[Dict[str, Any]]:
     if not isinstance(summary, dict):
         return None
-    fc = str(fault_component).strip().lower()
+    fc = _stable_scalar_text(fault_component).strip().lower()
     if fc == "l1d":
         row = summary.get("l1d_cache")
         return row if isinstance(row, dict) else None
@@ -14354,7 +14733,7 @@ def _first_positive_int(values: Sequence[Any], default: int = 0) -> int:
 
 
 def _safe_component_token(value: Any) -> str:
-    token = str(value or "component").strip().lower()
+    token = _stable_scalar_text(value or "component").strip().lower()
     cleaned = "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in token)
     return cleaned or "component"
 
@@ -14383,25 +14762,25 @@ def _write_domain_reconciliation_failure_report(
     reason: str,
     details: Dict[str, Any],
 ) -> str:
-    fault_component = str(
+    fault_component = _stable_scalar_text(
         meta.get("fault_component", getattr(args, "fault_component", ""))
     ).strip().lower()
     report_path = _domain_reconciliation_failure_report_path(args, fault_component)
     payload = {
         "status": "failed",
-        "reason": str(reason),
+        "reason": _stable_scalar_text(reason),
         "details": dict(details),
-        "fault_component": str(fault_component),
-        "fi_sampling_space_path": str(getattr(args, "fi_sampling_space_path", "") or ""),
-        "cycles_domain_path": str(getattr(args, "cycles_domain_path", "") or ""),
-        "output": str(getattr(args, "output", "") or ""),
+        "fault_component": _stable_scalar_text(fault_component),
+        "fi_sampling_space_path": _stable_scalar_text(getattr(args, "fi_sampling_space_path", "") or ""),
+        "cycles_domain_path": _stable_scalar_text(getattr(args, "cycles_domain_path", "") or ""),
+        "output": _stable_scalar_text(getattr(args, "output", "") or ""),
         "exact_meta": dict(meta),
     }
     try:
         _json_dump_path(report_path, payload)
     except Exception as exc:
         return "unwritten:{}:{}".format(type(exc).__name__, exc)
-    return str(report_path)
+    return _stable_scalar_text(report_path)
 
 
 def _fail_domain_reconciliation(
@@ -14411,26 +14790,26 @@ def _fail_domain_reconciliation(
     reason: str,
     details: Dict[str, Any],
 ) -> None:
-    meta["domain_reconciliation_method"] = "failed_{}".format(str(reason))
-    meta["domain_reconciliation_failure_reason"] = str(reason)
+    meta["domain_reconciliation_method"] = "failed_{}".format(_stable_scalar_text(reason))
+    meta["domain_reconciliation_failure_reason"] = _stable_scalar_text(reason)
     meta["domain_reconciliation_unexplained_bits"] = int(
         _safe_int(details.get("unexplained_bits", details.get("mismatch_bits", 0)), 0)
     )
     report_path = _write_domain_reconciliation_failure_report(
         args=args,
         meta=meta,
-        reason=str(reason),
+        reason=_stable_scalar_text(reason),
         details=dict(details),
     )
-    meta["domain_reconciliation_failure_report_path"] = str(report_path)
-    fault_component = str(
+    meta["domain_reconciliation_failure_report_path"] = _stable_scalar_text(report_path)
+    fault_component = _stable_scalar_text(
         meta.get("fault_component", getattr(args, "fault_component", ""))
     ).strip().lower()
     raise ValueError(
         "FI-aligned denominator reconciliation failed for component {}: {}; "
         "details={}; report={}".format(
             fault_component,
-            str(reason),
+            _stable_scalar_text(reason),
             json.dumps(details, sort_keys=True),
             report_path,
         )
@@ -14490,13 +14869,13 @@ def _record_summary_domain(
         "due": _normalize_count_num(due),
         "unknown": _normalize_count_num(unknown),
         "den": int(max(0, int(den))),
-        "mode": str(mode),
+        "mode": _stable_scalar_text(mode),
     }
     if policy is not None:
-        payload["policy"] = str(policy)
+        payload["policy"] = _stable_scalar_text(policy)
     if isinstance(extra, dict):
         payload.update(dict(extra))
-    by_domain_raw[str(domain_name)] = payload
+    by_domain_raw[_stable_scalar_text(domain_name)] = payload
 
 
 def _sampling_component_domain_info(
@@ -14561,8 +14940,8 @@ def _sampling_component_domain_info(
         0,
     )
     sampling_cycle_stats = _cycle_domain_stats(
-        Path(str(sampling_cycles_file))
-        if isinstance(sampling_cycles_file, (str, Path)) and str(sampling_cycles_file).strip()
+        Path(_stable_scalar_text(sampling_cycles_file))
+        if isinstance(sampling_cycles_file, (str, Path)) and _stable_scalar_text(sampling_cycles_file).strip()
         else None
     )
     info["cycle_total_multiplicity"] = int(
@@ -14588,7 +14967,7 @@ def _sampling_component_domain_info(
         info["domain_total_bits"] = int(explicit_total)
         info["domain_source"] = "sampling_space_explicit"
 
-    fc = str(fault_component).strip().lower()
+    fc = _stable_scalar_text(fault_component).strip().lower()
     selected_mask, selected_bit_count = _selected_byte_domain(getattr(args, "bits", None))
 
     if fc == "rf":
@@ -14675,7 +15054,7 @@ def _sampling_component_domain_info(
 
     if fc in ("l1d", "l2"):
         prefix = "l1d" if fc == "l1d" else "l2"
-        guard_source = str(meta.get("shader_scope_source", "")).strip()
+        guard_source = _stable_scalar_text(meta.get("shader_scope_source", "")).strip()
         sampling_scope_guarded = bool(
             fc == "l1d"
             and guard_source
@@ -14832,97 +15211,12 @@ def _sampling_component_domain_info(
     return info
 
 
-def _trace_expanding_stats_from_analyzer_payload(analyzer: Dict[str, Any]) -> Dict[str, int]:
-    read_present = 0
-    read_bits = 0
-    site_present = 0
-    site_bits = 0
-
-    read_events = analyzer.get("read_events", [])
-    if isinstance(read_events, list):
-        for rec in read_events:
-            trace_field = _read_event_row_field(rec, "trace_expanding_mask_this_read", None)
-            if trace_field is not None:
-                read_present += 1
-            width = max(
-                0,
-                min(64, _safe_int(_read_event_row_field(rec, "src_width_bits", 64), 64)),
-            )
-            read_bits += int(
-                popcount_u64(parse_mask(0 if trace_field is None else trace_field) & width_mask(width))
-            )
-
-    for key in ("smem_fault_sites", "l1d_fault_sites", "l2_fault_sites"):
-        rows = analyzer.get(key, [])
-        if not isinstance(rows, list):
-            continue
-        for rec in rows:
-            if key == "smem_fault_sites":
-                trace_field = _smem_site_row_field(rec, "trace_expanding_mask_this_site", None)
-                width_raw = _smem_site_row_field(rec, "width_bits", 8)
-            else:
-                trace_field = _cache_site_row_field(rec, "trace_expanding_mask_this_site", None)
-                width_raw = _cache_site_row_field(rec, "width_bits", 8)
-            if trace_field is not None:
-                site_present += 1
-            width = max(0, min(64, _safe_int(width_raw, 8)))
-            site_bits += int(
-                popcount_u64(parse_mask(0 if trace_field is None else trace_field) & width_mask(width))
-            )
-
-    return {
-        "trace_expanding_read_mask_present_count": int(read_present),
-        "trace_expanding_read_bits_total": int(read_bits),
-        "trace_expanding_site_mask_present_count": int(site_present),
-        "trace_expanding_site_bits_total": int(site_bits),
-        "trace_expanding_mask_present_count": int(read_present + site_present),
-        "trace_expanding_bits_total": int(read_bits + site_bits),
-    }
-
-
-@lru_cache(maxsize=None)
-def _trace_expanding_stats_for_analyzer_path(
-    path_key: str,
-    normalize_trace_coverage: bool,
-) -> Dict[str, int]:
-    required = (
-        "trace_expanding_read_mask_present_count",
-        "trace_expanding_read_bits_total",
-        "trace_expanding_site_mask_present_count",
-        "trace_expanding_site_bits_total",
-        "trace_expanding_mask_present_count",
-        "trace_expanding_bits_total",
-    )
-    sidecar_meta = _load_analyzer_meta_sidecar_cached(str(path_key))
-    if all(key in sidecar_meta for key in required):
-        return {key: int(_safe_int(sidecar_meta.get(key, 0), 0)) for key in required}
-
-    analyzer_any = _load_analyzer_output_for_compute_cached(
-        str(path_key),
-        bool(normalize_trace_coverage),
-    )
-    if not isinstance(analyzer_any, dict):
-        return {
-            "trace_expanding_read_mask_present_count": 0,
-            "trace_expanding_read_bits_total": 0,
-            "trace_expanding_site_mask_present_count": 0,
-            "trace_expanding_site_bits_total": 0,
-            "trace_expanding_mask_present_count": 0,
-            "trace_expanding_bits_total": 0,
-        }
-    analyzer_meta_raw = analyzer_any.get("exact_meta", {})
-    analyzer_meta = analyzer_meta_raw if isinstance(analyzer_meta_raw, dict) else {}
-    if all(key in analyzer_meta for key in required):
-        return {key: int(_safe_int(analyzer_meta.get(key, 0), 0)) for key in required}
-    return _trace_expanding_stats_from_analyzer_payload(analyzer_any)
-
-
 def _apply_sampling_space_domain_reconciliation(
     out: Dict[str, Any],
     meta: Dict[str, Any],
     args: argparse.Namespace,
 ) -> None:
-    fault_component = str(
+    fault_component = _stable_scalar_text(
         meta.get("fault_component", getattr(args, "fault_component", ""))
     ).strip().lower()
     use_sampling_space_domain_global = bool(
@@ -14972,7 +15266,7 @@ def _apply_sampling_space_domain_reconciliation(
     meta["sampling_space_addr_domain_bits_inferred"] = int(
         max(0, sampling_addr_domain_inferred_bits)
     )
-    meta["sampling_space_addr_domain_policy"] = str(addr_fault_policy)
+    meta["sampling_space_addr_domain_policy"] = _stable_scalar_text(addr_fault_policy)
 
     derived_total = _safe_int(
         meta.get("total_bits", 0),
@@ -15179,7 +15473,7 @@ def _apply_sampling_space_domain_reconciliation(
     meta["use_sampling_space_domain_rf"] = bool(use_sampling_space_domain_rf)
     meta["use_sampling_space_domain_smem"] = bool(use_sampling_space_domain_smem)
     meta["use_sampling_space_domain"] = bool(use_sampling_space_domain)
-    meta["metadata_fault_policy"] = str(metadata_fault_policy)
+    meta["metadata_fault_policy"] = _stable_scalar_text(metadata_fault_policy)
     meta["metadata_domain_bits"] = int(metadata_domain_bits)
     meta["metadata_masked_bits"] = int(metadata_policy_counts.get("masked", 0))
     meta["metadata_sdc_bits"] = int(metadata_policy_counts.get("sdc", 0))
@@ -15199,7 +15493,7 @@ def _apply_sampling_space_domain_reconciliation(
     meta["sampling_space_domain_per_seed_bits"] = int(
         _safe_int(sampling_info.get("domain_per_seed_bits", 0), 0)
     )
-    meta["sampling_space_domain_source"] = str(sampling_info.get("domain_source", "none"))
+    meta["sampling_space_domain_source"] = _stable_scalar_text(sampling_info.get("domain_source", "none"))
 
     metadata_applied_bits = 0
     metadata_applied_counts = {"masked": 0, "sdc": 0, "due": 0, "unknown": 0}
@@ -15229,7 +15523,7 @@ def _apply_sampling_space_domain_reconciliation(
                 "mismatch_bits": int(domain_mismatch),
                 "sampling_total_bits": int(sampling_total),
                 "derived_total_bits": int(derived_total),
-                "fault_component": str(fault_component),
+                "fault_component": _stable_scalar_text(fault_component),
             },
         )
 
@@ -15270,7 +15564,7 @@ def _apply_sampling_space_domain_reconciliation(
                             meta=meta,
                             reason="addr_domain_exclusion_exceeds_class_count",
                             details={
-                                "class": str(cls),
+                                "class": _stable_scalar_text(cls),
                                 "drop_bits": _normalize_numeric(drop_v),
                                 "class_count_bits": _normalize_numeric(counts.get(cls, 0.0)),
                                 "target_total_bits": int(target_total),
@@ -15342,7 +15636,7 @@ def _apply_sampling_space_domain_reconciliation(
                     "adjusted_total_bits": _normalize_numeric(adjusted_total),
                     "residual_bits": _normalize_numeric(residual),
                     "unexplained_bits": int(abs(round(residual))),
-                    "reconciliation_method": str(reconciliation_method),
+                    "reconciliation_method": _stable_scalar_text(reconciliation_method),
                 },
             )
 
@@ -15375,7 +15669,7 @@ def _apply_sampling_space_domain_reconciliation(
                     unknown=0.0,
                     den=0,
                     mode="excluded_from_fi_aligned_domain",
-                    policy=str(addr_fault_policy),
+                    policy=_stable_scalar_text(addr_fault_policy),
                     extra={
                         "excluded_bits": int(addr_domain_excluded_bits),
                         "excluded_counts": {
@@ -15414,7 +15708,7 @@ def _apply_sampling_space_domain_reconciliation(
                     due=float(metadata_applied_counts.get("due", 0)),
                     unknown=float(metadata_applied_counts.get("unknown", 0)),
                     den=int(metadata_applied_bits),
-                    policy=str(metadata_fault_policy),
+                    policy=_stable_scalar_text(metadata_fault_policy),
                     mode="fi_aligned_metadata_rule",
                 )
 
@@ -15427,7 +15721,7 @@ def _apply_sampling_space_domain_reconciliation(
     else:
         reconciliation_method = "disabled"
 
-    meta["domain_reconciliation_method"] = str(reconciliation_method)
+    meta["domain_reconciliation_method"] = _stable_scalar_text(reconciliation_method)
     meta["domain_reconciliation_unexplained_bits"] = int(unexplained_mismatch_bits)
     meta["domain_reconciliation_non_live_masked_topup_bits"] = int(
         non_live_masked_topup_bits
@@ -15435,7 +15729,7 @@ def _apply_sampling_space_domain_reconciliation(
     meta["domain_reconciliation_addr_domain_excluded_bits"] = int(
         addr_domain_excluded_bits
     )
-    meta["domain_reconciliation_failure_report_path"] = str(
+    meta["domain_reconciliation_failure_report_path"] = _stable_scalar_text(
         meta.get("domain_reconciliation_failure_report_path", "")
     )
     meta["domain_reconciliation_target_total_bits"] = int(target_total)
@@ -15453,39 +15747,16 @@ def _apply_trace_divergence_zero_diagnostics(
     meta: Dict[str, Any],
     args: argparse.Namespace,
 ) -> None:
-    analyzer_stats_present = _safe_int(meta.get("trace_expanding_mask_present_count", -1), -1)
-    analyzer_stats_bits = _safe_int(meta.get("trace_expanding_bits_total", -1), -1)
-    if analyzer_stats_present < 0 or analyzer_stats_bits < 0:
-        analyzer_path = getattr(args, "analyzer_output", None)
-        if analyzer_path is not None:
-            try:
-                stats = _trace_expanding_stats_for_analyzer_path(
-                    _path_cache_key(Path(analyzer_path)),
-                    bool(getattr(args, "normalize_trace_coverage", False)),
-                )
-            except Exception:
-                stats = {}
-            for k, v in stats.items():
-                meta[k] = int(v)
-    meta.setdefault("trace_expanding_mask_present_count", 0)
-    meta.setdefault("trace_expanding_bits_total", 0)
-    meta.setdefault("trace_expanding_read_mask_present_count", 0)
-    meta.setdefault("trace_expanding_read_bits_total", 0)
-    meta.setdefault("trace_expanding_site_mask_present_count", 0)
-    meta.setdefault("trace_expanding_site_bits_total", 0)
-
-    policy = _normalize_trace_divergence_policy(meta.get("trace_divergence_policy", CANONICAL_TRACE_DIVERGENCE_POLICY))
+    _ = args
+    policy = _normalize_trace_divergence_policy(
+        meta.get("trace_divergence_policy", CANONICAL_TRACE_DIVERGENCE_POLICY)
+    )
     trace_div_bits = _safe_int(meta.get("trace_divergence_bits", 0), 0)
     if policy == CANONICAL_TRACE_DIVERGENCE_POLICY and trace_div_bits == 0:
         warning = (
-            "trace_divergence_policy={} but trace_divergence_bits=0; "
-            "trace_expanding_mask_present_count={} trace_expanding_bits_total={}"
-        ).format(
-            policy,
-            int(meta.get("trace_expanding_mask_present_count", 0)),
-            int(meta.get("trace_expanding_bits_total", 0)),
-        )
-        meta["trace_divergence_zero_warning"] = str(warning)
+            "trace_divergence_policy={} but trace_divergence_bits=0"
+        ).format(policy)
+        meta["trace_divergence_zero_warning"] = _stable_scalar_text(warning)
 
 
 def finalize_exact_result(
@@ -15512,7 +15783,7 @@ def finalize_exact_result(
     due_eff = due_raw
     unknown_eff = unknown_raw
     canonical_promotions: Dict[str, Any] = {}
-    fault_component = str(getattr(args, "fault_component", "")).strip().lower()
+    fault_component = _stable_scalar_text(getattr(args, "fault_component", "")).strip().lower()
     meta_pre = out.get("exact_meta", {})
     meta_pre = dict(meta_pre) if isinstance(meta_pre, dict) else {}
     if float(unknown_eff) > 0.0:
@@ -15606,7 +15877,7 @@ def finalize_exact_result(
         "total": _normalize_count_num(total),
     }
     meta["raw_unknown_mass"] = _normalize_count_num(unknown_raw)
-    meta["exact_semantics_profile"] = str(
+    meta["exact_semantics_profile"] = _stable_scalar_text(
         getattr(args, "exact_semantics_profile", EXACT_SEMANTICS_PROFILE)
     )
     strict_replacement_enabled = bool(_safe_int(getattr(args, "strict_replacement", 0), 0))
@@ -15687,7 +15958,7 @@ def finalize_exact_result(
             mode_default, _vals = _parse_addr_bits_spec(getattr(args, "addr_bits", "auto"))
         except Exception:
             mode_default = "auto"
-        meta["addr_bits_mode"] = str(mode_default)
+        meta["addr_bits_mode"] = _stable_scalar_text(mode_default)
     if "addr_bits_count" not in meta:
         meta["addr_bits_count"] = 0
     if "addr_effective_bits" not in meta:
@@ -15723,7 +15994,7 @@ def finalize_exact_result(
     due_source_mass: Dict[str, float] = {}
     if isinstance(due_source_mass_raw, dict):
         for k, v in due_source_mass_raw.items():
-            due_source_mass[str(k)] = float(_to_float_num(v))
+            due_source_mass[_stable_scalar_text(k)] = float(_to_float_num(v))
     required_due_keys = (
         "semantic_due",
         "addr_oob_due",
@@ -15740,8 +16011,8 @@ def finalize_exact_result(
         "unknown_fold_to_due",
     )
     for key in required_due_keys:
-        due_source_mass.setdefault(str(key), 0.0)
-    fault_component_for_fold = str(
+        due_source_mass.setdefault(_stable_scalar_text(key), 0.0)
+    fault_component_for_fold = _stable_scalar_text(
         meta.get("fault_component", getattr(args, "fault_component", ""))
     ).strip().lower()
     meta["due_mass_by_source"] = _normalize_mass_map(due_source_mass)
@@ -15772,17 +16043,17 @@ def finalize_exact_result(
     )
     meta["unknown_source_bits"] = dict(unknown_source_bits)
     meta["unknown_mass_by_source"] = dict(unknown_source_mass)
-    meta["unknown_source_mass_method"] = str(unknown_source_method)
+    meta["unknown_source_mass_method"] = _stable_scalar_text(unknown_source_method)
     unknown_reason_counts = _collect_unknown_reason_counts(meta, unknown_raw)
     meta["unknown_reason_counts"] = dict(unknown_reason_counts)
     fi_sampling_space_path = getattr(args, "fi_sampling_space_path", None)
     if fi_sampling_space_path is not None:
-        meta["fi_sampling_space_path"] = str(fi_sampling_space_path)
+        meta["fi_sampling_space_path"] = _stable_scalar_text(fi_sampling_space_path)
     cycles_domain_path = getattr(args, "cycles_domain_path", None)
     if cycles_domain_path is None:
         cycles_domain_path = getattr(args, "cycles", None)
     if cycles_domain_path is not None:
-        meta["cycles_domain_path"] = str(cycles_domain_path)
+        meta["cycles_domain_path"] = _stable_scalar_text(cycles_domain_path)
     meta["storage_group_mode"] = _normalize_storage_group_mode(
         meta.get("storage_group_mode", getattr(args, "storage_group_mode", "legacy"))
     )
@@ -15815,7 +16086,7 @@ def finalize_exact_result(
             meta["boundary_bits_mass_total"] = _normalize_count_num(boundary_bits_mass_total)
     if "boundary_bits_mass_total" in meta:
         affected_prob = _boundary_affected_prob_for_output(
-            consumer_compare=str(meta.get("consumer_compare", getattr(args, "consumer_compare", "gt"))),
+            consumer_compare=_stable_scalar_text(meta.get("consumer_compare", getattr(args, "consumer_compare", "gt"))),
             same_cycle_effect_prob=same_cycle_effect_prob,
         )
         unaffected_prob = 1.0 - float(affected_prob)
@@ -15881,7 +16152,7 @@ def finalize_exact_result(
         meta["rate_blended"] = {"masked": 0.0, "sdc": 0.0, "due": 0.0, "unknown": 0.0}
     rate_gt = _rate_from_counts(meta.get("classification_counts_gt"))
     rate_ge = _rate_from_counts(meta.get("classification_counts_ge"))
-    consumer_compare = str(meta.get("consumer_compare", getattr(args, "consumer_compare", "gt"))).strip().lower()
+    consumer_compare = _stable_scalar_text(meta.get("consumer_compare", getattr(args, "consumer_compare", "gt"))).strip().lower()
     if rate_gt is None:
         if consumer_compare == "gt":
             rate_gt = dict(meta.get("rate_blended", {}))
@@ -15923,14 +16194,14 @@ def finalize_exact_result(
         if _to_float_num(meta.get("unknown_mass", 0.0)) > 0.0:
             strict_reasons.append("unknown_classification_present")
         if (
-            str(meta.get("cache_tag_exact_mode", "")).strip().lower()
+            _stable_scalar_text(meta.get("cache_tag_exact_mode", "")).strip().lower()
             == "exact_global_readonly_alias_semantic"
             and int(_safe_int(meta.get("cache_tag_multievent_cycles", 0), 0)) > 0
             and int(_safe_int(meta.get("cache_tag_alias_intervals", 0), 0)) <= 0
         ):
             strict_reasons.append("cache_tag_multievent_cycle_unsupported")
         if strict_reasons:
-            reason_counts = Counter(str(reason) for reason in strict_reasons)
+            reason_counts = Counter(_stable_scalar_text(reason) for reason in strict_reasons)
             meta["strict_ok"] = False
             meta["strict_fail_reasons"] = sorted(reason_counts)
             meta["strict_fail_reason_counts"] = dict(reason_counts)
@@ -15942,8 +16213,8 @@ def finalize_exact_result(
                     "strict_ok": False,
                     "strict_fail_reasons": list(meta["strict_fail_reasons"]),
                     "strict_fail_reason_counts": dict(reason_counts),
-                    "fault_component": str(meta.get("fault_component", "")),
-                    "cache_tag_exact_mode": str(meta.get("cache_tag_exact_mode", "")),
+                    "fault_component": _stable_scalar_text(meta.get("fault_component", "")),
+                    "cache_tag_exact_mode": _stable_scalar_text(meta.get("cache_tag_exact_mode", "")),
                     "cache_tag_multievent_cycles": int(
                         _safe_int(meta.get("cache_tag_multievent_cycles", 0), 0)
                     ),
@@ -15957,7 +16228,7 @@ def finalize_exact_result(
                 report_dst = Path(report_path)
                 report_dst.parent.mkdir(parents=True, exist_ok=True)
                 _json_dump_path(report_dst, report)
-                meta["strict_fail_report_path"] = str(report_dst)
+                meta["strict_fail_report_path"] = _stable_scalar_text(report_dst)
 
     final_counts = out.get("classification_counts", {})
     if isinstance(final_counts, dict):
@@ -16278,8 +16549,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     reject_removed_exact_semantic_overrides()
-    if len(sys.argv) > 1 and sys.argv[1] == "--_component-args-pickle":
-        return _run_pickled_batch_component(sys.argv[1:])
+    if len(sys.argv) > 1 and sys.argv[1] == "--_batch-args-pickle":
+        return _run_pickled_batch_components(sys.argv[1:])
     args = build_arg_parser().parse_args()
     args = apply_canonical_exact_semantics(args)
     if getattr(args, "batch_components", None):

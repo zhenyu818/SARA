@@ -1,10 +1,10 @@
 === Extracting metrics from logs ===
 KERNELS:
-- name=_Z10stencil_1dPKiPii regs=22 lmem=0 smem=1080 shader_used=0 1 2 3 cycles=6293
+- name=_Z10stencil_1dPKiPii regs=22 lmem=0 smem=1080 shader_used=0 1 2 3 cycles=6609
 KERNEL_INVOCATIONS:
-- id=1 name=_Z10stencil_1dPKiPii regs=22 lmem=0 smem=1080 shader_used=0 1 2 3 cycles=6293
+- id=1 name=_Z10stencil_1dPKiPii regs=22 lmem=0 smem=1080 shader_used=0 1 2 3 cycles=6609
 
-CYCLES: 6293
+CYCLES: 6609
 MAX_REGISTERS_USED: 22
 SHADER_USED: 0 1 2 3
 DATATYPE_SIZE: 32

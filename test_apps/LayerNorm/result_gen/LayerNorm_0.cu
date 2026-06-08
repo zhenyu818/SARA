@@ -128,13 +128,13 @@ int main(int argc, char **argv) {
     fflush(stderr);
 
     for (int i = 0; i < bt_count * C; ++i) {
-        printf("%.6f ", out[i]);
+        printf("%.9g ", out[i]);
     }
     for (int i = 0; i < bt_count; ++i) {
-        printf("%.6f ", mean[i]);
+        printf("%.9g ", mean[i]);
     }
     for (int i = 0; i < bt_count; ++i) {
-        printf("%.6f ", rstd[i]);
+        printf("%.9g ", rstd[i]);
     }
     printf("\n");
 

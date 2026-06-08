@@ -129,19 +129,19 @@ int main(int argc, char **argv) {
     for (long i = 0; i < num_parameters; i++) {
         if (!first)
             printf(" ");
-        printf("%.6f", params_memory[i]);
+        printf("%.9g", params_memory[i]);
         first = false;
     }
     for (long i = 0; i < num_parameters; i++) {
         if (!first)
             printf(" ");
-        printf("%.6f", m_memory[i]);
+        printf("%.9g", m_memory[i]);
         first = false;
     }
     for (long i = 0; i < num_parameters; i++) {
         if (!first)
             printf(" ");
-        printf("%.6f", v_memory[i]);
+        printf("%.9g", v_memory[i]);
         first = false;
     }
     printf("\n");

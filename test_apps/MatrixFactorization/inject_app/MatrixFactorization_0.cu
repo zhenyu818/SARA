@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <random>
 #include <vector>
+#include <cstdint>
+#include <cstring>
 
 #define HOST_RANDOM_SEED 2026
 #define LATENT_FACTORS 8
@@ -84,14 +86,12 @@ __global__ void matrix_factorization_sgd_kernel(const float *p_in, const float *
     }
 }
 
-static bool approx_equal(float a, float b) {
-    if (isnan(a) || isnan(b)) {
-        return isnan(a) && isnan(b);
-    }
-    if (isinf(a) || isinf(b)) {
-        return isinf(a) && isinf(b) && ((a > 0.0f) == (b > 0.0f));
-    }
-    return fabsf(a - b) <= 1e-5f;
+static bool exact_equal_float(float a, float b) {
+    uint32_t ai = 0;
+    uint32_t bi = 0;
+    std::memcpy(&ai, &a, sizeof(ai));
+    std::memcpy(&bi, &b, sizeof(bi));
+    return ai == bi;
 }
 
 static void build_inputs(int num_users, int num_items, int items_per_user, std::vector<float> &p,
@@ -231,22 +231,22 @@ int main(int argc, char **argv) {
     bool success = true;
     float ref_value = 0.0f;
     for (size_t i = 0; success && i < h_p_out.size(); ++i) {
-        if (fscanf(fp, "%f", &ref_value) != 1 || !approx_equal(h_p_out[i], ref_value)) {
+        if (fscanf(fp, "%f", &ref_value) != 1 || !exact_equal_float(h_p_out[i], ref_value)) {
             success = false;
         }
     }
     for (size_t i = 0; success && i < h_q_out.size(); ++i) {
-        if (fscanf(fp, "%f", &ref_value) != 1 || !approx_equal(h_q_out[i], ref_value)) {
+        if (fscanf(fp, "%f", &ref_value) != 1 || !exact_equal_float(h_q_out[i], ref_value)) {
             success = false;
         }
     }
     for (size_t i = 0; success && i < h_user_bias_out.size(); ++i) {
-        if (fscanf(fp, "%f", &ref_value) != 1 || !approx_equal(h_user_bias_out[i], ref_value)) {
+        if (fscanf(fp, "%f", &ref_value) != 1 || !exact_equal_float(h_user_bias_out[i], ref_value)) {
             success = false;
         }
     }
     for (size_t i = 0; success && i < h_item_bias_out.size(); ++i) {
-        if (fscanf(fp, "%f", &ref_value) != 1 || !approx_equal(h_item_bias_out[i], ref_value)) {
+        if (fscanf(fp, "%f", &ref_value) != 1 || !exact_equal_float(h_item_bias_out[i], ref_value)) {
             success = false;
         }
     }

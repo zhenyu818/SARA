@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <cstdint>
+#include <cstring>
 
 #define CUDA_CHECK(call)                                                                                               \
     do {                                                                                                               \
@@ -28,14 +30,12 @@ static int ceil_div(int a, int b) {
     return (a + b - 1) / b;
 }
 
-static bool approx_equal(float a, float b) {
-    if (isnan(a) || isnan(b)) {
-        return isnan(a) && isnan(b);
-    }
-    if (isinf(a) || isinf(b)) {
-        return isinf(a) && isinf(b) && ((a > 0.0f) == (b > 0.0f));
-    }
-    return fabsf(a - b) <= 1e-5f;
+static bool exact_equal_float(float a, float b) {
+    uint32_t ai = 0;
+    uint32_t bi = 0;
+    std::memcpy(&ai, &a, sizeof(ai));
+    std::memcpy(&bi, &b, sizeof(bi));
+    return ai == bi;
 }
 
 static void compute_layernorm_stats(float *mean, float *rstd, const float *inp, int bt_count, int c) {
@@ -187,12 +187,12 @@ int main(int argc, char **argv) {
 
     bool success = read_ok;
     for (int i = 0; success && i < bt_count * C; ++i) {
-        if (!approx_equal(out[i], ref_out[i])) {
+        if (!exact_equal_float(out[i], ref_out[i])) {
             success = false;
         }
     }
     for (int i = 0; success && i < bt_count; ++i) {
-        if (!approx_equal(mean[i], ref_mean[i]) || !approx_equal(rstd[i], ref_rstd[i])) {
+        if (!exact_equal_float(mean[i], ref_mean[i]) || !exact_equal_float(rstd[i], ref_rstd[i])) {
             success = false;
         }
     }

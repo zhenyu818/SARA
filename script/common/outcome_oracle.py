@@ -97,19 +97,8 @@ def _materialized_output_spec(
     output_spec: Optional[Sequence[Dict[str, Any]]],
     tol_policy: Optional[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    specs = _load_output_spec(output_spec)
-    if not specs:
-        return []
-    out: List[Dict[str, Any]] = []
-    for idx, spec in enumerate(specs):
-        output_name = str(spec.get("name", "") or "").strip() or None
-        if output_is_device_materialized(
-            tol_policy,
-            output_name=output_name,
-            output_index=idx,
-        ):
-            out.append(dict(spec))
-    return out
+    _ = tol_policy
+    return _load_output_spec(output_spec)
 
 
 def _load_log_summary(path: Path) -> Dict[str, Any]:
@@ -289,37 +278,26 @@ def _normalize_scalar_kind(kind: Any) -> str:
     return str(kind or "").strip().lower()
 
 
-def _output_policy_entries(tol_policy: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    policy = tol_policy or {}
-    raw = policy.get("outputs", [])
-    if not isinstance(raw, list):
-        return []
-    out: List[Dict[str, Any]] = []
-    for idx, item in enumerate(raw):
-        if not isinstance(item, dict):
-            continue
-        ent = dict(item)
-        ent.setdefault("order", int(idx))
-        out.append(ent)
-    out.sort(key=lambda item: int(item.get("order", 0)))
-    return out
+def _exact_output_policy() -> Dict[str, Any]:
+    """Return the repository-wide exact-output SDC policy.
 
-
-def _policy_defaults(tol_policy: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    policy = tol_policy or {}
+    FI/SARA/GEREM-all experiments now classify any final output mismatch as
+    SDC for every application, including floating-point applications.  Shared
+    oracle callers may still pass legacy tolerance-policy JSON; normalize it
+    away here so stale result directories or environment values cannot
+    re-enable tolerance during run_experiment.sh campaigns.
+    """
     return {
-        "compare_kind": str(policy.get("compare_kind", "") or "").strip().lower(),
-        "float_abs_tol": float(policy.get("float_abs_tol", 0.0) or 0.0),
-        "float_rel_tol": float(policy.get("float_rel_tol", 0.0) or 0.0),
-        "nan_equal": bool(policy.get("nan_equal", True)),
-        "inf_sign_must_match": bool(policy.get("inf_sign_must_match", True)),
-        "scalar_kind": str(policy.get("scalar_kind", "") or "").strip(),
-        "print_format": str(policy.get("print_format", "") or "").strip(),
-        "print_precision": policy.get("print_precision"),
-        "text_trim": bool(policy.get("text_trim", True)),
-        "collapse_whitespace": bool(policy.get("collapse_whitespace", False)),
-        "device_materialized": bool(policy.get("device_materialized", True)),
-        "materialized_via": str(policy.get("materialized_via", "") or "").strip(),
+        "compare_kind": "exact",
+        "nan_equal": False,
+        "inf_sign_must_match": True,
+        "scalar_kind": "",
+        "print_format": "",
+        "print_precision": None,
+        "text_trim": True,
+        "collapse_whitespace": False,
+        "device_materialized": True,
+        "materialized_via": "",
     }
 
 
@@ -329,22 +307,8 @@ def resolve_output_policy(
     output_name: Optional[str] = None,
     output_index: Optional[int] = None,
 ) -> Dict[str, Any]:
-    defaults = _policy_defaults(tol_policy)
-    entries = _output_policy_entries(tol_policy)
-    if entries:
-        if output_name:
-            for item in entries:
-                if str(item.get("name", "")).strip() == str(output_name).strip():
-                    merged = dict(defaults)
-                    merged.update(item)
-                    return merged
-        if output_index is not None:
-            for item in entries:
-                if int(item.get("order", -1)) == int(output_index):
-                    merged = dict(defaults)
-                    merged.update(item)
-                    return merged
-    return defaults
+    _ = (tol_policy, output_name, output_index)
+    return _exact_output_policy()
 
 
 def output_is_device_materialized(
@@ -353,12 +317,8 @@ def output_is_device_materialized(
     output_name: Optional[str] = None,
     output_index: Optional[int] = None,
 ) -> bool:
-    policy = resolve_output_policy(
-        tol_policy,
-        output_name=output_name,
-        output_index=output_index,
-    )
-    return bool(policy.get("device_materialized", True))
+    _ = (tol_policy, output_name, output_index)
+    return True
 
 
 def _parse_output_value_key(key: str) -> Optional[Tuple[str, int, int]]:
@@ -466,20 +426,12 @@ def serialized_reference_value(
         output_name=output_name,
         output_index=output_index,
     )
-    typed_value = _coerce_scalar_value(raw_value, policy.get("scalar_kind"), size_bytes=size_bytes)
-    if str((tol_policy or {}).get("comparison_mode", "")).strip().lower() != "serialized_result":
-        return typed_value
-    serialized = _format_serialized_scalar(typed_value, policy)
-    return _coerce_scalar_value(serialized, policy.get("scalar_kind"), size_bytes=size_bytes)
+    return _coerce_scalar_value(raw_value, policy.get("scalar_kind"), size_bytes=size_bytes)
 
 
 def _value_equal(a: Any, b: Any, tol_policy: Optional[Dict[str, Any]]) -> bool:
-    policy = tol_policy or {}
-    compare_kind = str(policy.get("compare_kind", "") or "").strip().lower()
-    abs_tol = float(policy.get("float_abs_tol", 0.0) or 0.0)
-    rel_tol = float(policy.get("float_rel_tol", 0.0) or 0.0)
-    nan_equal = bool(policy.get("nan_equal", True))
-    inf_sign_must_match = bool(policy.get("inf_sign_must_match", True))
+    _ = tol_policy
+    policy = _exact_output_policy()
     scalar_kind = _normalize_scalar_kind(policy.get("scalar_kind"))
     if scalar_kind:
         a = _coerce_scalar_value(a, scalar_kind)
@@ -488,155 +440,10 @@ def _value_equal(a: Any, b: Any, tol_policy: Optional[Dict[str, Any]]) -> bool:
     fb = _as_float(b)
     if fa is not None and fb is not None:
         if math.isnan(fa) or math.isnan(fb):
-            return bool(nan_equal) and math.isnan(fa) and math.isnan(fb)
-        if math.isinf(fa) or math.isinf(fb):
-            if not (math.isinf(fa) and math.isinf(fb)):
-                return False
-            if not inf_sign_must_match:
-                return True
-            return math.copysign(1.0, fa) == math.copysign(1.0, fb)
-    if compare_kind in ("float_tolerance", "approx", "float_abs_tol"):
-        if fa is None or fb is None:
             return False
-        diff = abs(fa - fb)
-        if diff <= abs_tol:
-            return True
-        max_mag = max(abs(fa), abs(fb), 1.0)
-        if diff <= rel_tol * max_mag:
-            return True
-        return False
-    if compare_kind == "exact":
-        if scalar_kind.startswith("float") and fa is not None and fb is not None:
-            return fa == fb
-        return a == b
-    if fa is not None and fb is not None and (abs_tol > 0.0 or rel_tol > 0.0):
-        diff = abs(fa - fb)
-        if diff <= abs_tol:
-            return True
-        max_mag = max(abs(fa), abs(fb), 1.0)
-        if diff <= rel_tol * max_mag:
-            return True
-        return False
-    return _normalize_text(a, policy) == _normalize_text(b, policy)
-
-
-def _has_float_tolerance(tol_policy: Optional[Dict[str, Any]]) -> bool:
-    policy = tol_policy or {}
-    if (
-        float(policy.get("float_abs_tol", 0.0) or 0.0) > 0.0
-        or float(policy.get("float_rel_tol", 0.0) or 0.0) > 0.0
-    ):
-        return True
-    for ent in _output_policy_entries(tol_policy):
-        if not _normalize_scalar_kind(ent.get("scalar_kind")).startswith("float"):
-            continue
-        if (
-            float(ent.get("float_abs_tol", 0.0) or 0.0) > 0.0
-            or float(ent.get("float_rel_tol", 0.0) or 0.0) > 0.0
-        ):
-            return True
-        if str(policy.get("comparison_mode", "")).strip().lower() == "serialized_result":
-            return True
-    return False
-
-
-def _serialized_compare_result(
-    golden_outputs: Dict[str, Any],
-    run_outputs: Dict[str, Any],
-    output_spec: Sequence[Dict[str, Any]],
-    tol_policy: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    mode = str((tol_policy or {}).get("comparison_mode", "")).strip().lower()
-    if mode != "serialized_result" or not output_spec:
-        return None
-
-    specs = _materialized_output_spec(output_spec, tol_policy)
-    if not specs:
-        return {
-            "classification": "masked",
-            "detail": {"reason": "no_materialized_outputs"},
-        }
-
-    index_by_key: Dict[Tuple[str, int], Tuple[int, str]] = {}
-    for idx, spec in enumerate(specs):
-        base = _to_int(spec.get("base", 0))
-        index_by_key[(str(spec.get("name", "")).strip(), base)] = (
-            idx,
-            str(spec.get("name", "")).strip(),
-        )
-
-    def _build_sequence(raw_map: Dict[str, Any]) -> Tuple[List[Tuple[int, int, int, str, Any]], Set[str]]:
-        seq: List[Tuple[int, int, int, str, Any]] = []
-        unmatched: Set[str] = set()
-        for key, raw_value in raw_map.items():
-            parsed = _parse_output_value_key(str(key))
-            if parsed is None:
-                unmatched.add(str(key))
-                continue
-            _space, addr, size_bytes = parsed
-            matched = False
-            for spec_idx, spec in enumerate(specs):
-                base = _to_int(spec.get("base", 0))
-                size = int(spec.get("bytes", 0))
-                if size <= 0:
-                    continue
-                if addr < base or addr + size_bytes > base + size:
-                    continue
-                output_name = str(spec.get("name", "")).strip()
-                order = index_by_key.get((output_name, base), (spec_idx, output_name))[0]
-                offset = int(addr - base)
-                seq.append((order, offset, int(size_bytes), output_name, raw_value))
-                matched = True
-                break
-            if not matched:
-                unmatched.add(str(key))
-        seq.sort(key=lambda item: (int(item[0]), int(item[1]), int(item[2]), str(item[3])))
-        return seq, unmatched
-
-    golden_seq, golden_unmatched = _build_sequence(golden_outputs)
-    run_seq, run_unmatched = _build_sequence(run_outputs)
-    if golden_unmatched or run_unmatched:
-        return {
-            "classification": "sdc",
-            "detail": {"reason": "serialized_result_unmatched_output"},
-        }
-    if len(golden_seq) != len(run_seq):
-        return {
-            "classification": "sdc",
-            "detail": {"reason": "serialized_result_length_mismatch"},
-        }
-
-    for g_item, r_item in zip(golden_seq, run_seq):
-        if g_item[:4] != r_item[:4]:
-            return {
-                "classification": "sdc",
-                "detail": {"reason": "serialized_result_layout_mismatch"},
-            }
-        order, _offset, size_bytes, output_name, golden_raw = g_item
-        run_raw = r_item[4]
-        output_policy = resolve_output_policy(
-            tol_policy,
-            output_name=output_name or None,
-            output_index=order,
-        )
-        golden_ref = serialized_reference_value(
-            golden_raw,
-            tol_policy,
-            output_name=output_name or None,
-            output_index=order,
-            size_bytes=size_bytes,
-        )
-        run_typed = _coerce_scalar_value(run_raw, output_policy.get("scalar_kind"), size_bytes=size_bytes)
-        if not _value_equal(run_typed, golden_ref, output_policy):
-            return {
-                "classification": "sdc",
-                "detail": {"reason": "serialized_result_compare"},
-            }
-
-    return {
-        "classification": "masked",
-        "detail": {"reason": "serialized_result_compare"},
-    }
+        if math.isinf(fa) or math.isinf(fb):
+            return math.isinf(fa) and math.isinf(fb) and math.copysign(1.0, fa) == math.copysign(1.0, fb)
+    return a == b
 
 
 def compare_observations(
@@ -667,41 +474,9 @@ def compare_observations(
     gout = golden.get("outputs")
     rout = run.get("outputs")
     effective_output_spec = _materialized_output_spec(output_spec, tol_policy)
-    serialized_result = None
-    if isinstance(gout, dict) and isinstance(rout, dict) and len(gout) > 0 and len(rout) > 0:
-        serialized_result = _serialized_compare_result(
-            gout,
-            rout,
-            effective_output_spec,
-            tol_policy,
-        )
-    if serialized_result is not None:
-        return serialized_result
-
-    if (
-        str((tol_policy or {}).get("comparison_mode", "")).strip().lower() == "serialized_result"
-        and output_spec
-        and not effective_output_spec
-    ):
-        return {
-            "classification": "due",
-            "detail": _detail_minimal_due(
-                reason="no_materialized_outputs",
-                output_spec=output_spec,
-            ),
-        }
-
-    prefer_output_map = (
-        _has_float_tolerance(tol_policy)
-        and isinstance(gout, dict)
-        and isinstance(rout, dict)
-        and len(gout) > 0
-        and len(rout) > 0
-    )
-
     gsig = golden.get("output_signature")
     rsig = run.get("output_signature")
-    if gsig is not None and rsig is not None and not prefer_output_map:
+    if gsig is not None and rsig is not None:
         return {
             "classification": "masked" if gsig == rsig else "sdc",
             "detail": {"reason": "signature_compare"},
@@ -1388,7 +1163,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--tol-policy-json",
         type=str,
         default="{}",
-        help="JSON object for text/float tolerance policy",
+        help="Legacy JSON policy argument; experiments use exact output comparison",
     )
 
     p_cmp = sub.add_parser("compare", help="Generic compare_outputs wrapper")
@@ -1421,7 +1196,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--tol-policy-json",
         type=str,
         default="{}",
-        help="JSON object for text/float tolerance policy",
+        help="Legacy JSON policy argument; experiments use exact output comparison",
     )
     p_batch.add_argument("--output-json", type=Path, default=None)
     p_batch.add_argument("--output-csv", type=Path, default=None)

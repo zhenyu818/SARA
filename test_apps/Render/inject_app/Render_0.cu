@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <random>
 #include <vector>
+#include <cstdint>
+#include <cstring>
 
 #ifndef RNG_SEED
 #define RNG_SEED 2026
@@ -49,12 +51,12 @@ __global__ void render_kernel(float *color_buffer, const float *base_u, const fl
     color_buffer[pixel * 3 + 2] = sqrtf(b);
 }
 
-static bool approx_equal(float a, float b) {
-    if (isnan(a) || isnan(b))
-        return isnan(a) && isnan(b);
-    if (isinf(a) || isinf(b))
-        return isinf(a) && isinf(b) && (signbit(a) == signbit(b));
-    return fabsf(a - b) <= 1e-5f;
+static bool exact_equal_float(float a, float b) {
+    uint32_t ai = 0;
+    uint32_t bi = 0;
+    std::memcpy(&ai, &a, sizeof(ai));
+    std::memcpy(&bi, &b, sizeof(bi));
+    return ai == bi;
 }
 
 int main(int argc, char **argv) {
@@ -135,7 +137,7 @@ int main(int argc, char **argv) {
     bool match = true;
     float ref = 0.0f;
     for (size_t i = 0; match && i < output_count; ++i) {
-        if (fscanf(fp, "%f", &ref) != 1 || !approx_equal(h_color[i], ref)) {
+        if (fscanf(fp, "%f", &ref) != 1 || !exact_equal_float(h_color[i], ref)) {
             match = false;
         }
     }

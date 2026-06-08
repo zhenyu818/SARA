@@ -9,6 +9,16 @@
 #include <string>
 #include <time.h>
 #include <vector>
+#include <cstdint>
+#include <cstring>
+
+static bool exact_equal_float(float a, float b) {
+    uint32_t ai = 0;
+    uint32_t bi = 0;
+    std::memcpy(&ai, &a, sizeof(ai));
+    std::memcpy(&bi, &b, sizeof(bi));
+    return ai == bi;
+}
 
 #define SEED 2026
 #define TILE_ROW 4
@@ -224,25 +234,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // 比对 C 和 ref
+    // Exact-output SDC oracle: any output-bit mismatch is SDC.
     bool match = true;
     for (size_t i = 0; i < ref.size(); ++i) {
-        float a = C[i];
-        float b = ref[i];
-        bool eq = false;
-
-        if (std::isnan(a) && std::isnan(b)) {
-            eq = true;
-        } else if (std::isinf(a) && std::isinf(b)) {
-            // 检查符号相同的 inf
-            eq = (a > 0.0f) == (b > 0.0f);
-        } else if (!std::isnan(a) && !std::isinf(a) && !std::isnan(b) && !std::isinf(b)) {
-            eq = std::fabs(a - b) < 1e-5f;
-        } else {
-            eq = false;
-        }
-
-        if (!eq) {
+        if (!exact_equal_float(C[i], ref[i])) {
             match = false;
             break;
         }

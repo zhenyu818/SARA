@@ -88,7 +88,7 @@ static int matrix_multiply(int wA, int hA, int wB, int hB) {
 
     CUDA_CHECK(cudaMemcpy(h_C, d_C, mem_size_C, cudaMemcpyDeviceToHost));
     for (int i = 0; i < size_C; ++i) {
-        printf("%.6f ", h_C[i]);
+        printf("%.9g ", h_C[i]);
     }
     printf("\n");
 

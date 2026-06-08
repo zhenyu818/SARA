@@ -152,6 +152,17 @@ main() {
     cp "./${TEST_APP_NAME}.ptx" "${cache_dir}/${TEST_APP_NAME}.ptx"
     cp "./register_used.txt" "${cache_dir}/register_used.txt"
 
+    local generator_cache_dir result_gen_cu filename x_val
+    generator_cache_dir="${cache_dir}/result_generators"
+    mkdir -p "${generator_cache_dir}"
+    for result_gen_cu in "${TEST_APPS_ROOT}/${TEST_APP_NAME}/result_gen/${TEST_APP_NAME}_"*.cu; do
+        [[ -f "${result_gen_cu}" ]] || continue
+        filename="$(basename "${result_gen_cu}")"
+        x_val="$(echo "${filename}" | sed -n "s/^${TEST_APP_NAME}_\([0-9]\+\)\.cu$/\1/p")"
+        [[ -n "${x_val}" ]] || continue
+        run_with_native_cuda_env nvcc "${result_gen_cu}" -o "${generator_cache_dir}/gen_${x_val}" -g -lcudart -arch="${GPU_ARCH}"
+    done
+
     echo "=== Prebuilt ${TEST_APP_NAME} for RESULT_BASENAME=${RESULT_BASENAME} ==="
     echo "=== Cached prebuild artifacts in ${cache_dir} ==="
 }

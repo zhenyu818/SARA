@@ -105,7 +105,7 @@ int main(int argc, char *argv[]) {
     fflush(stderr);
     CUDA_CHECK(cudaMemcpy(output.data(), d_output, sizeof(float) * (size_t)numElem, cudaMemcpyDeviceToHost));
 
-    std::cout << std::fixed << std::setprecision(6);
+    std::cout << std::setprecision(9);
     for (int i = 0; i < numElem; ++i) {
         std::cout << output[i];
         if (i + 1 < numElem) {

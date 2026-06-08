@@ -3,6 +3,16 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+static int exact_equal_float(float a, float b) {
+    uint32_t ai = 0;
+    uint32_t bi = 0;
+    memcpy(&ai, &a, sizeof(ai));
+    memcpy(&bi, &b, sizeof(bi));
+    return ai == bi;
+}
 
 #define M_SEED 2026
 #define BLOCK_SIZE 256
@@ -191,35 +201,10 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    // ===== 逐项比较结果，显式支持 NaN 和 Inf =====
+    // Exact-output SDC oracle: any output-bit mismatch is SDC.
     bool match = true;
-    const float eps = 1e-5f;
     for (int i = 0; i < d; i++) {
-        float actual = dout[i];
-        float expected_val = expected[i];
-
-        if (isnan(actual) && isnan(expected_val)) {
-            continue; // 两个都是 NaN
-        }
-        if (isnan(actual) || isnan(expected_val)) {
-            match = false;
-            break;
-        }
-
-        if (isinf(actual) && isinf(expected_val)) {
-            if (signbit(actual) != signbit(expected_val)) {
-                match = false; // +Inf vs -Inf
-                break;
-            } else {
-                continue; // 同号 Inf
-            }
-        }
-        if (isinf(actual) || isinf(expected_val)) {
-            match = false; // 一个 Inf，一个不是
-            break;
-        }
-
-        if (fabs(actual - expected_val) > eps) {
+        if (!exact_equal_float(dout[i], expected[i])) {
             match = false;
             break;
         }

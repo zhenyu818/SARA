@@ -5,15 +5,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="${ROOT_DIR}/script"
 cd "${ROOT_DIR}"
 
-RESULT_ROOT="${RESULT_ROOT:-${ROOT_DIR}/test_result}"
+RESULT_ROOT="${RESULT_ROOT:-${ROOT_DIR}/sara-results}"
 WORK_ROOT="${WORK_ROOT:-${ROOT_DIR}/.work}"
 EXPERIMENT_RANDOM_SEED=2026
 export EXPERIMENT_RANDOM_SEED
+export PYTHONHASHSEED="${PYTHONHASHSEED:-2026}"
 ARCH=""
 METHOD=""
 APP=""
 RUNS="${RUN_PER_EPOCH:-1000}"
-GEREM_RUNS="${GEREM_STORAGE_CAMPAIGN_RUNS:-all}"
+FI_PARALLEL_JOBS="${FI_PARALLEL_JOBS:-8}"
+GEREM_RUNS="${GEREM_STORAGE_CAMPAIGN_RUNS:-1000}"
 RUNS_SET=0
 GEREM_RUNS_SET=0
 KEEP_INTERMEDIATE=0
@@ -52,8 +54,8 @@ usage() {
   cat <<'EOF'
 Usage: ./run_experiment.sh [options]
 
-Unified public runner for SARA, FI, and GEREM-all. Results are written under:
-  test_result/<Turing-RTX2060|Ampere-RTX3070>/<SARA|FI|GEREM-all>/
+Unified public runner for SARA, FI, and GEREM storage-EFM sampling. Results are written under:
+  sara-results/<Turing-RTX2060|Ampere-RTX3070>/<SARA|FI|GEREM-1000|GEREM-5000|GEREM-10000>/
 
 Options:
   --arch turing|ampere|both  Target architecture/config.
@@ -62,26 +64,30 @@ Options:
   --app NAME|all             One application or all test_apps (default: all).
                               This selects what to rerun; compare reports are
                               always refreshed for the full benchmark suite
-                              from the current test_result data.
+                              from the current RESULT_ROOT data.
   --runs N                   FI runs per component (default: 1000).
-  --gerem-runs N|all         GEREM campaign count (default: all).
+                              FI trials inside one app/component run in parallel
+                              with FI_PARALLEL_JOBS jobs (default: 8); apps and
+                              storage components remain strictly serial.
+  --gerem-runs 1000|5000|10000
+                              GEREM storage-EFM random-sampling campaign count.
   --skip-build               Skip common simulator build.
   --keep-intermediate        Keep this run's .work scratch directories after completion.
   --discard-intermediate     Delete this run's .work scratch directories after completion.
-  --keep-build               Keep generated build and SARA native binaries after completion.
+  --keep-build               Keep generated build artifacts after completion.
   --force                    Remove existing selected final app results first.
-  --smoke                    Convenience: --app AdamW --runs 1 --gerem-runs 1.
+  --smoke                    Convenience: --app AdamW --runs 1 --gerem-runs 1000.
   -h, --help                 Show this help.
 
 Interactive mode:
   Run without --arch/--method to use an arrow-key menu. Use ↑/↓ or k/j to move,
   Enter to select. The menu selects architecture, method, app, overwrite
-  behavior, and relevant run counts.
+  behavior, FI run count when needed, and intermediate cleanup behavior.
 
 Examples:
   ./run_experiment.sh --arch turing --method sara --app AdamW --smoke
   ./run_experiment.sh --arch ampere --method fi --runs 1000
-  ./run_experiment.sh --arch turing --method all --gerem-runs all
+  ./run_experiment.sh --arch turing --method gerem-all --gerem-runs 5000
   ./run_experiment.sh --arch both --method sara --app AdamW --smoke
 EOF
 }
@@ -292,12 +298,32 @@ all_app_list() {
   find "${ROOT_DIR}/test_apps" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
 }
 
+gerem_result_dir_name() {
+  echo "GEREM-${GEREM_RUNS}"
+}
+
+gerem_compare_slug() {
+  echo "gerem${GEREM_RUNS}"
+}
+
+sara_result_dir_name() {
+  echo "SARA"
+}
+
+sara_compare_output_name() {
+  echo "sara_$(gerem_compare_slug)_vs_fi.txt"
+}
+
+sara_compare_label() {
+  echo "SARA"
+}
+
 selected_experiment_list() {
   if method_runs_sara; then
-    echo "SARA"
+    sara_result_dir_name
   fi
   if method_runs_gerem; then
-    echo "GEREM-all"
+    gerem_result_dir_name
   fi
   if method_runs_fi; then
     echo "FI-storage"
@@ -828,11 +854,10 @@ choose_run_counts_if_needed() {
       "10000::10000"
   fi
   if [[ "${GEREM_RUNS_SET}" != "1" ]] && method_runs_gerem; then
-    arrow_select GEREM_RUNS "Select GEREM campaign runs:" 0 \
-      "all::all (strict GEREM-all)" \
-      "1000::1000 (sample)" \
-      "10000::10000" \
-      "1::1 (smoke)"
+    arrow_select GEREM_RUNS "Select GEREM storage-EFM random samples:" 0 \
+      "1000::GEREM-1000 (1000 random samples)" \
+      "5000::GEREM-5000 (5000 random samples)" \
+      "10000::GEREM-10000 (10000 random samples)"
   fi
 }
 
@@ -852,13 +877,59 @@ choose_keep_intermediate_if_needed() {
   fi
 }
 
-simulator_runtime_available() {
-  local source_rc=0
+resolve_cuda_install_path() {
+  if [[ -n "${CUDA_INSTALL_PATH:-}" && -d "${CUDA_INSTALL_PATH}" && -x "${CUDA_INSTALL_PATH}/bin/nvcc" ]]; then
+    return 0
+  fi
+  local -a candidates=()
+  local nvcc_path=""
+  if nvcc_path="$(command -v nvcc 2>/dev/null)"; then
+    candidates+=("$(cd "$(dirname "${nvcc_path}")/.." && pwd)")
+  fi
+  candidates+=("/usr/local/cuda")
+  local d
+  for d in /usr/local/cuda-*; do
+    [[ -d "${d}" ]] || continue
+    candidates+=("${d}")
+  done
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -d "${candidate}" ]] || continue
+    if [[ -x "${candidate}/bin/nvcc" ]]; then
+      export CUDA_INSTALL_PATH="${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+source_gpgpusim_environment() {
+  if ! resolve_cuda_install_path; then
+    echo "=== Error: could not find a valid CUDA toolkit path with nvcc. ===" >&2
+    return 1
+  fi
+  local had_nounset=0
+  case "$-" in
+    *u*) had_nounset=1 ;;
+  esac
   set +u
-  source "${ROOT_DIR}/setup_environment" >/dev/null 2>&1
-  source_rc=$?
-  set -u
-  (( source_rc == 0 )) || return 1
+  source "${ROOT_DIR}/setup_environment" || true
+  if [[ "${had_nounset}" == "1" ]]; then
+    set -u
+  else
+    set +u
+  fi
+  if [[ "${DISABLE_GPGPUSIM_POWER_MODEL:-0}" == "1" ]]; then
+    unset GPGPUSIM_POWER_MODEL || true
+  fi
+  if [[ "${GPGPUSIM_SETUP_ENVIRONMENT_WAS_RUN:-}" != "1" ]]; then
+    echo "=== Error: setup_environment did not complete successfully. ===" >&2
+    return 1
+  fi
+}
+
+simulator_runtime_available() {
+  source_gpgpusim_environment >/dev/null 2>&1 || return 1
   [[ -n "${GPGPUSIM_CONFIG:-}" ]] || return 1
   [[ -f "${ROOT_DIR}/lib/${GPGPUSIM_CONFIG}/libcudart.so" ]]
 }
@@ -939,7 +1010,7 @@ while [[ $# -gt 0 ]]; do
     --discard-intermediate) KEEP_INTERMEDIATE=0; KEEP_INTERMEDIATE_SET=1; shift ;;
     --keep-build) KEEP_BUILD=1; shift ;;
     --force) FORCE=1; FORCE_SET=1; shift ;;
-    --smoke) APP="AdamW"; RUNS=1; GEREM_RUNS=1; RUNS_SET=1; GEREM_RUNS_SET=1; shift ;;
+    --smoke) APP="AdamW"; RUNS=1; GEREM_RUNS=1000; RUNS_SET=1; GEREM_RUNS_SET=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -951,10 +1022,10 @@ choose_if_empty ARCH "Select architecture:" \
   "both::Turing + Ampere"
 choose_if_empty METHOD "Select experiment method:" \
   "sara::SARA" \
-  "sara-gerem-all::SARA + GEREM-all" \
-  "gerem-all::GEREM-all" \
+  "sara-gerem-all::SARA + GEREM storage EFM" \
+  "gerem-all::GEREM storage EFM" \
   "fi::FI" \
-  "all::SARA + GEREM-all + FI"
+  "all::SARA + GEREM storage EFM + FI"
 normalize_arch
 normalize_method
 
@@ -968,9 +1039,15 @@ if ! [[ "${RUNS}" =~ ^[0-9]+$ ]] || (( RUNS <= 0 )); then
   echo "--runs must be a positive integer" >&2
   exit 2
 fi
-if [[ "${GEREM_RUNS,,}" != "all" && ! "${GEREM_RUNS}" =~ ^[0-9]+$ ]]; then
-  echo "--gerem-runs must be a positive integer or all" >&2
-  exit 2
+if method_runs_gerem; then
+  if ! [[ "${GEREM_RUNS}" =~ ^[0-9]+$ ]]; then
+    echo "--gerem-runs must be one of 1000, 5000, 10000" >&2
+    exit 2
+  fi
+  case "${GEREM_RUNS}" in
+    1000|5000|10000) ;;
+    *) echo "--gerem-runs must be one of 1000, 5000, 10000" >&2; exit 2 ;;
+  esac
 fi
 validate_skip_build_if_needed
 python3 "${ROOT_DIR}/script/common/sara_result_layout.py" --result-root "${RESULT_ROOT}" --init >/dev/null
@@ -1101,9 +1178,10 @@ run_common_build_once() {
     return 0
   fi
   log_line "=== Building simulator once for ${ARCH_LABEL} ==="
-  set +u
-  source "${ROOT_DIR}/setup_environment" >> "${LOG_FILE}" 2>&1
-  set -u
+  if ! source_gpgpusim_environment >> "${LOG_FILE}" 2>&1; then
+    console_alert_line "=== Error: failed to source setup_environment; full log: ${LOG_FILE} ==="
+    return 1
+  fi
   local jobs="${BUILD_JOBS:-$(nproc 2>/dev/null || echo 4)}"
   if ! [[ "${jobs}" =~ ^[0-9]+$ ]] || (( jobs <= 0 )); then
     jobs=4
@@ -1114,18 +1192,6 @@ run_common_build_once() {
   run_logged "${ARCH_LABEL} common simulator build" make -j"${jobs}"
   SKIP_COMMON_BUILD=1
   progress_stage_done "${ARCH_LABEL} / common simulator build complete"
-}
-
-sara_result_dir_name() {
-  echo "SARA"
-}
-
-sara_compare_output_name() {
-  echo "sara_geremall_vs_fi.txt"
-}
-
-sara_compare_label() {
-  echo "SARA"
 }
 
 run_sara() {
@@ -1157,13 +1223,16 @@ run_sara() {
   progress_stage_done "${ARCH_LABEL} / ${method_dir} complete"
 }
 
+
 run_gerem_all() {
-  local final_dir="${RESULT_ROOT}/${ARCH_LABEL}/GEREM-all"
-  local work_dir="${SCRATCH_ROOT}/geremall_runs"
+  local method_dir
+  method_dir="$(gerem_result_dir_name)"
+  local final_dir="${RESULT_ROOT}/${ARCH_LABEL}/${method_dir}"
+  local work_dir="${SCRATCH_ROOT}/$(gerem_compare_slug)_runs"
   local prebuild_dir="${SCRATCH_ROOT}/storage_prebuilds"
-  progress_stage_start "${ARCH_LABEL} / GEREM-all" "GEREM-all"
-  remove_selected_results "GEREM-all"
-  run_logged "GEREM-all" env \
+  progress_stage_start "${ARCH_LABEL} / ${method_dir}" "${method_dir}"
+  remove_selected_results "${method_dir}"
+  run_logged "${method_dir}" env \
     RUN_ALL_STORAGE_FAIR_TEST_RESULT_DIR="${final_dir}" \
     RUN_ALL_STORAGE_FAIR_SARA_WORK_ROOT="${SCRATCH_ROOT}/unused_sara_runs" \
     RUN_ALL_STORAGE_FAIR_GEREM_WORK_ROOT="${work_dir}" \
@@ -1176,41 +1245,25 @@ run_gerem_all() {
     "${app_env_args[@]}" \
     bash "${SCRIPT_DIR}/GEREM/run_gerem_all.sh"
   SKIP_COMMON_BUILD=1
-  progress_stage_done "${ARCH_LABEL} / GEREM-all complete"
-}
-
-prepare_fi_oracle() {
-  local oracle_work_dir="${SCRATCH_ROOT}/sara_oracle_runs"
-  local oracle_result_dir="${SCRATCH_ROOT}/sara_oracle_public_tmp"
-  local prebuild_dir="${SCRATCH_ROOT}/storage_prebuilds"
-  log_line "=== Preparing SARA oracle inputs for FI under ${oracle_work_dir} ==="
-  run_logged "FI oracle inputs" env \
-    RUN_ALL_STORAGE_FAIR_TEST_RESULT_DIR="${oracle_result_dir}" \
-    RUN_ALL_STORAGE_FAIR_SARA_WORK_ROOT="${oracle_work_dir}" \
-    RUN_ALL_STORAGE_FAIR_GEREM_WORK_ROOT="${SCRATCH_ROOT}/unused_gerem_runs" \
-    RUN_ALL_STORAGE_FAIR_STORAGE_PREBUILD_CACHE_ROOT="${prebuild_dir}" \
-    RUN_ALL_STORAGE_FAIR_SKIP_GEREM=1 \
-    RUN_ALL_STORAGE_FAIR_SKIP_COMPARE=1 \
-    RUN_ALL_STORAGE_FAIR_SKIP_COMMON_BUILD="${SKIP_COMMON_BUILD}" \
-    GPU_ARCH="${GPU_ARCH_VALUE}" \
-    "${app_env_args[@]}" \
-    bash "${SCRIPT_DIR}/SARA/run_sara.sh"
-  echo "${oracle_work_dir}"
+  progress_stage_done "${ARCH_LABEL} / ${method_dir} complete"
 }
 
 
 run_fi() {
   local final_dir="${RESULT_ROOT}/${ARCH_LABEL}/FI"
   local fi_run_root="${SCRATCH_ROOT}/fi_runs"
+  local fi_prebuild_dir="${SCRATCH_ROOT}/fi_storage_prebuilds"
+  local fi_method_result_root="${SCRATCH_ROOT}/fi_method_results"
   progress_stage_start "${ARCH_LABEL} / FI-storage" "FI-storage"
   remove_selected_results "FI"
-  local oracle_root
-  oracle_root="$(prepare_fi_oracle)"
   if [[ -n "${APPS_OVERRIDE_VALUE}" ]]; then
     run_logged "FI-storage" env \
       RUN_PER_EPOCH="${RUNS}" \
+      FI_PARALLEL_JOBS="${FI_PARALLEL_JOBS}" \
+      FI_SKIP_COMMON_BUILD=1 \
       RUN_ROOT="${fi_run_root}" \
-      FI_COMPARE_INPUT_ROOT="${oracle_root}" \
+      FI_PREBUILD_CACHE_ROOT="${fi_prebuild_dir}" \
+      FI_METHOD_RESULT_ROOT="${fi_method_result_root}" \
       TEST_RESULT_ROOT="${final_dir}" \
       FI_PROGRESS_EVENTS=1 \
       APPS_OVERRIDE="${APPS_OVERRIDE_VALUE}" \
@@ -1219,8 +1272,11 @@ run_fi() {
   else
     run_logged "FI-storage" env \
       RUN_PER_EPOCH="${RUNS}" \
+      FI_PARALLEL_JOBS="${FI_PARALLEL_JOBS}" \
+      FI_SKIP_COMMON_BUILD=1 \
       RUN_ROOT="${fi_run_root}" \
-      FI_COMPARE_INPUT_ROOT="${oracle_root}" \
+      FI_PREBUILD_CACHE_ROOT="${fi_prebuild_dir}" \
+      FI_METHOD_RESULT_ROOT="${fi_method_result_root}" \
       TEST_RESULT_ROOT="${final_dir}" \
       FI_PROGRESS_EVENTS=1 \
       GPU_ARCH="${GPU_ARCH_VALUE}" \
@@ -1232,13 +1288,13 @@ run_fi() {
 
 sara_app_result_exists() {
   local app_name="$1"
-  local app_dir="${RESULT_ROOT}/${ARCH_LABEL}/SARA/${app_name}"
+  local app_dir="${RESULT_ROOT}/${ARCH_LABEL}/$(sara_result_dir_name)/${app_name}"
   [[ -f "${app_dir}/sara_result_${app_name}_0-0.csv" || -f "${app_dir}/exact_result_${app_name}_0-0.csv" ]]
 }
 
 gerem_app_result_exists() {
   local app_name="$1"
-  local app_dir="${RESULT_ROOT}/${ARCH_LABEL}/GEREM-all/${app_name}"
+  local app_dir="${RESULT_ROOT}/${ARCH_LABEL}/$(gerem_result_dir_name)/${app_name}"
   [[ -f "${app_dir}/gerem_result_${app_name}_0-0.csv" ]]
 }
 
@@ -1260,10 +1316,10 @@ print_missing_experiment_reminder() {
 
   for app_name in "${apps[@]}"; do
     if ! sara_app_result_exists "${app_name}"; then
-      missing_lines+=("SARA/${app_name}")
+      missing_lines+=("$(sara_result_dir_name)/${app_name}")
     fi
     if ! gerem_app_result_exists "${app_name}"; then
-      missing_lines+=("GEREM-all/${app_name}")
+      missing_lines+=("$(gerem_result_dir_name)/${app_name}")
     fi
     if ! fi_app_result_exists "${app_name}"; then
       missing_lines+=("FI-storage/${app_name}")
@@ -1276,7 +1332,7 @@ print_missing_experiment_reminder() {
   notice_line "=== Missing experiment data reminder: ${ARCH_LABEL} ==="
   notice_line "======================================================================"
   if (( ${#missing_lines[@]} == 0 )); then
-    notice_line "All public results for all applications are present for SARA, GEREM-all, and FI-storage."
+    notice_line "All public results for all applications are present for $(sara_result_dir_name), $(gerem_result_dir_name), and FI-storage."
   else
     notice_line "!!! The following public experiment results are still missing; compare files were updated and missing entries are shown as '-':"
     max_lines=160
@@ -1296,7 +1352,9 @@ write_compare() {
   progress_stage_start "${ARCH_LABEL} / write compare files"
   mkdir -p "${compare_dir}"
 
-  local sara_root="${RESULT_ROOT}/${ARCH_LABEL}/SARA"
+  local sara_root="${RESULT_ROOT}/${ARCH_LABEL}/$(sara_result_dir_name)"
+  local gerem_dir="$(gerem_result_dir_name)"
+  local gerem_root="${RESULT_ROOT}/${ARCH_LABEL}/${gerem_dir}"
   local output="${compare_dir}/$(sara_compare_output_name)"
   local legacy_allapps_output="${compare_dir}/sara_geremall_vs_fi_allapps.txt"
   local sara_label="$(sara_compare_label)"
@@ -1306,15 +1364,18 @@ write_compare() {
   if (( ${#compare_apps[@]} > 0 )); then
     compare_app_args=(--apps "${compare_apps[*]}")
   fi
-  log_line "=== Refreshing full-suite compare for ${ARCH_LABEL} using current public results (${#compare_apps[@]} applications) ==="
-  run_logged "compare ${sara_label}" python3 "${ROOT_DIR}/script/common/sara_gerem_fi_compare.py" \
+  log_line "=== Refreshing full-suite compare for ${ARCH_LABEL} / ${gerem_dir} using current public results (${#compare_apps[@]} applications) ==="
+  run_logged "compare ${sara_label} ${gerem_dir}" python3 "${ROOT_DIR}/script/common/sara_gerem_fi_compare.py" \
     --arch-label "${ARCH_LABEL}" \
     --result-root "${RESULT_ROOT}" \
     --sara-root "${sara_root}" \
+    --gerem-root "${gerem_root}" \
     --sara-label "${sara_label}" \
+    --gerem-label "${gerem_dir}" \
+    --expected-gerem-runs "${GEREM_RUNS}" \
     "${compare_app_args[@]}" \
     --output "${output}"
-  if [[ "${legacy_allapps_output}" != "${output}" ]]; then
+  if [[ "${GEREM_RUNS}" == "1000" && "${legacy_allapps_output}" != "${output}" ]]; then
     run_logged "compare ${sara_label} legacy allapps alias" python3 - "${output}" "${legacy_allapps_output}" <<'PY'
 import sys
 from pathlib import Path

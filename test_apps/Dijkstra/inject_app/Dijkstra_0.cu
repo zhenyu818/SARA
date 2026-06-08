@@ -5,6 +5,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+
+static int exact_equal_float(float a, float b) {
+    uint32_t ai = 0;
+    uint32_t bi = 0;
+    memcpy(&ai, &a, sizeof(ai));
+    memcpy(&bi, &b, sizeof(bi));
+    return ai == bi;
+}
 
 #define D_SEED 2026
 #define BLOCK_SIZE 256
@@ -153,24 +162,9 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    const float eps = 1e-5f;
     bool ok = true;
     for (int i = 0; i < V; ++i) {
-        float a = h_updatingShortestDistances[i];
-        float b = expected[i];
-        if (isnan(a) && isnan(b))
-            continue;
-        if (isnan(a) || isnan(b)) {
-            ok = false;
-            break;
-        }
-        if (isinf(a) && isinf(b))
-            continue;
-        if (isinf(a) || isinf(b)) {
-            ok = false;
-            break;
-        }
-        if (fabsf(a - b) > eps) {
+        if (!exact_equal_float(h_updatingShortestDistances[i], expected[i])) {
             ok = false;
             break;
         }

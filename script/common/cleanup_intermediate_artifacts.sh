@@ -177,10 +177,6 @@ fi
 if [[ "${KEEP_BUILD}" == "0" ]]; then
   log_rm "${ROOT_DIR}/build"
   log_rm "${ROOT_DIR}/lib"
-  log_rm "${ROOT_DIR}/script/SARA/native/libexact_storage_backend.so"
-  log_rm "${ROOT_DIR}/script/SARA/native/exact_core"
-  log_rm "${ROOT_DIR}/script/SARA/native/exact_storage_core"
-  log_rm "${ROOT_DIR}/script/SARA/native/bin"
 fi
 
 if [[ "${DRY_RUN}" == "1" ]]; then

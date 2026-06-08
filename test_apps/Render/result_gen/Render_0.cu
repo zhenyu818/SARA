@@ -120,7 +120,7 @@ int main(int argc, char **argv) {
     fflush(stderr);
     CUDA_CHECK(cudaMemcpy(h_color.data(), d_color, output_count * sizeof(float), cudaMemcpyDeviceToHost));
 
-    std::cout << std::fixed << std::setprecision(6);
+    std::cout << std::setprecision(9);
     for (size_t i = 0; i < output_count; ++i) {
         std::cout << h_color[i];
         if (i + 1 < output_count)

@@ -3,6 +3,16 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
+#include <cstring>
+
+static bool exact_equal_float(float a, float b) {
+    uint32_t ai = 0;
+    uint32_t bi = 0;
+    std::memcpy(&ai, &a, sizeof(ai));
+    std::memcpy(&bi, &b, sizeof(bi));
+    return ai == bi;
+}
 
 #define GEMM_SEED 2026
 
@@ -124,23 +134,8 @@ int main(int argc, char **argv) {
     fclose(file);
 
     bool match = (count == m * n);
-    const float eps = 1e-5f;
     for (int i = 0; match && i < m * n; ++i) {
-        float actual = d_h[i];
-        float ref = expected[i];
-        if (isnan(actual) && isnan(ref))
-            continue;
-        if (isnan(actual) || isnan(ref)) {
-            match = false;
-            break;
-        }
-        if (isinf(actual) && isinf(ref)) {
-            if (signbit(actual) != signbit(ref)) {
-                match = false;
-            }
-            continue;
-        }
-        if (isinf(actual) || isinf(ref) || fabsf(actual - ref) > eps) {
+        if (!exact_equal_float(d_h[i], expected[i])) {
             match = false;
             break;
         }

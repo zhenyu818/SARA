@@ -225,6 +225,7 @@ def write_summary_csv(
     bitflip: str,
     results_occ,
     injection_time_seconds=None,
+    end_to_end_time_seconds=None,
     output_root=None,
 ):
     root = output_root or os.environ.get("TEST_RESULT_ROOT") or "test_result"
@@ -245,10 +246,15 @@ def write_summary_csv(
             if injection_time_seconds is not None
             else ""
         ),
+        "End-to-End Time (s)": (
+            f"{float(end_to_end_time_seconds):.6f}"
+            if end_to_end_time_seconds is not None
+            else ""
+        ),
         "FI Seed": fi_seed,
     }
 
-    fieldnames = ["Masked", "SDC", "DUE", "Injection Time (s)", "FI Seed"]
+    fieldnames = ["Masked", "SDC", "DUE", "Injection Time (s)", "End-to-End Time (s)", "FI Seed"]
     out_path_tmp = out_path + ".tmp"
     with open(out_path_tmp, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -283,6 +289,12 @@ def main():
         type=float,
         default=None,
         help="Measured wall-clock fault injection time in seconds",
+    )
+    parser.add_argument(
+        "--end-to-end-time-seconds",
+        type=float,
+        default=None,
+        help="Measured non-compilation end-to-end FI wall-clock time in seconds",
     )
     parser.add_argument(
         "--output-root",
@@ -331,6 +343,7 @@ def main():
         args.bitflip,
         results_occ,
         injection_time_seconds=args.injection_time_seconds,
+        end_to_end_time_seconds=args.end_to_end_time_seconds,
         output_root=args.output_root,
     )
 

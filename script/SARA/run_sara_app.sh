@@ -6,6 +6,9 @@ SARA_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SARA_ROOT_DIR="$(cd "${SARA_SCRIPT_DIR}/../.." && pwd)"
 SARA_COMMON_DIR="${SARA_ROOT_DIR}/script/common"
 export PYTHONPATH="${SARA_COMMON_DIR}:${SARA_SCRIPT_DIR}:${PYTHONPATH:-}"
+export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
+export PYTHONNOUSERSITE="${PYTHONNOUSERSITE:-1}"
+export PYTHONHASHSEED="${PYTHONHASHSEED:-2026}"
 cd "${SARA_ROOT_DIR}"
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -83,6 +86,8 @@ CSV_OUTPUT="${CSV_OUTPUT:-${TEST_RESULT_ROOT}/exact_sdc_summary.csv}"
 BENCH_LIST_FILE="${BENCH_LIST_FILE:-}"
 EXACT_STORAGE_ONLY_OUTPUT="${EXACT_STORAGE_ONLY_OUTPUT:-1}"
 STORAGE_APP_PREBUILD_HELPER="${STORAGE_APP_PREBUILD_HELPER:-${SARA_COMMON_DIR}/storage_app_prebuild.sh}"
+STORAGE_PREBUILD_CACHE_ROOT="${STORAGE_PREBUILD_CACHE_ROOT:-}"
+STORAGE_METHOD_RESULT_ROOT="${STORAGE_METHOD_RESULT_ROOT:-}"
 UPDATE_SIMPLE_SUMMARY_TOTAL_TIME_TOOL="${UPDATE_SIMPLE_SUMMARY_TOTAL_TIME_TOOL:-script/common/update_simple_summary_total_time.py}"
 
 if [[ "${FAIR_TIMING}" == "1" && "${EXACT_STORAGE_ONLY_OUTPUT}" == "1" && ! -v EXACT_TOGGLE_VALIDATE ]]; then
@@ -123,10 +128,7 @@ SUCCESS_MSG="Fault Injection Test Success!"
 FAILED_MSG="Fault Injection Test Failed!"
 CYCLES_MSG="gpu_tot_sim_cycle ="
 FAULT_INJECTION_OCCURRED="Fault injection"
-EXACT_CORE_BIN="${EXACT_CORE_BIN:-script/SARA/native/exact_core}"
-EXACT_CORE_BUILD_TARGET="${EXACT_CORE_BUILD_TARGET:-exact_core}"
-EXACT_STORAGE_BACKEND_SO="${EXACT_STORAGE_BACKEND_SO:-script/SARA/native/libexact_storage_backend.so}"
-EXACT_STORAGE_BACKEND_BUILD_TARGET="${EXACT_STORAGE_BACKEND_BUILD_TARGET:-exact_storage_backend}"
+EXACT_CORE_TOOL="${EXACT_CORE_TOOL:-script/SARA/exact_core.py}"
 
 CURRENT_RESULT_FILE=""
 CURRENT_TEST_ID=""
@@ -169,6 +171,15 @@ PROFILE_BLOCK_RAND_MAX=""
 PROFILE_DATATYPE_BITS=""
 PROFILE_SMEM_SIZE_BITS=""
 FAIR_TIMING_START_NS=""
+# Public SARA/GEREM/FI comparisons must use one fixed timing scope.  Do not let
+# caller environment variables widen/narrow the reported Total Time field.
+SARA_COMPARE_TIMING_SCOPE="noncompile_e2e"
+SARA_COMPARE_TIMING_STEPS=(
+    analyzer_prepare_input_py
+    sara_output_oracle_policy_py
+    analyzer_reg_observed_py
+    analyzer_exact_compute_py
+)
 
 ANALYZER_LITE_OUTPUT="${ANALYZER_LITE_OUTPUT:-1}"
 ANALYZER_MASK_FORMAT="${ANALYZER_MASK_FORMAT:-int}"
@@ -190,20 +201,6 @@ ANALYZER_INPUT_COMPAT_PICKLE_DICT="${ANALYZER_INPUT_COMPAT_PICKLE_DICT:-0}"
 ANALYZER_OUTPUT_BINARY="${ANALYZER_OUTPUT_BINARY:-1}"
 ANALYZER_JSON_CODEC="${ANALYZER_JSON_CODEC:-none}" # none|gz|zst
 ANALYZER_PROFILE_OUT="${ANALYZER_PROFILE_OUT:-}"
-ANALYZER_CACHE_ENABLE="${ANALYZER_CACHE_ENABLE:-1}"
-ANALYZER_CACHE_FORCE_REBUILD="${ANALYZER_CACHE_FORCE_REBUILD:-0}"
-ANALYZER_CACHE_META_BASENAME="${ANALYZER_CACHE_META_BASENAME:-cache_meta.json}"
-ANALYZER_CACHE_SHA256_SMALL_MAX_BYTES="${ANALYZER_CACHE_SHA256_SMALL_MAX_BYTES:-16777216}"
-ANALYZER_CACHE_SHA256_LARGE_FILES="${ANALYZER_CACHE_SHA256_LARGE_FILES:-0}"
-ANALYZER_CACHE_LARGE_SAMPLE_BYTES="${ANALYZER_CACHE_LARGE_SAMPLE_BYTES:-1048576}"
-# Large analyzer/compute sources can exceed the full-hash threshold and fall back
-# to sampled hashing. Include mtime in cache signatures by default so mid-file
-# derivation edits still invalidate cached exact/analyzer artifacts.
-ANALYZER_CACHE_INCLUDE_MTIME_NS="${ANALYZER_CACHE_INCLUDE_MTIME_NS:-1}"
-EXACT_GLOBAL_CACHE="${EXACT_GLOBAL_CACHE:-1}"
-ANALYZER_GLOBAL_CACHE="${ANALYZER_GLOBAL_CACHE:-${EXACT_GLOBAL_CACHE}}"
-ANALYZER_GLOBAL_CACHE_DIR="${ANALYZER_GLOBAL_CACHE_DIR:-${EXACT_WORK_ROOT}/.cache_exact_sdc}"
-ANALYZER_GLOBAL_CACHE_LINK_MODE="${ANALYZER_GLOBAL_CACHE_LINK_MODE:-copy}"
 ALL_COMPONENTS="${ALL_COMPONENTS:-rf:smem_rf:l1d:l2}" # components for mode=all_components
 ALL_COMPONENTS_TABLE_BASENAME="${ALL_COMPONENTS_TABLE_BASENAME:-all_components_rates.tsv}"
 ALL_COMPONENTS_COMPACT_OUTPUT="${ALL_COMPONENTS_COMPACT_OUTPUT:-1}" # 1 => print concise all-components report
@@ -222,15 +219,6 @@ TIMING_LOG_START_LINE=-1
 TIMING_CONTEXT_LABEL=""
 QUIET_CONSOLE_OUTPUT=0
 QUIET_LOG_FILE=""
-
-# Keep analyzer backward propagation on the reference Python semantics by
-# default.  The native tolerance-path evaluator is semantics-preserving and
-# only accelerates replay of the already-built symbolic tolerance paths.
-export REG_OBSERVED_USE_CPP_BACKWARD_INFLUENCE="${REG_OBSERVED_USE_CPP_BACKWARD_INFLUENCE:-0}"
-export REG_OBSERVED_USE_CPP_TOLERANCE_PATH_EVAL="${REG_OBSERVED_USE_CPP_TOLERANCE_PATH_EVAL:-1}"
-export REG_OBSERVED_USE_CPP_CONTROL_TAINT_HASH="${REG_OBSERVED_USE_CPP_CONTROL_TAINT_HASH:-0}"
-export EXACT_SDC_USE_CPP_MASK_CLASSIFIER="${EXACT_SDC_USE_CPP_MASK_CLASSIFIER:-1}"
-export EXACT_SDC_USE_CPP_THREAD_CYCLE="${EXACT_SDC_USE_CPP_THREAD_CYCLE:-1}"
 
 declare -a CURRENT_SIZE_ARGS=()
 
@@ -442,20 +430,40 @@ current_time_ns() {
 start_fair_timing_now() {
     if [[ "${FAIR_TIMING}" == "1" ]]; then
         FAIR_TIMING_START_NS="$(current_time_ns)"
+        local timing_log_path
+        timing_log_path="$(resolve_timing_log_path)"
+        if [[ -f "${timing_log_path}" ]]; then
+            TIMING_LOG_START_LINE="$(wc -l < "${timing_log_path}")"
+        else
+            TIMING_LOG_START_LINE=0
+        fi
     else
         FAIR_TIMING_START_NS=""
     fi
 }
 
 reported_total_time_seconds() {
-    if [[ "${FAIR_TIMING}" == "1" && -n "${FAIR_TIMING_START_NS}" ]]; then
-        local end_ns elapsed_ns
-        end_ns="$(current_time_ns)"
-        elapsed_ns=$(( end_ns - FAIR_TIMING_START_NS ))
-        ns_to_seconds "${elapsed_ns}"
+    if [[ "${SARA_COMPARE_TIMING_SCOPE}" == "core_algorithm" ]]; then
+        sum_compared_step_timing_seconds_since_start
         return 0
     fi
     sum_step_timing_seconds_since_start
+}
+
+collect_public_step_timing_lines_since_start() {
+    if [[ "${SARA_COMPARE_TIMING_SCOPE}" == "core_algorithm" ]]; then
+        collect_compared_step_timing_lines_since_start
+        return 0
+    fi
+    collect_step_timing_lines_since_start
+}
+
+public_timing_scope_label() {
+    if [[ "${SARA_COMPARE_TIMING_SCOPE}" == "core_algorithm" ]]; then
+        echo "core algorithm only (excludes common build/input generation/trace/profile/sampling-space/report formatting)"
+    else
+        echo "non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)"
+    fi
 }
 
 rewrite_simple_summary_total_time() {
@@ -470,7 +478,7 @@ rewrite_simple_summary_total_time() {
         --summary "${summary_txt}" \
         --total-seconds "${total_s}"
     if [[ -n "${summary_csv}" ]]; then
-        "${EXACT_CORE_BIN}" rates-simple-summary-csv \
+        python3 "${EXACT_CORE_TOOL}" rates-simple-summary-csv \
             --input "${summary_txt}" \
             --output "${summary_csv}" >/dev/null
     fi
@@ -520,6 +528,60 @@ for label, (total, count) in stats.items():
 PY
 }
 
+collect_selected_step_timing_lines_since_start() {
+    local log_path start_line
+    if (( $# == 0 )); then
+        return 0
+    fi
+    log_path="$(resolve_timing_log_path)"
+    start_line="${TIMING_LOG_START_LINE:-0}"
+    if [[ ! -f "${log_path}" ]]; then
+        return 0
+    fi
+    python3 - "${log_path}" "${start_line}" "$@" <<'PY'
+import sys
+from collections import OrderedDict
+
+log_path = sys.argv[1]
+try:
+    start_line = int(sys.argv[2])
+except Exception:
+    start_line = 0
+selected = set(sys.argv[3:])
+
+stats = OrderedDict()
+with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+    for lineno, raw in enumerate(f, start=1):
+        if lineno <= start_line:
+            continue
+        line = raw.rstrip("\n")
+        if not line or line.startswith("timestamp_iso\t"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 8:
+            continue
+        label = parts[1]
+        if label not in selected:
+            continue
+        try:
+            wall_s = float(parts[2])
+        except Exception:
+            continue
+        total, count = stats.get(label, (0.0, 0))
+        stats[label] = (total + wall_s, count + 1)
+
+for label, (total, count) in stats.items():
+    if count > 1:
+        print(f"{label} (x{count})\t{total:.6f}")
+    else:
+        print(f"{label}\t{total:.6f}")
+PY
+}
+
+collect_compared_step_timing_lines_since_start() {
+    collect_selected_step_timing_lines_since_start "${SARA_COMPARE_TIMING_STEPS[@]}"
+}
+
 sum_step_timing_seconds_since_start() {
     local log_path start_line
     log_path="$(resolve_timing_log_path)"
@@ -560,6 +622,50 @@ with open(log_path, "r", encoding="utf-8", errors="replace") as f:
 overall = sum(round(total, 6) for total, _count in stats.values())
 print(f"{overall:.6f}")
 PY
+}
+
+sum_selected_step_timing_seconds_since_start() {
+    local log_path start_line
+    if (( $# == 0 )); then
+        echo "0.000000"
+        return 0
+    fi
+    log_path="$(resolve_timing_log_path)"
+    start_line="${TIMING_LOG_START_LINE:-0}"
+    if [[ ! -f "${log_path}" ]]; then
+        echo "0.000000"
+        return 0
+    fi
+    python3 - "${log_path}" "${start_line}" "$@" <<'PY'
+import sys
+
+log_path = sys.argv[1]
+try:
+    start_line = int(sys.argv[2])
+except Exception:
+    start_line = 0
+selected = set(sys.argv[3:])
+total = 0.0
+with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+    for lineno, raw in enumerate(f, start=1):
+        if lineno <= start_line:
+            continue
+        line = raw.rstrip("\n")
+        if not line or line.startswith("timestamp_iso\t"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 8 or parts[1] not in selected:
+            continue
+        try:
+            total += float(parts[2])
+        except Exception:
+            pass
+print(f"{total:.6f}")
+PY
+}
+
+sum_compared_step_timing_seconds_since_start() {
+    sum_selected_step_timing_seconds_since_start "${SARA_COMPARE_TIMING_STEPS[@]}"
 }
 
 resolve_timing_log_path() {
@@ -847,273 +953,6 @@ run_timed_shell() {
     return "${exit_code}"
 }
 
-cache_meta_path_for_dir() {
-    local run_dir="$1"
-    echo "${run_dir}/${ANALYZER_CACHE_META_BASENAME}"
-}
-
-cache_compute_signature() {
-    if (( $# < 4 )); then
-        echo "=== Error: cache_compute_signature requires step params_json payload_out files... ===" >&2
-        exit 1
-    fi
-    local step="$1"
-    local params_json="$2"
-    local payload_out="$3"
-    shift 3
-    python3 - "${step}" "${params_json}" "${payload_out}" "${ANALYZER_CACHE_SHA256_SMALL_MAX_BYTES}" "${ANALYZER_CACHE_SHA256_LARGE_FILES}" "${ANALYZER_CACHE_LARGE_SAMPLE_BYTES}" "${ANALYZER_CACHE_INCLUDE_MTIME_NS}" "$@" <<'PY'
-import hashlib
-import json
-import sys
-from pathlib import Path
-
-step = sys.argv[1]
-params_raw = sys.argv[2]
-payload_out = Path(sys.argv[3])
-small_max = int(sys.argv[4])
-hash_large = str(sys.argv[5]).strip() == "1"
-sample_bytes = max(1, int(sys.argv[6]))
-include_mtime = str(sys.argv[7]).strip() == "1"
-paths = [Path(p) for p in sys.argv[8:]]
-
-try:
-    params = json.loads(params_raw)
-except Exception:
-    params = {"_raw": str(params_raw)}
-
-
-def file_meta(path: Path):
-    rec = {"name": path.name}
-    if not path.exists():
-        rec["exists"] = False
-        return rec
-    rec["exists"] = True
-    rec["is_file"] = path.is_file()
-    st = path.stat()
-    rec["size"] = int(st.st_size)
-    if include_mtime:
-        rec["mtime_ns"] = int(st.st_mtime_ns)
-    if not path.is_file():
-        return rec
-    should_hash = hash_large or int(st.st_size) <= int(small_max)
-    if should_hash:
-        h = hashlib.sha256()
-        with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(chunk)
-        rec["sha256"] = h.hexdigest()
-        rec["hash_mode"] = "full"
-        return rec
-
-    h = hashlib.sha256()
-    size = int(st.st_size)
-    with path.open("rb") as f:
-        head = f.read(sample_bytes)
-        if size > sample_bytes:
-            if size > (sample_bytes * 2):
-                f.seek(max(0, size - sample_bytes))
-                tail = f.read(sample_bytes)
-            else:
-                tail = f.read()
-        else:
-            tail = b""
-    h.update(str(size).encode("ascii", errors="ignore"))
-    h.update(b"|")
-    h.update(head)
-    h.update(b"|")
-    h.update(tail)
-    rec["sha256_sampled"] = h.hexdigest()
-    rec["sample_bytes"] = int(sample_bytes)
-    rec["hash_mode"] = "sampled"
-    return rec
-
-
-inputs = [file_meta(p) for p in paths]
-payload = {
-    "schema": 2,
-    "step": step,
-    "params": params,
-    "inputs": inputs,
-}
-canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-signature = hashlib.sha256(canonical).hexdigest()
-payload_out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(signature)
-PY
-}
-
-cache_step_hit() {
-    if (( $# < 3 )); then
-        echo "0"
-        return 0
-    fi
-    local cache_meta_file="$1"
-    local step="$2"
-    local signature="$3"
-    shift 3
-    python3 - "${cache_meta_file}" "${step}" "${signature}" "$@" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-meta_path = Path(sys.argv[1])
-step = sys.argv[2]
-sig = sys.argv[3]
-outputs = [Path(p) for p in sys.argv[4:]]
-
-for out in outputs:
-    if not out.exists():
-        print("0")
-        raise SystemExit(0)
-
-if not meta_path.is_file():
-    print("0")
-    raise SystemExit(0)
-
-try:
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-except Exception:
-    print("0")
-    raise SystemExit(0)
-
-entry = None
-if isinstance(meta, dict):
-    steps = meta.get("steps", {})
-    if isinstance(steps, dict):
-        entry = steps.get(step)
-
-if not isinstance(entry, dict):
-    print("0")
-    raise SystemExit(0)
-
-print("1" if str(entry.get("signature", "")) == str(sig) else "0")
-PY
-}
-
-cache_step_update() {
-    if (( $# < 4 )); then
-        echo "=== Error: cache_step_update requires meta step signature payload outputs... ===" >&2
-        exit 1
-    fi
-    local cache_meta_file="$1"
-    local step="$2"
-    local signature="$3"
-    local payload_file="$4"
-    shift 4
-    if ! python3 - "${cache_meta_file}" "${step}" "${signature}" "${payload_file}" "$@" <<'PY'
-import json
-import time
-from pathlib import Path
-import sys
-
-meta_path = Path(sys.argv[1])
-step = sys.argv[2]
-signature = sys.argv[3]
-payload_path = Path(sys.argv[4])
-outputs = [str(Path(p)) for p in sys.argv[5:]]
-
-meta = {"version": 1, "steps": {}}
-if meta_path.is_file():
-    try:
-        raw = json.loads(meta_path.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            meta = raw
-    except Exception:
-        pass
-if "steps" not in meta or not isinstance(meta.get("steps"), dict):
-    meta["steps"] = {}
-
-payload = {}
-if payload_path.is_file():
-    try:
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    except Exception:
-        payload = {}
-
-entry = {
-    "signature": str(signature),
-    "updated_at_epoch": int(time.time()),
-    "updated_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    "params": payload.get("params", {}),
-    "inputs": payload.get("inputs", []),
-    "outputs": outputs,
-}
-meta["steps"][step] = entry
-meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
-    then
-        return 0
-    fi
-}
-
-is_global_cache_enabled() {
-    if [[ "${ANALYZER_GLOBAL_CACHE}" == "1" || "${EXACT_GLOBAL_CACHE}" == "1" ]]; then
-        echo "1"
-    else
-        echo "0"
-    fi
-}
-
-global_cache_step_dir() {
-    local step="$1"
-    local signature="$2"
-    echo "${ANALYZER_GLOBAL_CACHE_DIR%/}/${step}/${signature}"
-}
-
-global_cache_try_restore() {
-    if (( $# < 3 )); then
-        echo "0"
-        return 0
-    fi
-    local step="$1"
-    local signature="$2"
-    shift 2
-    local cache_dir
-    cache_dir="$(global_cache_step_dir "${step}" "${signature}")"
-    if [[ ! -d "${cache_dir}" ]]; then
-        echo "0"
-        return 0
-    fi
-
-    local out src
-    for out in "$@"; do
-        src="${cache_dir}/$(basename "${out}")"
-        if [[ ! -f "${src}" ]]; then
-            echo "0"
-            return 0
-        fi
-    done
-
-    for out in "$@"; do
-        src="${cache_dir}/$(basename "${out}")"
-        if ! mkdir -p "$(dirname "${out}")" 2>/dev/null; then
-            echo "0"
-            return 0
-        fi
-        if [[ "${ANALYZER_GLOBAL_CACHE_LINK_MODE}" == "symlink" ]]; then
-            if ! ln -sfn "${src}" "${out}" 2>/dev/null; then
-                echo "0"
-                return 0
-            fi
-        else
-            local tmp_out
-            tmp_out="${out}.tmp.$$"
-            if ! cp -f "${src}" "${tmp_out}" 2>/dev/null; then
-                rm -f "${tmp_out}" 2>/dev/null || true
-                echo "0"
-                return 0
-            fi
-            if ! mv -f "${tmp_out}" "${out}" 2>/dev/null; then
-                rm -f "${tmp_out}" 2>/dev/null || true
-                echo "0"
-                return 0
-            fi
-        fi
-    done
-    echo "1"
-    return 0
-}
-
 link_or_copy_file() {
     if (( $# != 2 )); then
         return 1
@@ -1356,52 +1195,6 @@ replace_dir_contents() {
     if dir_has_entries "${src}"; then
         cp -a "${src}/." "${dst}/"
     fi
-}
-
-global_cache_store() {
-    if (( $# < 4 )); then
-        return 0
-    fi
-    local step="$1"
-    local signature="$2"
-    local payload_file="$3"
-    shift 3
-    local step_root final_dir tmp_dir
-    step_root="${ANALYZER_GLOBAL_CACHE_DIR%/}/${step}"
-    final_dir="${step_root}/${signature}"
-    if ! mkdir -p "${step_root}" 2>/dev/null; then
-        return 0
-    fi
-    if [[ -d "${final_dir}" ]]; then
-        return 0
-    fi
-
-    tmp_dir="$(mktemp -d "${step_root}/.tmp.${signature}.XXXXXX" 2>/dev/null)" || return 0
-    if [[ -f "${payload_file}" ]]; then
-        if ! cp -f "${payload_file}" "${tmp_dir}/signature_payload.json" 2>/dev/null; then
-            rm -rf "${tmp_dir}" 2>/dev/null || true
-            return 0
-        fi
-    fi
-
-    local out base
-    for out in "$@"; do
-        if [[ ! -f "${out}" ]]; then
-            rm -rf "${tmp_dir}"
-            return 0
-        fi
-        base="$(basename "${out}")"
-        if ! cp -f "${out}" "${tmp_dir}/${base}" 2>/dev/null; then
-            rm -rf "${tmp_dir}" 2>/dev/null || true
-            return 0
-        fi
-    done
-
-    if mv "${tmp_dir}" "${final_dir}" 2>/dev/null; then
-        return 0
-    fi
-    rm -rf "${tmp_dir}" 2>/dev/null || true
-    return 0
 }
 
 json_codec_suffix() {
@@ -1678,101 +1471,13 @@ is_bool_01() {
     [[ "${v}" == "0" || "${v}" == "1" ]]
 }
 
-exact_core_needs_rebuild() {
-    local bin="${EXACT_CORE_BIN}"
-    local src
-    if [[ ! -x "${bin}" ]]; then
-        return 0
-    fi
-    if ! "${bin}" --version >/dev/null 2>&1; then
-        return 0
-    fi
-    for src in \
-        "src/analysis/exact_core_main.cc" \
-        "src/analysis/ptx_influence.cc" \
-        "src/analysis/ptx_influence.h" \
-        "src/analysis/ptx_influence_capi.cc" \
-        "src/analysis/ptx_influence_capi.h" \
-        "src/CMakeLists.txt" \
-        "Makefile" \
-        "third_party/nlohmann/json.hpp"
-    do
-        if [[ -e "${src}" && "${src}" -nt "${bin}" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-ensure_exact_core_binary() {
-    local build_log=""
-    if exact_core_needs_rebuild; then
-        build_log="$(mktemp "${TMPDIR:-/tmp}/exact_core_build.XXXXXX.log")"
-        echo "=== Rebuilding ${EXACT_CORE_BIN} in current runtime ==="
-        if ! make "${EXACT_CORE_BUILD_TARGET}" >"${build_log}" 2>&1; then
-            echo "=== Error: failed to build ${EXACT_CORE_BIN} in current runtime ===" >&2
-            cat "${build_log}" >&2
-            rm -f "${build_log}"
-            return 1
-        fi
-        rm -f "${build_log}"
-    fi
-    if ! "${EXACT_CORE_BIN}" --version >/dev/null 2>&1; then
-        echo "=== Error: ${EXACT_CORE_BIN} is unavailable in current runtime ===" >&2
+ensure_exact_core_tool() {
+    if [[ ! -f "${EXACT_CORE_TOOL}" ]]; then
+        echo "=== Error: ${EXACT_CORE_TOOL} is unavailable in current runtime ===" >&2
         return 1
     fi
-    return 0
-}
-
-exact_storage_backend_needs_rebuild() {
-    local so="${EXACT_STORAGE_BACKEND_SO}"
-    local src
-    if [[ ! -f "${so}" ]]; then
-        return 0
-    fi
-    if ! python3 - "${so}" <<'PY' >/dev/null 2>&1
-import ctypes
-import sys
-ctypes.CDLL(sys.argv[1])
-PY
-    then
-        return 0
-    fi
-    for src in \
-        "src/analysis/ptx_influence.cc" \
-        "src/analysis/ptx_influence.h" \
-        "src/analysis/ptx_influence_capi.cc" \
-        "src/analysis/ptx_influence_capi.h" \
-        "src/CMakeLists.txt" \
-        "Makefile"
-    do
-        if [[ -e "${src}" && "${src}" -nt "${so}" ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-ensure_exact_storage_backend_binary() {
-    local build_log=""
-    if exact_storage_backend_needs_rebuild; then
-        build_log="$(mktemp "${TMPDIR:-/tmp}/exact_storage_backend_build.XXXXXX.log")"
-        echo "=== Rebuilding ${EXACT_STORAGE_BACKEND_SO} in current runtime ==="
-        if ! make "${EXACT_STORAGE_BACKEND_BUILD_TARGET}" >"${build_log}" 2>&1; then
-            echo "=== Error: failed to build ${EXACT_STORAGE_BACKEND_SO} in current runtime ===" >&2
-            cat "${build_log}" >&2
-            rm -f "${build_log}"
-            return 1
-        fi
-        rm -f "${build_log}"
-    fi
-    if ! python3 - "${EXACT_STORAGE_BACKEND_SO}" <<'PY' >/dev/null 2>&1
-import ctypes
-import sys
-ctypes.CDLL(sys.argv[1])
-PY
-    then
-        echo "=== Error: ${EXACT_STORAGE_BACKEND_SO} is unavailable in current runtime ===" >&2
+    if ! python3 "${EXACT_CORE_TOOL}" --version >/dev/null 2>&1; then
+        echo "=== Error: ${EXACT_CORE_TOOL} failed its runtime check ===" >&2
         return 1
     fi
     return 0
@@ -1953,7 +1658,7 @@ with output_path.open("w", newline="", encoding="utf-8") as handle:
 PY
     echo "Wrote GMEM CSV: ${result_csv}"
     simple_csv="$(resolve_test_result_csv_path "$(build_exact_result_csv_filename "exact_result_simple")")"
-    run_timed "analyzer_gmem_simple_summary_csv_cpp" "${EXACT_CORE_BIN}" rates-simple-summary-csv \
+    run_timed "analyzer_gmem_simple_summary_csv_py" python3 "${EXACT_CORE_TOOL}" rates-simple-summary-csv \
         --input "${summary_txt_path}" \
         --output "${simple_csv}" || return $?
     if [[ "${FAIR_TIMING}" == "1" ]]; then
@@ -2929,6 +2634,67 @@ build_project_if_needed() {
     fi
 }
 
+storage_prebuild_cache_dir() {
+    if [[ -z "${STORAGE_PREBUILD_CACHE_ROOT}" ]]; then
+        return 1
+    fi
+    echo "${STORAGE_PREBUILD_CACHE_ROOT}/${TEST_APP_NAME}/${RESULT_BASENAME}"
+}
+
+install_storage_prebuild_artifacts() {
+    local cache_dir
+    cache_dir="$(storage_prebuild_cache_dir 2>/dev/null || true)"
+    [[ -n "${cache_dir}" && -d "${cache_dir}" ]] || return 1
+    [[ -x "${cache_dir}/${TEST_APP_NAME}" && -f "${cache_dir}/${TEST_APP_NAME}.ptx" && -s "${cache_dir}/register_used.txt" ]] || return 1
+    cp -f "${cache_dir}/${TEST_APP_NAME}" "./${TEST_APP_NAME}"
+    cp -f "${cache_dir}/${TEST_APP_NAME}.ptx" "./${TEST_APP_NAME}.ptx"
+    cp -f "${cache_dir}/register_used.txt" "./register_used.txt"
+    persist_current_register_domain_file "./register_used.txt"
+    echo "=== Installed prebuilt ${TEST_APP_NAME} artifacts from ${cache_dir} (compile time excluded) ==="
+    return 0
+}
+
+method_result_dir() {
+    if [[ -n "${STORAGE_METHOD_RESULT_ROOT}" ]]; then
+        echo "${STORAGE_METHOD_RESULT_ROOT}/${TEST_APP_NAME}/result"
+    else
+        echo "${TEST_APPS_ROOT}/${TEST_APP_NAME}/result"
+    fi
+}
+
+prebuilt_result_generator_path() {
+    local x_val="$1"
+    local cache_dir
+    cache_dir="$(storage_prebuild_cache_dir 2>/dev/null || true)"
+    if [[ -n "${cache_dir}" ]]; then
+        echo "${cache_dir}/result_generators/gen_${x_val}"
+    fi
+}
+
+run_result_generator_no_compile() {
+    local cu_file="$1"
+    local x_val="$2"
+    local size_line="$3"
+    local out_path="$4"
+    local gen_path=""
+
+    gen_path="$(prebuilt_result_generator_path "${x_val}")"
+    if [[ -n "${gen_path}" && -x "${gen_path}" ]]; then
+        "${gen_path}" ${size_line} > "${out_path}"
+        return $?
+    fi
+
+    if [[ "${FAIR_TIMING}" == "1" ]]; then
+        echo "=== Error: missing prebuilt result generator for ${TEST_APP_NAME}_${x_val}; refusing to include nvcc in noncompile timing ===" >&2
+        echo "=== Expected: ${gen_path:-<unset>} ===" >&2
+        return 1
+    fi
+
+    if run_with_native_cuda_env nvcc "${cu_file}" -o "./gen" -g -lcudart -arch="${GPU_ARCH}" -arch="${GPU_ARCH}"; then
+        ./gen ${size_line} > "${out_path}"
+    fi
+}
+
 resolve_cuda_install_path() {
     # Keep user-provided CUDA_INSTALL_PATH when valid.
     if [[ -n "${CUDA_INSTALL_PATH:-}" && -d "${CUDA_INSTALL_PATH}" && -x "${CUDA_INSTALL_PATH}/bin/nvcc" ]]; then
@@ -3009,10 +2775,11 @@ run_with_native_cuda_env() {
     fi
 }
 
+
 generate_results_if_needed() {
     if [[ "${DO_RESULT_GEN}" -ne 1 ]]; then
         echo "=== Result generation skipped ==="
-        return
+        return 0
     fi
 
     local app_dir="${TEST_APPS_ROOT}/${TEST_APP_NAME}"
@@ -3023,33 +2790,30 @@ generate_results_if_needed() {
     fi
 
     local result_dir
-    result_dir="${app_dir}/result"
+    result_dir="$(method_result_dir)"
     if [[ "${FRESH_RUN}" == "1" ]]; then
-        echo "=== Fresh-run mode: regenerating application inputs from scratch ==="
+        echo "=== Fresh-run mode: regenerating method-owned application inputs from scratch ==="
     elif result_generation_outputs_current "${app_dir}" "${size_list_file}" "${result_dir}"; then
-        echo "=== Result generation skipped: existing outputs are up to date ==="
+        echo "=== Result generation skipped: existing method-owned outputs are up to date ==="
         return 0
     fi
 
-    echo "=== Start result generation for ${TEST_APP_NAME} ==="
+    echo "=== Start result generation for ${TEST_APP_NAME} into ${result_dir} ==="
     # Result generation must run with fault injection fully disabled.
-    # Otherwise stale config values (for example from prior FI runs) can
-    # corrupt the golden reference outputs and break later golden checks.
     update_config_line "-profile" "0"
     update_config_line "-components_to_flip" "0"
     update_config_line "-total_cycle_rand" "-1"
     update_config_line "-exact_trace" "0"
     update_config_line "-regfile_trace" "0"
-    # Some test apps do not commit a pre-created result/ directory.
-    # Create it here so result generation does not depend on repo layout.
-    local staging_dir backup_dir
+
+    local staging_parent staging_dir backup_dir
     local idx=0
     local rc=0
     local generated_any=0
-    result_dir="${app_dir}/result"
-    mkdir -p "${result_dir}"
-    staging_dir="$(mktemp -d "${app_dir}/result.staging.XXXXXX")"
-    backup_dir="$(mktemp -d "${app_dir}/result.backup.XXXXXX")"
+    staging_parent="$(dirname "${result_dir}")"
+    mkdir -p "${result_dir}" "${staging_parent}"
+    staging_dir="$(mktemp -d "${staging_parent}/result.staging.XXXXXX")"
+    backup_dir="$(mktemp -d "${staging_parent}/result.backup.XXXXXX")"
     if dir_has_entries "${result_dir}"; then
         cp -a "${result_dir}/." "${backup_dir}/"
     fi
@@ -3062,18 +2826,8 @@ generate_results_if_needed() {
             x_val="$(echo "${filename}" | sed -n "s/^${TEST_APP_NAME}_\([0-9]\+\)\.cu$/\1/p")"
             [[ -n "${x_val}" ]] || continue
 
-            cp "${cu_file}" "${cu_file}.bak"
-            if run_with_native_cuda_env nvcc "${cu_file}" -o "./gen" -g -lcudart -arch="${GPU_ARCH}" -arch="${GPU_ARCH}"; then
-                # Execute generated CUDA input producers under the current
-                # GPGPU-Sim runtime environment.  Forcing the native CUDA
-                # toolkit libraries here requires a real host NVIDIA driver,
-                # while the public run_experiment flow is expected to work in
-                # simulator-only containers.
-                if ./gen ${line} > "${staging_dir}/${idx}-${x_val}.txt"; then
-                    :
-                else
-                    rc=$?
-                fi
+            if run_result_generator_no_compile "${cu_file}" "${x_val}" "${line}" "${staging_dir}/${idx}-${x_val}.txt"; then
+                :
             else
                 rc=$?
             fi
@@ -3095,9 +2849,7 @@ generate_results_if_needed() {
                 generated_any=1
             fi
 
-            rm -f ./gen "./gen.1.${GPU_ARCH}.ptxas"
-            mv "${cu_file}.bak" "${cu_file}"
-            rm -f "${TEST_APP_NAME}.cu" "${TEST_APP_NAME}.ptx"
+            rm -f ./gen "./gen.1.${GPU_ARCH}.ptxas" "${TEST_APP_NAME}.cu" "${TEST_APP_NAME}.ptx"
             if [[ "${rc}" -ne 0 ]]; then
                 break 2
             fi
@@ -3113,9 +2865,9 @@ generate_results_if_needed() {
         replace_dir_contents "${backup_dir}" "${result_dir}"
         rm -rf "${staging_dir}" "${backup_dir}"
         if dir_has_entries "${result_dir}"; then
-            echo "=== Error: result generation failed for ${TEST_APP_NAME}; restored previous results ===" >&2
+            echo "=== Error: result generation failed for ${TEST_APP_NAME}; restored previous method-owned results ===" >&2
         else
-            echo "=== Error: result generation failed for ${TEST_APP_NAME}; no previous results were available ===" >&2
+            echo "=== Error: result generation failed for ${TEST_APP_NAME}; no previous method-owned results were available ===" >&2
         fi
         return "${rc}"
     fi
@@ -3169,11 +2921,12 @@ result_generation_outputs_current() {
     return 0
 }
 
+
 select_result_file() {
-    local app_dir="${TEST_APPS_ROOT}/${TEST_APP_NAME}"
-    local result_dir="${app_dir}/result"
+    local result_dir
+    result_dir="$(method_result_dir)"
     if [[ ! -d "${result_dir}" ]]; then
-        echo "=== Error: result dir missing: ${result_dir} ===" >&2
+        echo "=== Error: method result dir missing: ${result_dir} ===" >&2
         exit 1
     fi
 
@@ -3201,7 +2954,6 @@ select_result_file() {
             return
         fi
 
-        # If there is exactly one candidate, use it instead of failing early.
         local -a available=()
         mapfile -t available < <(find "${result_dir}" -maxdepth 1 -type f -name '*.txt' | sort)
         if (( ${#available[@]} == 1 )); then
@@ -3228,6 +2980,7 @@ select_result_file() {
         exit 1
     fi
 }
+
 
 prepare_case_files() {
     select_result_file
@@ -3274,19 +3027,24 @@ prepare_case_files() {
     fi
     CURRENT_REGISTER_DOMAIN_FILE="$(resolve_current_register_domain_file)"
     CURRENT_APP_USES_SHARED_MEMORY=""
-        if [[ -z "${RESULT_DIR:-}" ]]; then
+    if [[ -z "${RESULT_DIR:-}" ]]; then
         RESULT_DIR="${CURRENT_RUN_DIR}"
     fi
 
-
     cp "${CURRENT_RESULT_FILE}" ./result.txt
-    if [[ "${FRESH_RUN}" != "1" && "${DO_BUILD}" -ne 1 ]] && [[ -x "./${TEST_APP_NAME}" ]] && \
+    if [[ "${DO_BUILD}" -ne 1 ]] && install_storage_prebuild_artifacts; then
+        :
+    elif [[ "${FRESH_RUN}" != "1" && "${DO_BUILD}" -ne 1 ]] && [[ -x "./${TEST_APP_NAME}" ]] && \
        [[ -f "${CURRENT_REGISTER_DOMAIN_FILE}" && -s "${CURRENT_REGISTER_DOMAIN_FILE}" ]]; then
         echo "=== Reusing existing ${TEST_APP_NAME} binary/register list from ${CURRENT_REGISTER_DOMAIN_FILE} (DO_BUILD=0) ==="
         ensure_current_register_domain_file
     elif [[ "${DO_BUILD}" -ne 1 ]] && [[ -x "./${TEST_APP_NAME}" ]] && regenerate_current_register_domain_from_ptx; then
         echo "=== Reusing existing ${TEST_APP_NAME} binary/PTX and regenerating app-specific register list (DO_BUILD=0) ==="
     else
+        if [[ "${FAIR_TIMING}" == "1" && "${DO_BUILD}" -ne 1 ]]; then
+            echo "=== Error: missing prebuilt ${TEST_APP_NAME} binary/PTX/register artifacts; refusing nvcc inside noncompile timing ===" >&2
+            return 1
+        fi
         cp "${CURRENT_CU_FILE}" "./${TEST_APP_NAME}.cu"
         run_with_native_cuda_env nvcc "./${TEST_APP_NAME}.cu" -o "./${TEST_APP_NAME}" -g -lcudart -arch="${GPU_ARCH}"
         run_with_native_cuda_env nvcc -arch="${GPU_ARCH}" -ptx -g -lineinfo "./${TEST_APP_NAME}.cu" -o "./${TEST_APP_NAME}.ptx"
@@ -4069,17 +3827,11 @@ run_exact_trace_capture() {
 
 run_analyzer_pipeline() {
     local trace_input active_log_input
-    local cache_meta_file cache_enabled cache_force global_cache_enabled
     local analyzer_input_file analyzer_input_binary_file analyzer_input_columnar_file analyzer_output_file analyzer_output_binary_file analyzer_meta_file exact_rates_file
     local codec_ext
     local analyzer_fault_component
     local omit_unused_read_events_effective analyzer_force_rf_addr_masking
-    local -a prepare_sig_inputs=()
 
-    cache_meta_file="$(cache_meta_path_for_dir "${CURRENT_RUN_DIR}")"
-    cache_enabled="${ANALYZER_CACHE_ENABLE}"
-    cache_force="${ANALYZER_CACHE_FORCE_REBUILD}"
-    global_cache_enabled="$(is_global_cache_enabled)"
     codec_ext="$(json_codec_suffix "${ANALYZER_JSON_CODEC:-none}")"
     analyzer_input_file="${CURRENT_RUN_DIR}/analyzer_input.json${codec_ext}"
     analyzer_input_binary_file="${analyzer_input_file}.bin"
@@ -4220,82 +3972,32 @@ run_analyzer_pipeline() {
         exit 1
     fi
 
-    local prepare_payload_tmp prepare_sig prepare_hit prepare_params_json
-    prepare_payload_tmp="$(mktemp)"
-    prepare_params_json="$(printf '{"compact_events":%s,"input_manifest":%s,"input_binary":%s,"input_columnar":%s,"input_compat_pickle_dict":%s}' \
-        "${ANALYZER_PREPARE_COMPACT_EVENTS}" "${ANALYZER_INPUT_MANIFEST}" "${ANALYZER_INPUT_BINARY}" "${ANALYZER_INPUT_COLUMNAR}" "${ANALYZER_INPUT_COMPAT_PICKLE_DICT}")"
-    prepare_sig_inputs=(
-        "${trace_input}"
-        "${trace_input}.memory_ranges.json"
-        "${CURRENT_RUN_DIR}/output_spec.json"
-        "script/SARA/exact_sdc_prepare_input.py"
+    local -a prepare_cmd=(
+        env
+        "ANALYZER_INPUT_COLUMNAR=${ANALYZER_INPUT_COLUMNAR}"
+        "ANALYZER_INPUT_COMPAT_PICKLE_DICT=${ANALYZER_INPUT_COMPAT_PICKLE_DICT}"
+        python3
+        script/SARA/exact_sdc_prepare_input.py
+        --trace-template "${trace_input}"
+        --output-spec "${CURRENT_RUN_DIR}/output_spec.json"
     )
-    local -a prepare_cache_outputs=("${analyzer_input_file}")
-    if [[ "${ANALYZER_INPUT_BINARY}" == "1" && "${ANALYZER_INPUT_MANIFEST}" != "1" ]]; then
-        if [[ "${ANALYZER_INPUT_COLUMNAR}" == "1" ]]; then
-            prepare_cache_outputs+=("${analyzer_input_columnar_file}")
-        fi
-        if [[ "${ANALYZER_INPUT_COMPAT_PICKLE_DICT}" == "1" ]]; then
-            prepare_cache_outputs+=("${analyzer_input_binary_file}")
-        fi
-    fi
-    prepare_sig="$(cache_compute_signature "analyzer_prepare_input" "${prepare_params_json}" "${prepare_payload_tmp}" \
-        "${prepare_sig_inputs[@]}")"
-    prepare_hit="0"
-    if [[ "${cache_enabled}" == "1" && "${cache_force}" != "1" ]]; then
-        prepare_hit="$(cache_step_hit "${cache_meta_file}" "analyzer_prepare_input" "${prepare_sig}" \
-            "${prepare_cache_outputs[@]}")"
-    fi
-    if [[ "${prepare_hit}" != "1" && "${global_cache_enabled}" == "1" && "${cache_force}" != "1" ]]; then
-        prepare_hit="$(global_cache_try_restore "analyzer_prepare_input" "${prepare_sig}" \
-            "${prepare_cache_outputs[@]}")"
-        if [[ "${prepare_hit}" == "1" ]]; then
-            echo "=== Global cache hit: analyzer_prepare_input ==="
-            if [[ "${cache_enabled}" == "1" ]]; then
-                cache_step_update "${cache_meta_file}" "analyzer_prepare_input" "${prepare_sig}" "${prepare_payload_tmp}" \
-                    "${prepare_cache_outputs[@]}"
-            fi
-        fi
-    fi
-    if [[ "${prepare_hit}" == "1" ]]; then
-        echo "=== Cache hit: analyzer_prepare_input ($(basename "${analyzer_input_file}")) ==="
+    if [[ "${ANALYZER_INPUT_MANIFEST}" == "1" ]]; then
+        prepare_cmd+=(--manifest-reference)
     else
-        local -a prepare_cmd=(
-            env
-            "ANALYZER_INPUT_COLUMNAR=${ANALYZER_INPUT_COLUMNAR}"
-            "ANALYZER_INPUT_COMPAT_PICKLE_DICT=${ANALYZER_INPUT_COMPAT_PICKLE_DICT}"
-            python3
-            script/SARA/exact_sdc_prepare_input.py
-            --trace-template "${trace_input}"
-            --output-spec "${CURRENT_RUN_DIR}/output_spec.json"
-        )
-        if [[ "${ANALYZER_INPUT_MANIFEST}" == "1" ]]; then
-            prepare_cmd+=(--manifest-reference)
-        else
-            prepare_cmd+=(--no-manifest-reference)
-        fi
-        if [[ "${ANALYZER_INPUT_BINARY}" == "1" && "${ANALYZER_INPUT_MANIFEST}" != "1" ]]; then
-            prepare_cmd+=(--binary-analyzer-input)
-        else
-            prepare_cmd+=(--no-binary-analyzer-input)
-        fi
-        if [[ "${ANALYZER_PREPARE_COMPACT_EVENTS}" == "1" ]]; then
-            prepare_cmd+=(--compact-events)
-        else
-            prepare_cmd+=(--no-compact-events)
-        fi
-        prepare_cmd+=(-o "${analyzer_input_file}")
-        run_timed "analyzer_prepare_input_py" "${prepare_cmd[@]}" || return $?
-        if [[ "${cache_enabled}" == "1" ]]; then
-            cache_step_update "${cache_meta_file}" "analyzer_prepare_input" "${prepare_sig}" "${prepare_payload_tmp}" \
-                "${prepare_cache_outputs[@]}"
-        fi
-        if [[ "${global_cache_enabled}" == "1" ]]; then
-            global_cache_store "analyzer_prepare_input" "${prepare_sig}" "${prepare_payload_tmp}" \
-                "${prepare_cache_outputs[@]}"
-        fi
+        prepare_cmd+=(--no-manifest-reference)
     fi
-    rm -f "${prepare_payload_tmp}"
+    if [[ "${ANALYZER_INPUT_BINARY}" == "1" && "${ANALYZER_INPUT_MANIFEST}" != "1" ]]; then
+        prepare_cmd+=(--binary-analyzer-input)
+    else
+        prepare_cmd+=(--no-binary-analyzer-input)
+    fi
+    if [[ "${ANALYZER_PREPARE_COMPACT_EVENTS}" == "1" ]]; then
+        prepare_cmd+=(--compact-events)
+    else
+        prepare_cmd+=(--no-compact-events)
+    fi
+    prepare_cmd+=(-o "${analyzer_input_file}")
+    run_timed "analyzer_prepare_input_py" "${prepare_cmd[@]}" || return $?
 
     local analyzer_shared_memory_output=0
     local output_oracle_policy_file
@@ -4385,50 +4087,7 @@ run_analyzer_pipeline() {
         -o
         "${analyzer_output_file}"
     )
-    local analyzer_payload_tmp analyzer_sig analyzer_hit analyzer_params_json
-    local -a analyzer_cache_outputs=("${analyzer_output_file}" "${analyzer_meta_file}")
-    if [[ "${ANALYZER_OUTPUT_BINARY}" == "1" ]]; then
-        analyzer_cache_outputs+=("${analyzer_output_binary_file}")
-    fi
-    analyzer_payload_tmp="$(mktemp)"
-    analyzer_params_json="$(printf '{"fault_component":"%s","lite_output":%s,"lite_output_profile":"%s","aggregate_read_events":%s,"mask_format":"%s","assume_sorted_events":%s,"emit_cache_sites":%s,"output_binary":%s,"trim_component_output":%s,"omit_toplevel_diagnostics":%s,"compact_site_output":%s,"shared_memory_component_output":%s,"share_cache_site_records":%s,"force_rf_addr_masking":%s,"omit_meta_diagnostic_samples":%s,"omit_unused_read_events":%s}' \
-        "${analyzer_fault_component}" "${ANALYZER_LITE_OUTPUT}" "${ANALYZER_LITE_OUTPUT_PROFILE}" "${ANALYZER_AGGREGATE_READ_EVENTS}" "${ANALYZER_MASK_FORMAT}" "${ANALYZER_ASSUME_SORTED_EVENTS}" "${ANALYZER_EMIT_CACHE_SITES}" "${ANALYZER_OUTPUT_BINARY}" "${ANALYZER_TRIM_COMPONENT_OUTPUT}" "${ANALYZER_OMIT_TOPLEVEL_DIAGNOSTICS}" "${ANALYZER_COMPACT_SITE_OUTPUT}" "${analyzer_shared_memory_output}" "${ANALYZER_SHARE_CACHE_SITE_RECORDS}" "${analyzer_force_rf_addr_masking}" "${ANALYZER_OMIT_META_DIAGNOSTIC_SAMPLES}" "${omit_unused_read_events_effective}")"
-    analyzer_sig="$(cache_compute_signature "analyzer_reg_observed" "${analyzer_params_json}" "${analyzer_payload_tmp}" \
-        "${analyzer_input_file}" \
-        "${trace_input}" \
-        "${trace_input}.memory_ranges.json" \
-        "script/SARA/reg_observed_analyzer.py" \
-        "script/common/outcome_oracle.py" \
-        "${output_oracle_policy_file}")"
-    analyzer_hit="0"
-    if [[ "${cache_enabled}" == "1" && "${cache_force}" != "1" ]]; then
-        analyzer_hit="$(cache_step_hit "${cache_meta_file}" "analyzer_reg_observed" "${analyzer_sig}" \
-            "${analyzer_cache_outputs[@]}")"
-    fi
-    if [[ "${analyzer_hit}" != "1" && "${global_cache_enabled}" == "1" && "${cache_force}" != "1" ]]; then
-        analyzer_hit="$(global_cache_try_restore "analyzer_reg_observed" "${analyzer_sig}" \
-            "${analyzer_cache_outputs[@]}")"
-        if [[ "${analyzer_hit}" == "1" ]]; then
-            echo "=== Global cache hit: analyzer_reg_observed ==="
-            if [[ "${cache_enabled}" == "1" ]]; then
-                cache_step_update "${cache_meta_file}" "analyzer_reg_observed" "${analyzer_sig}" "${analyzer_payload_tmp}" \
-                    "${analyzer_cache_outputs[@]}"
-            fi
-        fi
-    fi
-    if [[ "${analyzer_hit}" == "1" ]]; then
-        echo "=== Cache hit: analyzer_reg_observed ($(basename "${analyzer_output_file}")) ==="
-    else
-        run_timed "analyzer_reg_observed_py" "${analyzer_cmd[@]}" || return $?
-        if [[ "${cache_enabled}" == "1" ]]; then
-            cache_step_update "${cache_meta_file}" "analyzer_reg_observed" "${analyzer_sig}" "${analyzer_payload_tmp}" \
-                "${analyzer_cache_outputs[@]}"
-        fi
-        if [[ "${global_cache_enabled}" == "1" ]]; then
-            global_cache_store "analyzer_reg_observed" "${analyzer_sig}" "${analyzer_payload_tmp}" \
-                "${analyzer_cache_outputs[@]}"
-        fi
-    fi
+    run_timed "analyzer_reg_observed_py" "${analyzer_cmd[@]}" || return $?
     if [[ ! -f "${analyzer_meta_file}" && -f "${analyzer_output_file}" ]]; then
         python3 - "${analyzer_output_file}" "${analyzer_meta_file}" <<'PY'
 import gzip
@@ -4450,8 +4109,6 @@ meta = raw.get("exact_meta", {}) if isinstance(raw, dict) else {}
 dst.write_text(json.dumps(meta, separators=(",", ":"), ensure_ascii=True) + "\n", encoding="utf-8")
 PY
     fi
-    rm -f "${analyzer_payload_tmp}"
-
     if [[ "${RUN_ANALYZER_SKIP_EXACT_COMPUTE:-0}" == "1" ]]; then
         if [[ "${analyzer_input_file}" != "${CURRENT_RUN_DIR}/analyzer_input.json" ]]; then
             ln -sfn "$(basename "${analyzer_input_file}")" "${CURRENT_RUN_DIR}/analyzer_input.json"
@@ -4463,85 +4120,37 @@ PY
         return 0
     fi
 
-    local compute_payload_tmp compute_sig compute_hit compute_params_json
-    compute_payload_tmp="$(mktemp)"
-    local -a compute_sig_inputs=("${analyzer_output_file}")
-    if [[ "${ANALYZER_OUTPUT_BINARY}" == "1" ]]; then
-        compute_sig_inputs+=("${analyzer_output_binary_file}")
-    fi
-    compute_params_json="$(printf '{"exact_semantics_profile":"%s","fault_component":"%s","thread_rand_max":%s,"block_rand_max":%s,"smem_size_bits":%s,"l1d_size_bits":%s,"l1d_tag_bits":%s,"l1d_include_tag_bits":%s,"l1d_line_size_bytes":%s,"l1d_shaders":"%s","l1d_shaders_arg":"%s","l1d_write_allocate":%s,"l2_size_bits":%s,"l2_tag_bits":%s,"l2_include_tag_bits":%s,"l2_line_size_bytes":%s,"l2_global_prefill":%s,"datatype_bits":%s,"addr_valid_ranges_path":"%s","fi_sampling_space":"%s","cycles_domain_file":"%s"}' \
-        "${EXACT_SEMANTICS_PROFILE}" "${FAULT_COMPONENT}" "${thread_rand_max}" "${block_rand_max}" "${smem_size_bits}" "${l1d_size_bits}" "${l1d_tag_bits}" "${l1d_include_tag_bits}" "${l1d_line_size_bytes}" "${l1d_shaders}" "${l1d_shaders_arg}" "${l1d_write_allocate}" "${l2_size_bits}" "${l2_tag_bits}" "${l2_include_tag_bits}" "${l2_line_size_bytes}" "${l2_global_prefill}" "${CURRENT_DATATYPE_BITS}" "${ADDR_VALID_RANGES_PATH}" "${CURRENT_FI_SAMPLING_SPACE_JSON}" "${CURRENT_CYCLES_DOMAIN_FILE}")"
-    compute_sig="$(cache_compute_signature "analyzer_exact_compute" "${compute_params_json}" "${compute_payload_tmp}" \
-        "${compute_sig_inputs[@]}" \
-        "${analyzer_input_file}" \
-        "${trace_input}" \
-        "${trace_input}.memory_ranges.json" \
-        "${CURRENT_RUN_DIR}/regfile_trace.bin" \
-        "${CURRENT_CYCLES_DOMAIN_FILE}" \
-        "${active_log_input}" \
-        "${CURRENT_REGISTER_DOMAIN_FILE}" \
-        "${CURRENT_FI_SAMPLING_SPACE_JSON}" \
-        "script/SARA/exact_sdc_compute.py")"
-    compute_hit="0"
-    if [[ "${cache_enabled}" == "1" && "${cache_force}" != "1" ]]; then
-        compute_hit="$(cache_step_hit "${cache_meta_file}" "analyzer_exact_compute" "${compute_sig}" \
-            "${exact_rates_file}")"
-    fi
-    if [[ "${compute_hit}" != "1" && "${global_cache_enabled}" == "1" && "${cache_force}" != "1" ]]; then
-        compute_hit="$(global_cache_try_restore "analyzer_exact_compute" "${compute_sig}" \
-            "${exact_rates_file}")"
-        if [[ "${compute_hit}" == "1" ]]; then
-            echo "=== Global cache hit: analyzer_exact_compute ==="
-            if [[ "${cache_enabled}" == "1" ]]; then
-                cache_step_update "${cache_meta_file}" "analyzer_exact_compute" "${compute_sig}" "${compute_payload_tmp}" \
-                    "${exact_rates_file}"
-            fi
-        fi
-    fi
-    if [[ "${compute_hit}" == "1" ]]; then
-        echo "=== Cache hit: analyzer_exact_compute (exact_rates.json) ==="
-    else
-        run_timed "analyzer_exact_compute_py" python3 script/SARA/exact_sdc_compute.py \
-            --analyzer-output "${analyzer_output_file}" \
-            --regfile-trace "${CURRENT_RUN_DIR}/regfile_trace.bin" \
-            --trace-template "${analyzer_input_file}" \
-            --cycles "${CURRENT_CYCLES_DOMAIN_FILE}" \
-            --active-threads-log "${active_log_input}" \
-            --thread-rand-max "${thread_rand_max}" \
-            --block-rand-max "${block_rand_max}" \
-            --smem-size-bits "${smem_size_bits}" \
-            --l1d-size-bits "${l1d_size_bits}" \
-            --l1d-line-size-bytes "${l1d_line_size_bytes}" \
-            --l1d-tag-bits "${l1d_tag_bits}" \
-            --l1d-include-tag-bits "${l1d_include_tag_bits}" \
-            --l1d-shaders "${l1d_shaders_arg}" \
-            --l1d-write-allocate "${l1d_write_allocate}" \
-            --l2-size-bits "${l2_size_bits}" \
-            --l2-tag-bits "${l2_tag_bits}" \
-            --l2-include-tag-bits "${l2_include_tag_bits}" \
-            --l2-line-size-bytes "${l2_line_size_bytes}" \
-            --l2-global-prefill "${l2_global_prefill}" \
-            --registers "${CURRENT_REGISTER_DOMAIN_FILE}" \
-            --datatype-bits "${CURRENT_DATATYPE_BITS}" \
-            --fault-component "${FAULT_COMPONENT}" \
-            --storage-group-mode "${EXACT_STORAGE_GROUP_MODE}" \
-            ${ADDR_VALID_RANGES_PATH:+--addr-valid-ranges-path} \
-            ${ADDR_VALID_RANGES_PATH:+${ADDR_VALID_RANGES_PATH}} \
-            --fi-sampling-space-path "${CURRENT_FI_SAMPLING_SPACE_JSON}" \
-            --cycles-domain-path "${CURRENT_CYCLES_DOMAIN_FILE}" \
-            -o "${exact_rates_file}" || return $?
-        if [[ "${cache_enabled}" == "1" ]]; then
-            cache_step_update "${cache_meta_file}" "analyzer_exact_compute" "${compute_sig}" "${compute_payload_tmp}" \
-                "${exact_rates_file}"
-        fi
-        if [[ "${global_cache_enabled}" == "1" ]]; then
-            global_cache_store "analyzer_exact_compute" "${compute_sig}" "${compute_payload_tmp}" \
-                "${exact_rates_file}"
-        fi
-    fi
-    rm -f "${compute_payload_tmp}"
+    run_timed "analyzer_exact_compute_py" python3 script/SARA/exact_sdc_compute.py \
+        --analyzer-output "${analyzer_output_file}" \
+        --regfile-trace "${CURRENT_RUN_DIR}/regfile_trace.bin" \
+        --trace-template "${analyzer_input_file}" \
+        --cycles "${CURRENT_CYCLES_DOMAIN_FILE}" \
+        --active-threads-log "${active_log_input}" \
+        --thread-rand-max "${thread_rand_max}" \
+        --block-rand-max "${block_rand_max}" \
+        --smem-size-bits "${smem_size_bits}" \
+        --l1d-size-bits "${l1d_size_bits}" \
+        --l1d-line-size-bytes "${l1d_line_size_bytes}" \
+        --l1d-tag-bits "${l1d_tag_bits}" \
+        --l1d-include-tag-bits "${l1d_include_tag_bits}" \
+        --l1d-shaders "${l1d_shaders_arg}" \
+        --l1d-write-allocate "${l1d_write_allocate}" \
+        --l2-size-bits "${l2_size_bits}" \
+        --l2-tag-bits "${l2_tag_bits}" \
+        --l2-include-tag-bits "${l2_include_tag_bits}" \
+        --l2-line-size-bytes "${l2_line_size_bytes}" \
+        --l2-global-prefill "${l2_global_prefill}" \
+        --registers "${CURRENT_REGISTER_DOMAIN_FILE}" \
+        --datatype-bits "${CURRENT_DATATYPE_BITS}" \
+        --fault-component "${FAULT_COMPONENT}" \
+        --storage-group-mode "${EXACT_STORAGE_GROUP_MODE}" \
+        ${ADDR_VALID_RANGES_PATH:+--addr-valid-ranges-path} \
+        ${ADDR_VALID_RANGES_PATH:+${ADDR_VALID_RANGES_PATH}} \
+        --fi-sampling-space-path "${CURRENT_FI_SAMPLING_SPACE_JSON}" \
+        --cycles-domain-path "${CURRENT_CYCLES_DOMAIN_FILE}" \
+        -o "${exact_rates_file}" || return $?
 
-    run_timed "analyzer_rates_summary_cpp" "${EXACT_CORE_BIN}" rates-summary \
+    run_timed "analyzer_rates_summary_py" python3 "${EXACT_CORE_TOOL}" rates-summary \
         --input "${exact_rates_file}" \
         --benchmark "${TEST_APP_NAME}" \
         --test-id "${CURRENT_TEST_ID}" \
@@ -4563,9 +4172,6 @@ PY
     echo "analyzer_input_columnar=${ANALYZER_INPUT_COLUMNAR}" | tee -a "${CURRENT_RUN_DIR}/summary.txt"
     echo "analyzer_input_compat_pickle_dict=${ANALYZER_INPUT_COMPAT_PICKLE_DICT}" | tee -a "${CURRENT_RUN_DIR}/summary.txt"
     echo "analyzer_output_binary=${ANALYZER_OUTPUT_BINARY}" | tee -a "${CURRENT_RUN_DIR}/summary.txt"
-    echo "analyzer_cache_enable=${ANALYZER_CACHE_ENABLE}" | tee -a "${CURRENT_RUN_DIR}/summary.txt"
-    echo "analyzer_global_cache=${ANALYZER_GLOBAL_CACHE}" | tee -a "${CURRENT_RUN_DIR}/summary.txt"
-    echo "analyzer_global_cache_dir=${ANALYZER_GLOBAL_CACHE_DIR}" | tee -a "${CURRENT_RUN_DIR}/summary.txt"
     echo "analyzer_json_codec=${ANALYZER_JSON_CODEC:-none}" | tee -a "${CURRENT_RUN_DIR}/summary.txt"
     echo "fault_component=${FAULT_COMPONENT}" | tee -a "${CURRENT_RUN_DIR}/summary.txt"
     echo "weight_thread_rand_max=${thread_rand_max}" | tee -a "${CURRENT_RUN_DIR}/summary.txt"
@@ -4613,8 +4219,6 @@ print("trace_divergence_policy={}".format(str(meta.get("trace_divergence_policy"
 print("trace_divergence_bits={}".format(meta.get("trace_divergence_bits", 0)))
 print("trace_divergence_mass={}".format(meta.get("trace_divergence_mass", 0)))
 print("trace_divergence_zero_warning={}".format(str(meta.get("trace_divergence_zero_warning", ""))))
-print("trace_expanding_mask_present_count={}".format(int(meta.get("trace_expanding_mask_present_count", 0))))
-print("trace_expanding_bits_total={}".format(int(meta.get("trace_expanding_bits_total", 0))))
 print("cache_tag_class_policy={}".format(str(meta.get("cache_tag_class_policy", ""))))
 print("addr_fault_policy={}".format(str(meta.get("addr_fault_policy", ""))))
 print("addr_due_mode={}".format(str(meta.get("addr_due_mode", ""))))
@@ -4750,10 +4354,6 @@ print("output_oracle_spec_entry_count={}".format(int(meta.get("output_oracle_spe
 print("output_oracle_spec_total_bytes={}".format(int(meta.get("output_oracle_spec_total_bytes", 0))))
 print("addr_observed_seed_suppressed_bits={}".format(int(meta.get("addr_observed_seed_suppressed_bits", 0))))
 print("addr_observed_seed_suppressed_events={}".format(int(meta.get("addr_observed_seed_suppressed_events", 0))))
-print("tol_output_store_seed_count={}".format(int(meta.get("tol_output_store_seed_count", 0))))
-print("tol_float_backward_op_count={}".format(int(meta.get("tol_float_backward_op_count", 0))))
-print("tol_memory_forward_byte_count={}".format(int(meta.get("tol_memory_forward_byte_count", 0))))
-print("tol_exact_conversion_count={}".format(int(meta.get("tol_exact_conversion_count", 0))))
 data_bits = meta.get("data_bits", None)
 tag_bits = meta.get("tag_bits", None)
 total_bits = meta.get("total_bits", None)
@@ -4924,10 +4524,6 @@ summary["output_oracle_type"] = str(meta.get("output_oracle_type", ""))
 summary["output_oracle_has_output_spec"] = bool(meta.get("output_oracle_has_output_spec", False))
 summary["addr_observed_seed_suppressed_bits"] = int(meta.get("addr_observed_seed_suppressed_bits", 0))
 summary["addr_observed_seed_suppressed_events"] = int(meta.get("addr_observed_seed_suppressed_events", 0))
-summary["tol_output_store_seed_count"] = int(meta.get("tol_output_store_seed_count", 0))
-summary["tol_float_backward_op_count"] = int(meta.get("tol_float_backward_op_count", 0))
-summary["tol_memory_forward_byte_count"] = int(meta.get("tol_memory_forward_byte_count", 0))
-summary["tol_exact_conversion_count"] = int(meta.get("tol_exact_conversion_count", 0))
 
 with open(summary_path, "w", encoding="utf-8") as f:
     json.dump(summary, f, indent=2, sort_keys=False)
@@ -4939,7 +4535,7 @@ PY
     elif [[ "${RUN_ANALYZER_WRITE_SINGLE_CSV}" == "1" ]]; then
         local single_csv=""
         single_csv="$(resolve_test_result_csv_path "$(build_exact_result_csv_filename "exact_result")")"
-        run_timed "analyzer_merge_csv_cpp" "${EXACT_CORE_BIN}" rates-merge-csv \
+        run_timed "analyzer_merge_csv_py" python3 "${EXACT_CORE_TOOL}" rates-merge-csv \
             --summary "${CURRENT_RUN_DIR}/summary.json" \
             --output "${single_csv}" || return $?
         echo "Wrote CSV: ${single_csv}"
@@ -5250,66 +4846,7 @@ run_all_components_mode_core() {
             --cycles-domain-path "${CURRENT_CYCLES_DOMAIN_FILE}"
         )
         batch_exact_compute_cmd+=(-o "${batch_manifest}")
-        local batch_cache_meta_file batch_cache_enabled batch_cache_force batch_global_cache_enabled
-        local batch_compute_payload_tmp batch_compute_sig batch_compute_hit batch_compute_params_json
-        local -a batch_compute_outputs=()
-        local -a batch_compute_sig_inputs=()
-        batch_cache_meta_file="$(cache_meta_path_for_dir "${CURRENT_RUN_DIR}")"
-        batch_cache_enabled="${ANALYZER_CACHE_ENABLE}"
-        batch_cache_force="${ANALYZER_CACHE_FORCE_REBUILD}"
-        batch_global_cache_enabled="$(is_global_cache_enabled)"
-        batch_compute_payload_tmp="$(mktemp)"
-        batch_compute_outputs=("${batch_manifest}")
-        batch_compute_sig_inputs=()
-        for comp in "${active_components[@]}"; do
-            comp_analyzer_output_json="${CURRENT_RUN_DIR}/analyzer_output_${comp}.json"
-            if [[ -f "${comp_analyzer_output_json}" || -L "${comp_analyzer_output_json}" ]]; then
-                batch_compute_sig_inputs+=("${comp_analyzer_output_json}")
-                if [[ -f "${comp_analyzer_output_json}.bin" || -L "${comp_analyzer_output_json}.bin" ]]; then
-                    batch_compute_sig_inputs+=("${comp_analyzer_output_json}.bin")
-                fi
-            fi
-        done
-        if (( ${#batch_compute_sig_inputs[@]} == 0 )); then
-            batch_compute_sig_inputs=("${shared_analyzer_output_json}")
-            if [[ -f "${shared_analyzer_output_json}.bin" || -L "${shared_analyzer_output_json}.bin" ]]; then
-                batch_compute_sig_inputs+=("${shared_analyzer_output_json}.bin")
-            fi
-        fi
-        for comp in "${active_components[@]}"; do
-            batch_compute_outputs+=("${CURRENT_RUN_DIR}/exact_rates_${comp}.json")
-        done
-        batch_compute_params_json="$(printf '{"exact_semantics_profile":"%s","components":"%s","thread_rand_max":%s,"block_rand_max":%s,"smem_size_bits":%s,"l1d_size_bits":%s,"l1d_tag_bits":%s,"l1d_include_tag_bits":%s,"l1d_line_size_bytes":%s,"l1d_shaders":"%s","l1d_shaders_arg":"%s","l1d_write_allocate":%s,"l2_size_bits":%s,"l2_tag_bits":%s,"l2_include_tag_bits":%s,"l2_line_size_bytes":%s,"l2_global_prefill":%s,"datatype_bits":%s,"addr_valid_ranges_path":"%s","rf_domain_total_bits":%s,"smem_rf_domain_total_bits":%s,"l1d_domain_total_bits":%s,"l2_domain_total_bits":%s,"storage_group_mode":"%s"}' \
-            "${EXACT_SEMANTICS_PROFILE}" "${batch_components_csv}" "${CURRENT_THREAD_RAND_MAX}" "${CURRENT_BLOCK_RAND_MAX}" "${CURRENT_SMEM_SIZE_BITS}" "${CURRENT_L1D_SIZE_BITS}" "${CURRENT_L1D_TAG_BITS}" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l1d_include_tag_bits" "1")" "${CURRENT_L1D_LINE_SIZE_BYTES}" "${CURRENT_L1D_SHADERS}" "${batch_l1d_shaders_arg}" "${CURRENT_L1D_WRITE_ALLOCATE}" "${CURRENT_L2_SIZE_BITS}" "${CURRENT_L2_TAG_BITS}" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l2_include_tag_bits" "1")" "${CURRENT_L2_LINE_SIZE_BYTES}" "${CURRENT_L2_GLOBAL_PREFILL}" "${CURRENT_DATATYPE_BITS}" "${ADDR_VALID_RANGES_PATH:-}" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "rf_domain_total_bits" "0")" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "smem_rf_domain_total_bits" "0")" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l1d_domain_total_bits" "0")" "$(get_json_field "${CURRENT_FI_SAMPLING_SPACE_JSON}" "l2_domain_total_bits" "0")" "${EXACT_STORAGE_GROUP_MODE}")"
-        batch_compute_sig="$(cache_compute_signature "analyzer_exact_compute_batch" "${batch_compute_params_json}" "${batch_compute_payload_tmp}" \
-            "${batch_compute_sig_inputs[@]}" \
-            "${CURRENT_RUN_DIR}/analyzer_input.json" \
-            "${CURRENT_TRACE_FILE}" \
-            "${CURRENT_TRACE_FILE}.memory_ranges.json" \
-            "${CURRENT_RUN_DIR}/regfile_trace.bin" \
-            "${CURRENT_CYCLES_DOMAIN_FILE}" \
-            "${active_log_input}" \
-            "${CURRENT_REGISTER_DOMAIN_FILE}" \
-            "script/SARA/exact_sdc_compute.py")"
-        batch_compute_hit="0"
-        if [[ "${batch_cache_enabled}" == "1" && "${batch_cache_force}" != "1" ]]; then
-            batch_compute_hit="$(cache_step_hit "${batch_cache_meta_file}" "analyzer_exact_compute_batch" "${batch_compute_sig}" \
-                "${batch_compute_outputs[@]}")"
-        fi
-        if [[ "${batch_compute_hit}" != "1" && "${batch_global_cache_enabled}" == "1" && "${batch_cache_force}" != "1" ]]; then
-            batch_compute_hit="$(global_cache_try_restore "analyzer_exact_compute_batch" "${batch_compute_sig}" \
-                "${batch_compute_outputs[@]}")"
-            if [[ "${batch_compute_hit}" == "1" ]]; then
-                echo "=== Global cache hit: analyzer_exact_compute_batch ==="
-                if [[ "${batch_cache_enabled}" == "1" ]]; then
-                    cache_step_update "${batch_cache_meta_file}" "analyzer_exact_compute_batch" "${batch_compute_sig}" "${batch_compute_payload_tmp}" \
-                        "${batch_compute_outputs[@]}"
-                fi
-            fi
-        fi
-        if [[ "${batch_compute_hit}" == "1" ]]; then
-            echo "=== Cache hit: analyzer_exact_compute_batch ==="
-        elif ! run_timed "analyzer_exact_compute_py" "${batch_exact_compute_cmd[@]}"; then
+        if ! run_timed "analyzer_exact_compute_py" "${batch_exact_compute_cmd[@]}"; then
             if [[ "${compact_mode}" == "1" ]]; then
                 report_quiet_failure "${QUIET_LOG_FILE}" "shared exact compute"
             fi
@@ -5320,17 +4857,7 @@ run_all_components_mode_core() {
                     comp_note_map["${comp}"]="pipeline_failed"
                 fi
             done
-        else
-            if [[ "${batch_cache_enabled}" == "1" ]]; then
-                cache_step_update "${batch_cache_meta_file}" "analyzer_exact_compute_batch" "${batch_compute_sig}" "${batch_compute_payload_tmp}" \
-                    "${batch_compute_outputs[@]}"
-            fi
-            if [[ "${batch_global_cache_enabled}" == "1" ]]; then
-                global_cache_store "analyzer_exact_compute_batch" "${batch_compute_sig}" "${batch_compute_payload_tmp}" \
-                    "${batch_compute_outputs[@]}"
-            fi
         fi
-        rm -f "${batch_compute_payload_tmp}"
     fi
 
     for comp in "${components[@]}"; do
@@ -5375,7 +4902,7 @@ run_all_components_mode_core() {
             status="error"
             note="missing_exact_rates"
             overall_failed=1
-        elif ! run_timed "analyzer_rates_summary_cpp" "${EXACT_CORE_BIN}" rates-summary \
+        elif ! run_timed "analyzer_rates_summary_py" python3 "${EXACT_CORE_TOOL}" rates-summary \
             --input "${comp_exact_rates_json}" \
             --benchmark "${TEST_APP_NAME}" \
             --test-id "${CURRENT_TEST_ID}" \
@@ -5388,7 +4915,7 @@ run_all_components_mode_core() {
             comp_summary_json_map["${comp}"]="${comp_summary_json}"
             last_generated_comp="${comp}"
             IFS=$'\t' read -r component_status component_reason masked_rate sdc_rate due_rate unknown_rate < <(
-                "${EXACT_CORE_BIN}" summary-status --input "${comp_summary_json}"
+                python3 "${EXACT_CORE_TOOL}" summary-status --input "${comp_summary_json}"
             )
             if [[ "${component_status}" != "ok" ]]; then
                 status="error"
@@ -5438,6 +4965,7 @@ run_all_components_mode_core() {
             simple_summary_lines+=("Input: unavailable")
         fi
         simple_summary_lines+=("Inference Mode: canonical_proof")
+        simple_summary_lines+=("Timing Scope: $(public_timing_scope_label)")
 
         for comp in "${ordered_components[@]}"; do
             local summary_label status_v note_v masked_v sdc_v due_v unknown_v
@@ -5472,11 +5000,11 @@ run_all_components_mode_core() {
             [[ -n "${step_label}" ]] || continue
             simple_summary_lines+=("${step_label}: ${step_seconds}")
             has_step_times=1
-        done < <(collect_step_timing_lines_since_start)
+        done < <(collect_public_step_timing_lines_since_start)
         if [[ "${has_step_times}" != "1" ]]; then
             simple_summary_lines+=("none")
         fi
-        overall_total_s="$(sum_step_timing_seconds_since_start)"
+        overall_total_s="$(reported_total_time_seconds)"
         simple_summary_lines+=("Total Time (s): ${overall_total_s}")
 
         printf '%s\n' "${simple_summary_lines[@]}" > "${simple_summary_txt}"
@@ -5490,7 +5018,7 @@ run_all_components_mode_core() {
     fi
     if [[ -n "${simple_summary_txt}" && -f "${simple_summary_txt}" ]]; then
         simple_summary_csv="$(resolve_test_result_csv_path "$(build_exact_result_csv_filename "exact_result_simple")")"
-        run_timed "analyzer_simple_summary_csv_cpp" "${EXACT_CORE_BIN}" rates-simple-summary-csv \
+        run_timed "analyzer_simple_summary_csv_py" python3 "${EXACT_CORE_TOOL}" rates-simple-summary-csv \
             --input "${simple_summary_txt}" \
             --output "${simple_summary_csv}" || overall_failed=1
         if [[ "${overall_failed}" != "1" ]]; then
@@ -5508,7 +5036,7 @@ run_all_components_mode_core() {
             fi
         done
         if [[ "${overall_failed}" != "1" ]]; then
-            run_timed "analyzer_merge_components_csv_cpp" "${EXACT_CORE_BIN}" rates-merge-components-csv \
+            run_timed "analyzer_merge_components_csv_py" python3 "${EXACT_CORE_TOOL}" rates-merge-components-csv \
                 --rf-summary "${comp_summary_json_map[rf]}" \
                 --smem-rf-summary "${comp_summary_json_map[smem_rf]}" \
                 --l1d-summary "${comp_summary_json_map[l1d]}" \
@@ -5781,10 +5309,10 @@ run_validation_mode() {
 EOF
 
     echo "=== Measured validation rates ==="
-    "${EXACT_CORE_BIN}" rates-summary --input "${CURRENT_RUN_DIR}/measured_validation.json"
+    python3 "${EXACT_CORE_TOOL}" rates-summary --input "${CURRENT_RUN_DIR}/measured_validation.json"
 
     echo "=== Comparing measured vs exact expected rates ==="
-    "${EXACT_CORE_BIN}" rates-compare \
+    python3 "${EXACT_CORE_TOOL}" rates-compare \
         --expected "${CURRENT_RUN_DIR}/expected_validation.json" \
         --measured "${CURRENT_RUN_DIR}/measured_validation.json" \
         --tolerance "${VALIDATE_TOL}"
@@ -5838,7 +5366,7 @@ run_csv_mode() {
         first=0
     done
 
-    "${EXACT_CORE_BIN}" rates-merge-csv \
+    python3 "${EXACT_CORE_TOOL}" rates-merge-csv \
         --summary "${summaries[@]}" \
         --output "${CSV_OUTPUT}"
 
@@ -5895,10 +5423,7 @@ main() {
         echo "=== Error: ANALYZER_INPUT_BINARY=1 is mutually exclusive with ANALYZER_INPUT_MANIFEST=1 ===" >&2
         exit 1
     fi
-    if ! ensure_exact_storage_backend_binary; then
-        exit 1
-    fi
-    if ! ensure_exact_core_binary; then
+    if ! ensure_exact_core_tool; then
         exit 1
     fi
     if [[ -n "${EXACT_RESULT_VARIANT:-}" && ! ( "${FAULT_COMPONENT}" == "gmem" || "${MODE}" == "gmem" ) ]]; then

@@ -80,9 +80,6 @@ endif
 MCPAT=
 MCPAT_OBJ_DIR=
 MCPAT_DBG_FLAG=
-EXACT_STORAGE_BACKEND_SO=script/SARA/native/libexact_storage_backend.so
-EXACT_STORAGE_CORE_BIN=script/SARA/native/exact_storage_core
-EXACT_CORE_BIN=script/SARA/native/exact_core
 ifneq ($(GPGPUSIM_POWER_MODEL),)
 	LIBS += mcpat
 
@@ -98,7 +95,7 @@ endif
 
 
 .PHONY: check_setup_environment check_power
-gpgpusim: check_setup_environment check_power makedirs $(TARGETS) exact_storage_backend exact_storage_core exact_core
+gpgpusim: check_setup_environment check_power makedirs $(TARGETS)
 
 
 check_setup_environment:
@@ -250,28 +247,6 @@ makedirs:
 	if [ ! -d $(SIM_OBJ_FILES_DIR)/cuobjdump_to_ptxplus ]; then mkdir -p $(SIM_OBJ_FILES_DIR)/cuobjdump_to_ptxplus; fi;
 	if [ ! -d $(SIM_OBJ_FILES_DIR)/accelwattch ]; then mkdir -p $(SIM_OBJ_FILES_DIR)/accelwattch; fi;
 	if [ ! -d $(SIM_OBJ_FILES_DIR)/accelwattch/cacti ]; then mkdir -p $(SIM_OBJ_FILES_DIR)/accelwattch/cacti; fi;
-	if [ ! -d script/SARA/native ]; then mkdir -p script/SARA/native; fi;
-
-.PHONY: exact_storage_backend
-exact_storage_backend:
-	mkdir -p script/SARA/native
-	g++ -std=c++17 -O3 -g -fPIC -shared -Isrc \
-		src/analysis/ptx_influence.cc src/analysis/ptx_influence_capi.cc \
-		-o $(EXACT_STORAGE_BACKEND_SO)
-
-.PHONY: exact_storage_core
-exact_storage_core:
-	mkdir -p script/SARA/native
-	g++ -std=c++17 -O3 -g -Isrc \
-		src/analysis/exact_storage_main.cc src/analysis/ptx_influence.cc \
-		-o $(EXACT_STORAGE_CORE_BIN)
-
-.PHONY: exact_core
-exact_core:
-	mkdir -p script/SARA/native
-	g++ -std=c++17 -O3 -g -Isrc -Ithird_party \
-		src/analysis/exact_core_main.cc src/analysis/ptx_influence.cc \
-		-o $(EXACT_CORE_BIN)
 
 all:
 	$(MAKE) gpgpusim
@@ -288,9 +263,6 @@ clean: makedirs
 cleangpgpusim: cleandocs
 	rm -rf $(SIM_LIB_DIR)
 	rm -rf $(SIM_OBJ_FILES_DIR)
-	rm -f $(EXACT_STORAGE_BACKEND_SO)
-	rm -f $(EXACT_STORAGE_CORE_BIN)
-	rm -f $(EXACT_CORE_BIN)
 	rm -f *~ *.o ./src/cuda-sim/*.gcda ./src/cuda-sim/*.gcno ./src/cuda-sim/*.gcov ./src/cuda-sim/libgpgpu_ptx_sim.a \
                 ./src/cuda-sim/ptx.tab.h ./src/cuda-sim/ptx.tab.c ./src/cuda-sim/ptx.output ./src/cuda-sim/lex.ptx_.c \
                 ./src/cuda-sim/ptxinfo.tab.h ./src/cuda-sim/ptxinfo.tab.c ./src/cuda-sim/ptxinfo.output ./src/cuda-sim/lex.ptxinfo_.c \

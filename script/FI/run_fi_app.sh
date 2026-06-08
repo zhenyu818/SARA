@@ -31,6 +31,7 @@ COMPONENT_SET="${COMPONENT_SET:-0}" # 0:RF, 1:local_mem, 2:shared_mem, 3:L1D_cac
 INJECT_BIT_FLIP_COUNT="${INJECT_BIT_FLIP_COUNT:-1}" # number of bits to flip per injection (e.g. 2 means flip 2 bits per injection)
 
 RUN_PER_EPOCH="${RUN_PER_EPOCH:-384}"
+FI_PARALLEL_JOBS="${FI_PARALLEL_JOBS:-8}"
 GPU_ARCH="${GPU_ARCH:-auto}" # auto | sm_XX
 
 RF_FAULT_MODEL="${RF_FAULT_MODEL:-persistent}"
@@ -39,10 +40,12 @@ TRACE_EXPANDING_POLICY="${TRACE_EXPANDING_POLICY:-masked}"
 # Public artifact reproducibility seed. Keep fixed across run_experiment.sh runs.
 FI_SEED_BASE=2026
 FI_LOG_ROOT="${FI_LOG_ROOT:-exact_sdc_runs}"
-FI_COMPARE_INPUT_ROOT="${FI_COMPARE_INPUT_ROOT:-exact_sdc_runs_all}"
+RESULT_BASENAME="${RESULT_BASENAME:-0-0}"
+STORAGE_PREBUILD_CACHE_ROOT="${STORAGE_PREBUILD_CACHE_ROOT:-}"
+STORAGE_METHOD_RESULT_ROOT="${STORAGE_METHOD_RESULT_ROOT:-}"
+FI_NONCOMPILE_E2E="${FI_NONCOMPILE_E2E:-1}"
 CAMPAIGN_EXEC_TEMPLATE="${CAMPAIGN_EXEC_SCRIPT:-${COMMON_DIR}/campaign_exec.sh}"
 OUTPUT_ORACLE_TOL_POLICY="${OUTPUT_ORACLE_TOL_POLICY:-{}}"
-OUTPUT_ORACLE_TOL_POLICY_BASE="${OUTPUT_ORACLE_TOL_POLICY}"
 OUTPUT_ORACLE_TIMEOUT_EXIT_STATUSES="${OUTPUT_ORACLE_TIMEOUT_EXIT_STATUSES:-124:137}"
 OUTPUT_ORACLE_TOL_POLICY_SOURCE="${OUTPUT_ORACLE_TOL_POLICY_SOURCE:-default_exact}"
 FI_PROGRESS_EVENTS="${FI_PROGRESS_EVENTS:-0}"
@@ -175,6 +178,134 @@ ns_to_seconds() {
     awk -v ns="${ns}" 'BEGIN { printf "%.6f", ns / 1000000000 }'
 }
 
+current_time_ns() {
+    date +%s%N
+}
+
+
+update_fi_e2e_time_csv() {
+    local csv_path="$1"
+    local e2e_seconds="$2"
+    python3 - "${csv_path}" "${e2e_seconds}" <<'PYINNER'
+import csv
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+e2e = f"{float(sys.argv[2]):.6f}"
+with path.open(newline="", encoding="utf-8", errors="replace") as handle:
+    reader = csv.DictReader(handle)
+    rows = list(reader)
+    fieldnames = list(reader.fieldnames or [])
+if "End-to-End Time (s)" not in fieldnames:
+    try:
+        idx = fieldnames.index("Injection Time (s)") + 1
+    except ValueError:
+        idx = len(fieldnames)
+    fieldnames.insert(idx, "End-to-End Time (s)")
+for row in rows:
+    row["End-to-End Time (s)"] = e2e
+tmp = path.with_suffix(path.suffix + ".tmp")
+with tmp.open("w", newline="", encoding="utf-8") as handle:
+    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+os.replace(tmp, path)
+PYINNER
+}
+
+storage_prebuild_cache_dir() {
+    if [[ -z "${STORAGE_PREBUILD_CACHE_ROOT}" ]]; then
+        return 1
+    fi
+    echo "${STORAGE_PREBUILD_CACHE_ROOT}/${TEST_APP_NAME}/${RESULT_BASENAME}"
+}
+
+method_result_dir() {
+    if [[ -n "${STORAGE_METHOD_RESULT_ROOT}" ]]; then
+        echo "${STORAGE_METHOD_RESULT_ROOT}/${TEST_APP_NAME}/result"
+    else
+        echo "test_apps/${TEST_APP_NAME}/result"
+    fi
+}
+
+prebuilt_result_generator_path() {
+    local x_val="$1"
+    local cache_dir
+    cache_dir="$(storage_prebuild_cache_dir 2>/dev/null || true)"
+    if [[ -n "${cache_dir}" ]]; then
+        echo "${cache_dir}/result_generators/gen_${x_val}"
+    fi
+}
+
+run_result_generator_no_compile() {
+    local cu_file="$1"
+    local x_val="$2"
+    local size_line="$3"
+    local out_path="$4"
+    local gen_path
+    gen_path="$(prebuilt_result_generator_path "${x_val}")"
+    if [[ -n "${gen_path}" && -x "${gen_path}" ]]; then
+        "${gen_path}" ${size_line} > "${out_path}"
+        return $?
+    fi
+    if [[ "${FI_NONCOMPILE_E2E}" == "1" ]]; then
+        echo "=== Error: missing prebuilt result generator for ${TEST_APP_NAME}_${x_val}; refusing nvcc in FI noncompile E2E timing ===" >&2
+        echo "=== Expected: ${gen_path:-<unset>} ===" >&2
+        return 1
+    fi
+    nvcc "${cu_file}" -o "./gen" -g -lcudart -arch="${GPU_ARCH}" && ./gen ${size_line} > "${out_path}"
+}
+
+install_storage_prebuild_artifacts() {
+    local cache_dir
+    cache_dir="$(storage_prebuild_cache_dir 2>/dev/null || true)"
+    [[ -n "${cache_dir}" && -d "${cache_dir}" ]] || return 1
+    [[ -x "${cache_dir}/${TEST_APP_NAME}" && -f "${cache_dir}/${TEST_APP_NAME}.ptx" && -s "${cache_dir}/register_used.txt" ]] || return 1
+    cp -f "${cache_dir}/${TEST_APP_NAME}" "./${TEST_APP_NAME}"
+    cp -f "${cache_dir}/${TEST_APP_NAME}.ptx" "./${TEST_APP_NAME}.ptx"
+    cp -f "${cache_dir}/register_used.txt" "./register_used.txt"
+    echo "=== Installed FI prebuilt ${TEST_APP_NAME} artifacts from ${cache_dir} (compile time excluded) ==="
+    return 0
+}
+
+run_independent_golden_oracle() {
+    local oracle_dir="$1"
+    local size_line="$2"
+    local golden_log="${oracle_dir}/golden.log"
+    local output_spec="${oracle_dir}/output_spec.json"
+    local policy_file="${oracle_dir}/output_oracle_policy.json"
+    mkdir -p "${oracle_dir}"
+    python3 script/SARA/app_oracle_policy.py --app "${TEST_APP_NAME}" -o "${policy_file}"
+    OUTPUT_ORACLE_TOL_POLICY="$(cat "${policy_file}")"
+    OUTPUT_ORACLE_TOL_POLICY_SOURCE="independent_application_policy"
+
+    set_config_opt "-profile" "0"
+    set_config_opt "-components_to_flip" "0"
+    set_config_opt "-total_cycle_rand" "-1"
+    set_config_opt "-exact_trace" "0"
+    set_config_opt "-regfile_trace" "0"
+    timeout "${FI_GOLDEN_TIMEOUT:-400s}" "./${TEST_APP_NAME}" ${size_line} > "${golden_log}" 2>&1
+    python3 script/common/parse_outputs.py "${golden_log}" -o "${output_spec}"
+
+    local trace_file="${oracle_dir}/inst_trace.json"
+    local trace_log="${oracle_dir}/trace_capture.log"
+    set_config_opt "-profile" "0"
+    set_config_opt "-components_to_flip" "0"
+    set_config_opt "-total_cycle_rand" "-1"
+    set_config_opt "-regfile_trace" "0"
+    set_config_opt "-exact_trace" "1"
+    set_config_opt "-exact_trace_file" "${trace_file}"
+    set_config_opt "-exact_trace_jsonl" "0"
+    timeout "${FI_TRACE_TIMEOUT:-400s}" "./${TEST_APP_NAME}" ${size_line} > "${trace_log}" 2>&1
+    set_config_opt "-exact_trace" "0"
+
+    export FI_GOLDEN_LOG="${golden_log}"
+    export FI_OUTPUT_SPEC="${output_spec}"
+    export FI_ACTIVE_THREADS_LOG="${trace_file}.active_threads.jsonl"
+}
+
 count_fi_completed_tasks() {
     local log_path="${1:-}"
     if [[ -z "${log_path}" || ! -f "${log_path}" ]]; then
@@ -248,33 +379,6 @@ monitor_fi_progress() {
     done
     completed="$(count_fi_completed_tasks "${log_path}")"
     print_fi_progress "${completed}" "${total}" 1
-}
-
-resolve_output_oracle_policy() {
-    local requested_policy="${OUTPUT_ORACLE_TOL_POLICY_BASE:-${OUTPUT_ORACLE_TOL_POLICY}}"
-    local stripped="${requested_policy//$'\n'/}"
-    stripped="${stripped//$'\r'/}"
-    stripped="${stripped//$'\t'/}"
-    stripped="${stripped// /}"
-    if [[ -z "${stripped}" || "${stripped}" == "{}" ]]; then
-        OUTPUT_ORACLE_TOL_POLICY="{}"
-        OUTPUT_ORACLE_TOL_POLICY_SOURCE="default_exact"
-    else
-        OUTPUT_ORACLE_TOL_POLICY="${requested_policy}"
-        OUTPUT_ORACLE_TOL_POLICY_SOURCE="explicit"
-    fi
-}
-
-resolve_output_oracle_policy_from_sara_input() {
-    local fi_input_dir="$1"
-    local policy_file="${fi_input_dir}/output_oracle_policy.json"
-
-    if [[ -f "${policy_file}" ]]; then
-        OUTPUT_ORACLE_TOL_POLICY="$(cat "${policy_file}")"
-        OUTPUT_ORACLE_TOL_POLICY_SOURCE="sara_input_policy"
-    else
-        resolve_output_oracle_policy
-    fi
 }
 
 # -------- CYCLES --------
@@ -691,10 +795,24 @@ get_metrics() {
 
 main() {
     # load environment variables
-    source setup_environment
+    local fi_had_nounset=0
+    case "$-" in
+        *u*) fi_had_nounset=1 ;;
+    esac
+    set +u
+    source setup_environment || true
+    if [[ "${fi_had_nounset}" == "1" ]]; then
+        set -u
+    else
+        set +u
+    fi
     # Keep power model disabled: custom FI build path is not wired to
     # the 4.2.x AccelWattch API surface.
     unset GPGPUSIM_POWER_MODEL || true
+    if [[ "${GPGPUSIM_SETUP_ENVIRONMENT_WAS_RUN:-}" != "1" ]]; then
+        echo "=== Error: setup_environment did not complete successfully. ===" >&2
+        return 1
+    fi
     detect_gpu_arch
 
     if [[ -z "$COMPONENT_SET" ]]; then
@@ -725,50 +843,79 @@ main() {
     fi
 
 
+    local result_dir
+    local fi_result_gen_start_ns=0 fi_result_gen_end_ns=0 fi_result_gen_wall_ns=0
+    result_dir="$(method_result_dir)"
     if [[ $DO_RESULT_GEN -eq 1 ]]; then
-        echo "=== Start result generation ==="
+        fi_result_gen_start_ns="$(current_time_ns)"
+        echo "=== Start FI method-owned result generation into ${result_dir} ==="
+        local app_dir="test_apps/${TEST_APP_NAME}"
+        local size_list_file="${app_dir}/size_list.txt"
+        local staging_parent staging_dir
+        local idx=0 rc=0 generated_any=0
+        [[ -f "${size_list_file}" ]] || { echo "=== Error: size_list.txt not found: ${size_list_file} ===" >&2; exit 1; }
+        staging_parent="$(dirname "${result_dir}")"
+        mkdir -p "${result_dir}" "${staging_parent}"
+        rm -rf "${result_dir:?}/"*
+        staging_dir="$(mktemp -d "${staging_parent}/result.staging.XXXXXX")"
 
-        # Remove old result files
-        rm -rf test_apps/${TEST_APP_NAME}/result/*
+        set_config_opt "-profile" "0"
+        set_config_opt "-components_to_flip" "0"
+        set_config_opt "-total_cycle_rand" "-1"
+        set_config_opt "-exact_trace" "0"
+        set_config_opt "-regfile_trace" "0"
 
-        # Generate results
-        idx=0
-        while IFS= read -r line || [[ -n "$line" ]]; do
+        while IFS= read -r line || [[ -n "${line}" ]]; do
             echo "$idx: $line"
-            for cu_file in test_apps/${TEST_APP_NAME}/result_gen/${TEST_APP_NAME}_*.cu; do
-
+            for cu_file in "${app_dir}/result_gen/${TEST_APP_NAME}_"*.cu; do
+                [[ -f "${cu_file}" ]] || continue
                 filename=$(basename "$cu_file")
                 x_val=$(echo "$filename" | sed -n "s/^${TEST_APP_NAME}_\([0-9]\+\)\.cu$/\1/p")
                 if [[ -z "$x_val" ]]; then
                     continue
                 fi
-                cp "$cu_file" "${cu_file}.bak"
-                nvcc "$cu_file" -o "./gen" -g -lcudart -arch=$GPU_ARCH
-                ./gen $line > "test_apps/${TEST_APP_NAME}/result/${idx}-${x_val}.txt"
-                # Keep only the content between the last two 'GPGPU-Sim' lines (excluding the markers)
-                tmpfile="test_apps/${TEST_APP_NAME}/result/${idx}-${x_val}.txt.tmp"
-                gpgpu_lines=($(grep -n "GPGPU-Sim" "test_apps/${TEST_APP_NAME}/result/${idx}-${x_val}.txt" | cut -d: -f1))
-                if (( ${#gpgpu_lines[@]} >= 2 )); then
-                    start_line=$(( ${gpgpu_lines[-2]} + 1 ))
-                    end_line=$(( ${gpgpu_lines[-1]} - 1 ))
-                    if (( start_line <= end_line )); then
-                        sed -n "${start_line},${end_line}p" "test_apps/${TEST_APP_NAME}/result/${idx}-${x_val}.txt" > "$tmpfile"
-                        mv "$tmpfile" "test_apps/${TEST_APP_NAME}/result/${idx}-${x_val}.txt"
-                    else
-                        # If the range is empty, truncate the file
-                        > "test_apps/${TEST_APP_NAME}/result/${idx}-${x_val}.txt"
-                    fi
+                if run_result_generator_no_compile "$cu_file" "$x_val" "$line" "${staging_dir}/${idx}-${x_val}.txt"; then
+                    :
+                else
+                    rc=$?
                 fi
-                rm -f "./gen"
-                rm -f "./gen.1.${GPU_ARCH}.ptxas"
-                mv "${cu_file}.bak" "$cu_file"
-                rm -f $TEST_APP_NAME.cu
-                rm -f $TEST_APP_NAME.ptx
+                if [[ "${rc}" -eq 0 ]]; then
+                    tmpfile="${staging_dir}/${idx}-${x_val}.txt.tmp"
+                    gpgpu_lines=($(grep -n "GPGPU-Sim" "${staging_dir}/${idx}-${x_val}.txt" | cut -d: -f1))
+                    if (( ${#gpgpu_lines[@]} >= 2 )); then
+                        start_line=$(( ${gpgpu_lines[-2]} + 1 ))
+                        end_line=$(( ${gpgpu_lines[-1]} - 1 ))
+                        if (( start_line <= end_line )); then
+                            sed -n "${start_line},${end_line}p" "${staging_dir}/${idx}-${x_val}.txt" > "$tmpfile"
+                            mv "$tmpfile" "${staging_dir}/${idx}-${x_val}.txt"
+                        else
+                            > "${staging_dir}/${idx}-${x_val}.txt"
+                        fi
+                    fi
+                    generated_any=1
+                fi
+                rm -f "./gen" "./gen.1.${GPU_ARCH}.ptxas" "${TEST_APP_NAME}.cu" "${TEST_APP_NAME}.ptx"
+                if [[ "${rc}" -ne 0 ]]; then
+                    break 2
+                fi
             done
             idx=$((idx+1))
-        done < "test_apps/${TEST_APP_NAME}/size_list.txt"
-
+        done < "${size_list_file}"
+        if [[ "${rc}" -eq 0 && "${generated_any}" -eq 0 ]]; then
+            rc=1
+        fi
+        if [[ "${rc}" -ne 0 ]]; then
+            rm -rf "${staging_dir}"
+            echo "=== Error: FI result generation failed for ${TEST_APP_NAME} ===" >&2
+            return "${rc}"
+        fi
+        rm -rf "${result_dir:?}/"*
+        cp -a "${staging_dir}/." "${result_dir}/"
+        rm -rf "${staging_dir}"
+        fi_result_gen_end_ns="$(current_time_ns)"
+        fi_result_gen_wall_ns=$((fi_result_gen_end_ns - fi_result_gen_start_ns))
         echo "=== Result generation finished ==="
+        echo "FI Result Generation Non-Compile E2E Contribution (s): $(ns_to_seconds "${fi_result_gen_wall_ns}")"
     else
         echo "=== Result generation skipped ==="
     fi
@@ -777,7 +924,7 @@ main() {
 
     FILE_PATH="${1:-./logs1/tmp.out1}"
 
-    for result_file in test_apps/${TEST_APP_NAME}/result/*; do
+    for result_file in "${result_dir}"/*; do
         rm -f invalid_param_combos.txt
         echo "=== Preparing injection for file: $result_file ==="
         filename=$(basename "$result_file")
@@ -796,8 +943,17 @@ main() {
             cp "$cu_file" "./${TEST_APP_NAME}.cu"
         fi
 
-        echo "=== Compiling CUDA application for injection ==="
-        nvcc ${TEST_APP_NAME}.cu -o ${TEST_APP_NAME} -g -lcudart -arch=$GPU_ARCH
+        local fi_e2e_start_ns fi_e2e_end_ns fi_e2e_wall_ns fi_e2e_wall_s
+        fi_e2e_start_ns="$(current_time_ns)"
+
+        echo "=== Installing prebuilt CUDA application for injection (compile excluded) ==="
+        if ! install_storage_prebuild_artifacts; then
+            if [[ "${FI_NONCOMPILE_E2E}" == "1" ]]; then
+                echo "=== Error: missing FI prebuilt app artifacts; refusing nvcc inside noncompile E2E timing ===" >&2
+                return 1
+            fi
+            nvcc ${TEST_APP_NAME}.cu -o ${TEST_APP_NAME} -g -lcudart -arch=$GPU_ARCH
+        fi
 
         # Read the a-th line of size_list.txt (0-based)
         size_list_file="test_apps/${TEST_APP_NAME}/size_list.txt"
@@ -833,8 +989,11 @@ main() {
                 prev_gpu_arch="$GPU_ARCH"
                 detect_gpu_arch "$FILE_PATH"
                 if [[ "$GPU_ARCH" != "$prev_gpu_arch" ]]; then
-                    echo "=== Recompiling ${TEST_APP_NAME} with updated GPU_ARCH=${GPU_ARCH} ==="
-                    nvcc ${TEST_APP_NAME}.cu -o ${TEST_APP_NAME} -g -lcudart -arch=$GPU_ARCH
+                    echo "=== GPU_ARCH changed to ${GPU_ARCH}; reinstalling prebuilt app artifacts ==="
+                    if ! install_storage_prebuild_artifacts; then
+                        echo "=== Error: missing FI prebuilt app artifacts for updated GPU_ARCH=${GPU_ARCH} ===" >&2
+                        return 1
+                    fi
                 fi
 
                 echo "=== Collecting metrics ==="
@@ -859,11 +1018,16 @@ main() {
             continue
         fi
 
-        echo "=== Extracting register information ==="
-        # Copy current cu file to project root as ${TEST_APP_NAME}.cu (for helper scripts expecting that filename)
-        cp -f "$cu_file" "./${TEST_APP_NAME}.cu"
-        nvcc -arch=$GPU_ARCH -ptx -g -lineinfo $TEST_APP_NAME.cu -o "$TEST_APP_NAME.ptx"
-        python3 extract_registers.py $TEST_APP_NAME
+        echo "=== Preparing register information ==="
+        if [[ ! -f "register_used.txt" || ! -s "register_used.txt" ]]; then
+            cp -f "$cu_file" "./${TEST_APP_NAME}.cu"
+            if [[ "${FI_NONCOMPILE_E2E}" == "1" ]]; then
+                echo "=== Error: missing prebuilt register_used.txt; refusing nvcc inside noncompile E2E timing ===" >&2
+                return 1
+            fi
+            nvcc -arch=$GPU_ARCH -ptx -g -lineinfo $TEST_APP_NAME.cu -o "$TEST_APP_NAME.ptx"
+            python3 extract_registers.py $TEST_APP_NAME
+        fi
 
 
         # Read campaign_exec.sh contents into a variable
@@ -976,8 +1140,11 @@ main() {
 
         echo "=== Starting fault injection experiment: ${TEST_APP_NAME}, file ${filename} ==="
         filename_no_ext="${filename%.txt}"
-        fi_input_dir="${FI_COMPARE_INPUT_ROOT}/${TEST_APP_NAME}/${filename_no_ext}"
-        resolve_output_oracle_policy_from_sara_input "${fi_input_dir}"
+        fi_input_dir="${FI_LOG_ROOT}/${TEST_APP_NAME}/${filename_no_ext}/independent_oracle"
+        if ! run_independent_golden_oracle "${fi_input_dir}" "${size_line}"; then
+            echo "=== Error: FI independent golden oracle generation failed for ${TEST_APP_NAME} ${filename} ===" >&2
+            return 1
+        fi
 
         export FI_RF_FAULT_MODEL="${RF_FAULT_MODEL}"
         export FI_ADDR_DUE_MODE="${ANALYZER_ADDR_DUE_MODE}"
@@ -1015,10 +1182,20 @@ main() {
         TOTAL_TASKS="$RUN_PER_EPOCH"   # Total tasks defined earlier by RUN_PER_EPOCH
 
         local injection_start_ns injection_end_ns injection_wall_ns injection_wall_s campaign_status
+        local campaign_tmp_root campaign_cache_root
 
         # Run in background; do not print logs to console
         injection_start_ns="$(date +%s%N)"
         : > inst_exec.log
+        campaign_tmp_root="${FI_LOG_ROOT}/${TEST_APP_NAME}/${filename_no_ext}/campaign_tmp_component_${GLOBAL_COMPONENT_SET}"
+        campaign_cache_root="${FI_LOG_ROOT}/${TEST_APP_NAME}/${filename_no_ext}/campaign_cache_component_${GLOBAL_COMPONENT_SET}"
+        rm -rf "${campaign_tmp_root}" "${campaign_cache_root}"
+        mkdir -p "${campaign_tmp_root}" "${campaign_cache_root}"
+        CAMPAIGN_COMMON_DIR_OVERRIDE="${COMMON_DIR}" \
+        CAMPAIGN_ROOT_DIR_OVERRIDE="${ROOT_DIR}" \
+        TMP_DIR="${campaign_tmp_root}/logs" \
+        CACHE_LOGS_DIR="${campaign_cache_root}" \
+        FI_PARALLEL_JOBS="${FI_PARALLEL_JOBS}" \
         bash "${campaign_file}" > inst_exec.log 2>&1 &
         CMD_PID=$!
 
@@ -1054,13 +1231,19 @@ main() {
             --expected-trials "${RUN_PER_EPOCH}" \
             --log-path "inst_exec.log"
         ret=$?
+        if [ $ret -ne 0 ] && [ $ret -ne 99 ]; then
+            echo "=== Error: analysis_fault.py failed with status ${ret}; refusing to continue with partial FI result ===" >&2
+            return "${ret}"
+        fi
+        fi_e2e_end_ns="$(current_time_ns)"
+        fi_e2e_wall_ns=$((fi_result_gen_wall_ns + fi_e2e_end_ns - fi_e2e_start_ns))
+        fi_e2e_wall_s="$(ns_to_seconds "${fi_e2e_wall_ns}")"
+        fi_result_csv="${TEST_RESULT_ROOT}/${TEST_APP_NAME}/test_result_${TEST_APP_NAME}_${filename_no_ext}_${GLOBAL_COMPONENT_SET}_${INJECT_BIT_FLIP_COUNT}.csv"
+        update_fi_e2e_time_csv "${fi_result_csv}" "${fi_e2e_wall_s}"
+        echo "FI Non-Compile End-to-End Time (s): ${fi_e2e_wall_s}"
         if [ $ret -eq 99 ]; then
             echo "=== Early stopping triggered. Exiting loop ==="
             break
-        fi
-        if [ $ret -ne 0 ]; then
-            echo "=== Error: analysis_fault.py failed with status ${ret}; refusing to continue with partial FI result ===" >&2
-            return "${ret}"
         fi
     done
     rm -f register_used.txt

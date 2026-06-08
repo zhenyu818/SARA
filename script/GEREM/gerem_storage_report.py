@@ -218,6 +218,7 @@ def simple_summary_lines(
         f"Application Name: {app}",
         f"Test ID: {test_id}",
         f"Input: {input_line}",
+        "Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)",
     ]
     campaign_modes: List[str] = []
     campaign_runs: List[str] = []

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Utilities for the public SARA/FI/GEREM-all result layout.
+"""Utilities for the public SARA/FI/GEREM storage-result layout.
 
 Some internal SARA tools still produce ``exact_*`` artifact names because the
 analysis was originally implemented under that prefix. This tool converts the
 public result tree to SARA naming and migrates historical flat Turing result
 folders into the open-source layout:
 
-    test_result/<Architecture>/<SARA|FI|GEREM-all>/<Application>/...
+    sara-results/<Architecture>/<SARA|FI|GEREM-1000|GEREM-5000|GEREM-10000>/<Application>/...
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Iterable, List
 
 ARCHITECTURES = ("Turing-RTX2060", "Ampere-RTX3070")
-METHODS = ("SARA", "FI", "GEREM-all")
-PUBLIC_METHODS = ("SARA", "FI", "GEREM-all")
+METHODS = ("SARA", "FI", "GEREM-all", "GEREM-1000", "GEREM-5000", "GEREM-10000")
+PUBLIC_METHODS = ("SARA", "FI", "GEREM-1000", "GEREM-5000", "GEREM-10000")
 PUBLIC_TEXT_EXTENSIONS = {".csv", ".txt", ".md", ".tsv", ".json", ".jsonl"}
 
 
@@ -141,10 +141,14 @@ def init_layout(result_root: Path) -> None:
             "Final public results are organized as:\n\n"
             "- `Turing-RTX2060/SARA`\n"
             "- `Turing-RTX2060/FI`\n"
-            "- `Turing-RTX2060/GEREM-all`\n"
+            "- `Turing-RTX2060/GEREM-1000`\n"
+            "- `Turing-RTX2060/GEREM-5000`\n"
+            "- `Turing-RTX2060/GEREM-10000`\n"
             "- `Ampere-RTX3070/SARA`\n"
             "- `Ampere-RTX3070/FI`\n"
-            "- `Ampere-RTX3070/GEREM-all`\n\n"
+            "- `Ampere-RTX3070/GEREM-1000`\n"
+            "- `Ampere-RTX3070/GEREM-5000`\n"
+            "- `Ampere-RTX3070/GEREM-10000`\n\n"
             "Intermediate traces, PTXAS outputs, simulator logs, and scratch run "
             "directories are intentionally excluded from this tree.\n",
             encoding="utf-8",
@@ -192,7 +196,7 @@ def migrate_flat_turing(result_root: Path, *, force: bool = False, remove_flat: 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--result-root", default="test_result", type=Path)
+    parser.add_argument("--result-root", default="sara-results", type=Path)
     parser.add_argument("--init", action="store_true", help="create the public result directory skeleton")
     parser.add_argument("--migrate-flat-turing", action="store_true", help="migrate old flat app folders into Turing-RTX2060")
     parser.add_argument("--remove-flat", action="store_true", help="remove old flat app folders after migrating recognized files")

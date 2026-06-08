@@ -101,7 +101,7 @@ int main(int argc, char **argv) {
 
     CUDA_CHECK(cudaMemcpy(d_h, d_d, sizeof(float) * m * n, cudaMemcpyDeviceToHost));
     for (int i = 0; i < m * n; ++i) {
-        printf("%.6f ", d_h[i]);
+        printf("%.9g ", d_h[i]);
     }
     printf("\n");
 

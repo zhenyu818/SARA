@@ -73,8 +73,8 @@ def int_value(value: Any, default: int = 0) -> int:
 def positive_int_env(name: str, default: int) -> int:
     """Return a positive integer from an environment variable.
 
-    GEREM storage predictors use this for campaign-run counts so experiments can
-    compare GEREM-1000 and GEREM-10000 without editing source constants.
+    GEREM fixed-campaign validation is layered in ``campaign_runs_env`` below;
+    this helper remains generic for other positive integer environment values.
     """
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
@@ -88,16 +88,30 @@ def positive_int_env(name: str, default: int) -> int:
     return value
 
 
-def campaign_runs_env(name: str, default: int) -> Union[int, str]:
-    """Return a GEREM campaign count or the exhaustive ``"all"`` mode."""
+GEREM_ALLOWED_CAMPAIGN_RUNS: Tuple[int, ...] = (1000, 5000, 10000)
+
+
+def campaign_runs_env(name: str, default: int) -> int:
+    """Return the GEREM storage-EFM random-sampling campaign count.
+
+    The public GEREM path intentionally supports only fixed random sample
+    counts used for storage-component EFM replication. Exhaustive ``all`` mode
+    and ad-hoc counts are rejected so the result metadata always describes a
+    sampled GEREM-1000/5000/10000 campaign.
+    """
+    default_value = int(default)
+    if default_value not in GEREM_ALLOWED_CAMPAIGN_RUNS:
+        default_value = GEREM_ALLOWED_CAMPAIGN_RUNS[0]
     raw = os.environ.get(name)
-    if raw is not None and raw.strip().lower() in {"all", "full", "exhaustive"}:
-        return "all"
-    return positive_int_env(name, default)
-
-
-def is_all_campaign_runs(value: Any) -> bool:
-    return isinstance(value, str) and value.strip().lower() in {"all", "full", "exhaustive"}
+    if raw is None or not raw.strip():
+        return default_value
+    if raw.strip().lower() in {"all", "exhaustive", "full"}:
+        raise ValueError(f"{name} no longer supports exhaustive/all mode; choose one of {GEREM_ALLOWED_CAMPAIGN_RUNS}")
+    value = positive_int_env(name, default_value)
+    if value not in GEREM_ALLOWED_CAMPAIGN_RUNS:
+        allowed = ", ".join(str(item) for item in GEREM_ALLOWED_CAMPAIGN_RUNS)
+        raise ValueError(f"{name} must be one of {allowed}, got {raw!r}")
+    return int(value)
 
 
 def bit_count(value: int) -> int:

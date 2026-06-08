@@ -213,16 +213,16 @@ int main(int argc, char **argv) {
                           h_item_updated_out.size() * sizeof(unsigned char), cudaMemcpyDeviceToHost));
 
     for (size_t i = 0; i < h_p_out.size(); ++i) {
-        printf("%.6f ", h_p_out[i]);
+        printf("%.9g ", h_p_out[i]);
     }
     for (size_t i = 0; i < h_q_out.size(); ++i) {
-        printf("%.6f ", h_q_out[i]);
+        printf("%.9g ", h_q_out[i]);
     }
     for (size_t i = 0; i < h_user_bias_out.size(); ++i) {
-        printf("%.6f ", h_user_bias_out[i]);
+        printf("%.9g ", h_user_bias_out[i]);
     }
     for (size_t i = 0; i < h_item_bias_out.size(); ++i) {
-        printf("%.6f ", h_item_bias_out[i]);
+        printf("%.9g ", h_item_bias_out[i]);
     }
     for (size_t i = 0; i < h_item_updated_out.size(); ++i) {
         printf("%d ", (int)h_item_updated_out[i]);

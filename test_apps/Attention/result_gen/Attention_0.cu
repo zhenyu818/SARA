@@ -162,7 +162,7 @@ int main(int argc, char *argv[]) {
     float *dout = attention_device(key, value, query, n, d, r);
 
     for (int i = 0; i < d; i++)
-        printf("%.6f ", dout[i]);
+        printf("%.9g ", dout[i]);
     printf("\n");
 
     free(key);

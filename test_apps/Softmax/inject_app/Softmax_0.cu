@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include <cstdint>
+#include <cstring>
 
 #define BLOCK_SIZE 32
 #define M_SEED 2026
@@ -65,14 +67,12 @@ __global__ void softmax_kernel(const float *input, float *output, int numSlice, 
     }
 }
 
-static bool approx_equal(float actual, float expected) {
-    if (isnan(actual) || isnan(expected)) {
-        return isnan(actual) && isnan(expected);
-    }
-    if (isinf(actual) || isinf(expected)) {
-        return isinf(actual) && isinf(expected) && (signbit(actual) == signbit(expected));
-    }
-    return fabsf(actual - expected) <= 1e-5f;
+static bool exact_equal_float(float actual, float expected) {
+    uint32_t actual_bits = 0;
+    uint32_t expected_bits = 0;
+    std::memcpy(&actual_bits, &actual, sizeof(actual_bits));
+    std::memcpy(&expected_bits, &expected, sizeof(expected_bits));
+    return actual_bits == expected_bits;
 }
 
 int main(int argc, char *argv[]) {
@@ -124,7 +124,7 @@ int main(int argc, char *argv[]) {
     bool match = true;
     float ref = 0.0f;
     for (int i = 0; match && i < numElem; ++i) {
-        if (fscanf(file, "%f", &ref) != 1 || !approx_equal(output[i], ref)) {
+        if (fscanf(file, "%f", &ref) != 1 || !exact_equal_float(output[i], ref)) {
             match = false;
         }
     }

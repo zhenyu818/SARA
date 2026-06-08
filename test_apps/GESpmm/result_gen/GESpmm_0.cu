@@ -175,7 +175,7 @@ int main(int argc, char **argv) {
 
     // 打印 C 的所有元素（行优先，空格分隔）
     for (int i = 0; i < A_nrows * B_ncols; ++i) {
-        printf("%.6f ", C[i]);
+        printf("%.9g ", C[i]);
     }
     printf("\n");
 

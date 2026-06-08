@@ -25,16 +25,7 @@ SKIP_SARA="${RUN_ALL_STORAGE_FAIR_SKIP_SARA:-0}"
 SKIP_GEREM="${RUN_ALL_STORAGE_FAIR_SKIP_GEREM:-0}"
 SKIP_COMPARE="${RUN_ALL_STORAGE_FAIR_SKIP_COMPARE:-0}"
 SARA_STORAGE_GROUP_MODE="${SARA_STORAGE_GROUP_MODE:-grouped}"
-SARA_ANALYZER_CACHE_ENABLE="${RUN_ALL_STORAGE_FAIR_SARA_ANALYZER_CACHE_ENABLE:-0}"
-SARA_ANALYZER_CACHE_FORCE_REBUILD="${RUN_ALL_STORAGE_FAIR_SARA_ANALYZER_CACHE_FORCE_REBUILD:-1}"
-SARA_GLOBAL_CACHE_ENABLE="${RUN_ALL_STORAGE_FAIR_SARA_GLOBAL_CACHE:-0}"
-SARA_ANALYZER_GLOBAL_CACHE_ENABLE="${RUN_ALL_STORAGE_FAIR_SARA_ANALYZER_GLOBAL_CACHE:-${SARA_GLOBAL_CACHE_ENABLE}}"
-SARA_ANALYZER_GLOBAL_CACHE_DIR="${RUN_ALL_STORAGE_FAIR_SARA_ANALYZER_GLOBAL_CACHE_DIR:-${SARA_WORK_ROOT}/.cache_exact_sdc}"
-SARA_ANALYZER_GLOBAL_CACHE_LINK_MODE="${RUN_ALL_STORAGE_FAIR_SARA_ANALYZER_GLOBAL_CACHE_LINK_MODE:-copy}"
-SARA_ANALYZER_CACHE_INCLUDE_MTIME_NS="${RUN_ALL_STORAGE_FAIR_SARA_ANALYZER_CACHE_INCLUDE_MTIME_NS:-1}"
-SARA_ANALYZER_CACHE_SHA256_LARGE_FILES="${RUN_ALL_STORAGE_FAIR_SARA_ANALYZER_CACHE_SHA256_LARGE_FILES:-0}"
 SARA_ANALYZER_SHARE_CACHE_SITE_RECORDS="${RUN_ALL_STORAGE_FAIR_SARA_ANALYZER_SHARE_CACHE_SITE_RECORDS:-1}"
-SARA_TIME_SOURCE="${RUN_ALL_STORAGE_FAIR_SARA_TIME_SOURCE:-timing}" # timing|wall; wall rewrites simple summary with sara wall time
 
 run_script() {
     local script_path="$1"
@@ -128,37 +119,9 @@ cleanup_app_state() {
 }
 
 
-rewrite_sara_simple_summary_wall_time() {
-    local app_name="$1"
-    local wall_seconds="$2"
-    if [[ "${SARA_TIME_SOURCE}" != "wall" ]]; then
-        return 0
-    fi
-    local simple_csv="${TEST_RESULT_DIR}/${app_name}/sara_result_simple_${app_name}_${RESULT_BASENAME}.csv"
-    [[ -f "${simple_csv}" ]] || return 0
-    python3 - "${simple_csv}" "${wall_seconds}" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-wall = float(sys.argv[2])
-text = path.read_text(encoding="utf-8", errors="replace")
-replacement = f"Total Time (s): {wall:.6f}"
-if re.search(r"Total Time \(s\):\s*[0-9.eE+-]+", text):
-    text = re.sub(r"Total Time \(s\):\s*[0-9.eE+-]+", replacement, text, count=1)
-else:
-    if text and not text.endswith("\n"):
-        text += "\n"
-    text += replacement + "\n"
-path.write_text(text, encoding="utf-8")
-PY
-}
-
 run_sara_for_app() {
     local app_name="$1"
-    local start_ns end_ns rc wall_seconds
-    start_ns="$(date +%s%N)"
+    local rc
     set +e
     env \
         DO_BUILD=0 \
@@ -171,16 +134,10 @@ run_sara_for_app() {
         TEST_APPS_ROOT="${TEST_APPS_DIR}" \
         TEST_RESULT_ROOT="${TEST_RESULT_DIR}" \
         EXACT_WORK_ROOT="${SARA_WORK_ROOT}" \
+        STORAGE_PREBUILD_CACHE_ROOT="${STORAGE_PREBUILD_CACHE_ROOT}" \
+        STORAGE_METHOD_RESULT_ROOT="${SARA_WORK_ROOT}/method_results" \
         EXACT_STORAGE_ONLY_OUTPUT=1 \
         EXACT_STORAGE_GROUP_MODE="${SARA_STORAGE_GROUP_MODE}" \
-        ANALYZER_CACHE_ENABLE="${SARA_ANALYZER_CACHE_ENABLE}" \
-        ANALYZER_GLOBAL_CACHE="${SARA_ANALYZER_GLOBAL_CACHE_ENABLE}" \
-        EXACT_GLOBAL_CACHE="${SARA_GLOBAL_CACHE_ENABLE}" \
-        ANALYZER_GLOBAL_CACHE_DIR="${SARA_ANALYZER_GLOBAL_CACHE_DIR}" \
-        ANALYZER_GLOBAL_CACHE_LINK_MODE="${SARA_ANALYZER_GLOBAL_CACHE_LINK_MODE}" \
-        ANALYZER_CACHE_FORCE_REBUILD="${SARA_ANALYZER_CACHE_FORCE_REBUILD}" \
-        ANALYZER_CACHE_INCLUDE_MTIME_NS="${SARA_ANALYZER_CACHE_INCLUDE_MTIME_NS}" \
-        ANALYZER_CACHE_SHA256_LARGE_FILES="${SARA_ANALYZER_CACHE_SHA256_LARGE_FILES}" \
         ANALYZER_SHARE_CACHE_SITE_RECORDS="${SARA_ANALYZER_SHARE_CACHE_SITE_RECORDS}" \
         EXACT_TOGGLE_VALIDATE="${EXACT_TOGGLE_VALIDATE:-0}" \
         STORAGE_APP_PREBUILD_HELPER="${PREBUILD_SCRIPT}" \
@@ -188,18 +145,6 @@ run_sara_for_app() {
         nice -n "${NICE_LEVEL}" bash "${SARA_SCRIPT}" all_components
     rc=$?
     set -e
-    end_ns="$(date +%s%N)"
-    if [[ "${rc}" == "0" && "${SARA_TIME_SOURCE}" == "wall" ]]; then
-        wall_seconds="$(python3 - "${start_ns}" "${end_ns}" <<'PY'
-import sys
-start = int(sys.argv[1])
-end = int(sys.argv[2])
-print(f"{max(0, end - start) / 1_000_000_000:.6f}")
-PY
-)"
-        rewrite_sara_simple_summary_wall_time "${app_name}" "${wall_seconds}"
-        echo "==== SARA wall time for ${app_name}: ${wall_seconds}s (simple summary override) ===="
-    fi
     return "${rc}"
 }
 
@@ -215,6 +160,8 @@ run_gerem_for_app() {
         TEST_APP_NAME="${app_name}" \
         TEST_RESULT_ROOT="${TEST_RESULT_DIR}" \
         GEREM_WORK_ROOT="${GEREM_WORK_ROOT}" \
+        STORAGE_PREBUILD_CACHE_ROOT="${STORAGE_PREBUILD_CACHE_ROOT}" \
+        STORAGE_METHOD_RESULT_ROOT="${GEREM_WORK_ROOT}/method_results" \
         GEREM_STORAGE_CAMPAIGN_RUNS="${GEREM_STORAGE_CAMPAIGN_RUNS:-1000}" \
         STORAGE_APP_PREBUILD_HELPER="${PREBUILD_SCRIPT}" \
         UPDATE_SIMPLE_SUMMARY_TOTAL_TIME_TOOL="${ROOT_DIR}/script/common/update_simple_summary_total_time.py" \
@@ -242,7 +189,6 @@ main() {
     [[ "${SKIP_SARA}" =~ ^[01]$ ]] || { echo "=== Error: RUN_ALL_STORAGE_FAIR_SKIP_SARA must be 0 or 1 ===" >&2; exit 1; }
     [[ "${SKIP_GEREM}" =~ ^[01]$ ]] || { echo "=== Error: RUN_ALL_STORAGE_FAIR_SKIP_GEREM must be 0 or 1 ===" >&2; exit 1; }
     [[ "${SKIP_COMPARE}" =~ ^[01]$ ]] || { echo "=== Error: RUN_ALL_STORAGE_FAIR_SKIP_COMPARE must be 0 or 1 ===" >&2; exit 1; }
-    [[ "${SARA_TIME_SOURCE}" == "timing" || "${SARA_TIME_SOURCE}" == "wall" ]] || { echo "=== Error: RUN_ALL_STORAGE_FAIR_SARA_TIME_SOURCE must be timing or wall ===" >&2; exit 1; }
     if [[ "${SKIP_SARA}" == "1" && "${SKIP_GEREM}" == "1" ]]; then
         echo "=== Error: cannot skip both SARA and GEREM ===" >&2
         exit 1

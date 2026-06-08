@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMMON_DIR="${ROOT_DIR}/script/common"
 cd "${ROOT_DIR}"
+export PYTHONHASHSEED="${PYTHONHASHSEED:-2026}"
 
 CONFIG_FILE="${CONFIG_FILE:-${ROOT_DIR}/gpgpusim.config}"
 TEST_APP_NAME="${TEST_APP_NAME:-Pathfinder}"
@@ -26,6 +27,8 @@ TIMEOUT_VAL="${TIMEOUT_VAL:-400s}"
 EXACT_TRACE_JSONL="${EXACT_TRACE_JSONL:-0}"
 STORAGE_APP_PREBUILD_HELPER="${STORAGE_APP_PREBUILD_HELPER:-${COMMON_DIR}/storage_app_prebuild.sh}"
 UPDATE_SIMPLE_SUMMARY_TOTAL_TIME_TOOL="${UPDATE_SIMPLE_SUMMARY_TOTAL_TIME_TOOL:-script/common/update_simple_summary_total_time.py}"
+STORAGE_PREBUILD_CACHE_ROOT="${STORAGE_PREBUILD_CACHE_ROOT:-}"
+STORAGE_METHOD_RESULT_ROOT="${STORAGE_METHOD_RESULT_ROOT:-}"
 
 CURRENT_RESULT_FILE=""
 CURRENT_RUN_DIR="${GEREM_WORK_ROOT}/${TEST_APP_NAME}/${RESULT_BASENAME}"
@@ -41,6 +44,16 @@ CURRENT_TRACE_TOTAL_CYCLES=0
 CURRENT_TIMING_LOG_PATH=""
 CURRENT_SIMPLE_SUMMARY_CSV=""
 FAIR_TIMING_START_NS=""
+GEREM_TIMING_LOG_START_LINE=0
+# Public SARA/GEREM/FI comparisons must use one fixed timing scope.  Do not let
+# caller environment variables widen/narrow the reported Total Time field.
+GEREM_COMPARE_TIMING_SCOPE="noncompile_e2e"
+GEREM_COMPARE_TIMING_STEPS=(
+    gerem_rf_predict_py
+    gerem_smem_predict_py
+    gerem_l1d_predict_py
+    gerem_l2_predict_py
+)
 
 resolve_test_result_csv_path() {
     local filename="$1"
@@ -72,20 +85,35 @@ current_time_ns() {
     date +%s%N
 }
 
+
 sum_timing_log_seconds() {
     if [[ -z "${CURRENT_TIMING_LOG_PATH}" || ! -f "${CURRENT_TIMING_LOG_PATH}" ]]; then
         echo "0.000000"
         return 0
     fi
-    python3 - "${CURRENT_TIMING_LOG_PATH}" <<'PY'
+    local start_line=0
+    if [[ "${FAIR_TIMING}" == "1" ]]; then
+        start_line="${GEREM_TIMING_LOG_START_LINE:-0}"
+    fi
+    python3 - "${CURRENT_TIMING_LOG_PATH}" "${start_line}" <<'PY'
 import csv
 import sys
 
 path = sys.argv[1]
+try:
+    start_line = int(sys.argv[2])
+except Exception:
+    start_line = 0
 total = 0.0
 with open(path, newline="", encoding="utf-8", errors="replace") as handle:
-    reader = csv.DictReader(handle, delimiter="\t")
-    for row in reader:
+    header = handle.readline()
+    if not header:
+        print("0.000000")
+        raise SystemExit(0)
+    reader = csv.DictReader(handle, fieldnames=header.rstrip("\n").split("\t"), delimiter="\t")
+    for lineno, row in enumerate(reader, start=2):
+        if lineno <= start_line:
+            continue
         try:
             total += float(row.get("wall_s", 0) or 0.0)
         except Exception:
@@ -94,20 +122,126 @@ print(f"{total:.6f}")
 PY
 }
 
+sum_selected_timing_log_seconds() {
+    if (( $# == 0 )); then
+        echo "0.000000"
+        return 0
+    fi
+    if [[ -z "${CURRENT_TIMING_LOG_PATH}" || ! -f "${CURRENT_TIMING_LOG_PATH}" ]]; then
+        echo "0.000000"
+        return 0
+    fi
+    python3 - "${CURRENT_TIMING_LOG_PATH}" "$@" <<'PY'
+import csv
+import sys
+
+path = sys.argv[1]
+selected = set(sys.argv[2:])
+total = 0.0
+with open(path, newline="", encoding="utf-8", errors="replace") as handle:
+    reader = csv.DictReader(handle, delimiter="\t")
+    for row in reader:
+        if str(row.get("step_label", "")) not in selected:
+            continue
+        try:
+            total += float(row.get("wall_s", 0) or 0.0)
+        except Exception:
+            pass
+print(f"{total:.6f}")
+PY
+}
+
+write_selected_timing_log() {
+    local output_path="$1"
+    shift
+    mkdir -p "$(dirname "${output_path}")"
+    if (( $# == 0 )) || [[ -z "${CURRENT_TIMING_LOG_PATH}" || ! -f "${CURRENT_TIMING_LOG_PATH}" ]]; then
+        printf 'timestamp_iso\tstep_label\twall_s\tuser_s\tsys_s\tmaxrss_kb\texit_code\tcommand\n' > "${output_path}"
+        return 0
+    fi
+    python3 - "${CURRENT_TIMING_LOG_PATH}" "${output_path}" "$@" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+selected = set(sys.argv[3:])
+fieldnames = [
+    "timestamp_iso",
+    "step_label",
+    "wall_s",
+    "user_s",
+    "sys_s",
+    "maxrss_kb",
+    "exit_code",
+    "command",
+]
+with src.open(newline="", encoding="utf-8", errors="replace") as in_handle, dst.open(
+    "w", newline="", encoding="utf-8"
+) as out_handle:
+    reader = csv.DictReader(in_handle, delimiter="\t")
+    writer = csv.DictWriter(out_handle, fieldnames=fieldnames, delimiter="\t")
+    writer.writeheader()
+    for row in reader:
+        if str(row.get("step_label", "")) not in selected:
+            continue
+        writer.writerow({name: row.get(name, "") for name in fieldnames})
+PY
+}
+
+
+
+write_public_timing_log() {
+    local output_path="$1"
+    mkdir -p "$(dirname "${output_path}")"
+    if [[ "${GEREM_COMPARE_TIMING_SCOPE}" == "core_algorithm" ]]; then
+        write_selected_timing_log "${output_path}" "${GEREM_COMPARE_TIMING_STEPS[@]}"
+        return 0
+    fi
+    if [[ -z "${CURRENT_TIMING_LOG_PATH}" || ! -f "${CURRENT_TIMING_LOG_PATH}" ]]; then
+        printf 'timestamp_iso\tstep_label\twall_s\tuser_s\tsys_s\tmaxrss_kb\texit_code\tcommand\n' > "${output_path}"
+        return 0
+    fi
+    python3 - "${CURRENT_TIMING_LOG_PATH}" "${output_path}" "${GEREM_TIMING_LOG_START_LINE:-0}" <<'PY'
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+try:
+    start_line = int(sys.argv[3])
+except Exception:
+    start_line = 0
+with src.open("r", encoding="utf-8", errors="replace") as in_handle, dst.open("w", encoding="utf-8") as out_handle:
+    header = "timestamp_iso\tstep_label\twall_s\tuser_s\tsys_s\tmaxrss_kb\texit_code\tcommand\n"
+    out_handle.write(header)
+    for lineno, raw in enumerate(in_handle, start=1):
+        if lineno <= start_line:
+            continue
+        if not raw.strip() or raw.startswith("timestamp_iso\t"):
+            continue
+        out_handle.write(raw)
+PY
+}
+
 start_fair_timing_now() {
     if [[ "${FAIR_TIMING}" == "1" ]]; then
         FAIR_TIMING_START_NS="$(current_time_ns)"
+        if [[ -f "${CURRENT_TIMING_LOG_PATH}" ]]; then
+            GEREM_TIMING_LOG_START_LINE="$(wc -l < "${CURRENT_TIMING_LOG_PATH}")"
+        else
+            GEREM_TIMING_LOG_START_LINE=0
+        fi
     else
         FAIR_TIMING_START_NS=""
+        GEREM_TIMING_LOG_START_LINE=0
     fi
 }
 
 reported_total_time_seconds() {
-    if [[ "${FAIR_TIMING}" == "1" && -n "${FAIR_TIMING_START_NS}" ]]; then
-        local end_ns elapsed_ns
-        end_ns="$(current_time_ns)"
-        elapsed_ns=$(( end_ns - FAIR_TIMING_START_NS ))
-        ns_to_seconds "${elapsed_ns}"
+    if [[ "${GEREM_COMPARE_TIMING_SCOPE}" == "core_algorithm" ]]; then
+        sum_selected_timing_log_seconds "${GEREM_COMPARE_TIMING_STEPS[@]}"
         return 0
     fi
     sum_timing_log_seconds
@@ -316,6 +450,68 @@ build_project_if_needed() {
     echo "=== Make success ==="
 }
 
+
+storage_prebuild_cache_dir() {
+    if [[ -z "${STORAGE_PREBUILD_CACHE_ROOT}" ]]; then
+        return 1
+    fi
+    echo "${STORAGE_PREBUILD_CACHE_ROOT}/${TEST_APP_NAME}/${RESULT_BASENAME}"
+}
+
+install_storage_prebuild_artifacts() {
+    local cache_dir
+    cache_dir="$(storage_prebuild_cache_dir 2>/dev/null || true)"
+    [[ -n "${cache_dir}" && -d "${cache_dir}" ]] || return 1
+    [[ -x "${cache_dir}/${TEST_APP_NAME}" && -f "${cache_dir}/${TEST_APP_NAME}.ptx" && -s "${cache_dir}/register_used.txt" ]] || return 1
+    cp -f "${cache_dir}/${TEST_APP_NAME}" "./${TEST_APP_NAME}"
+    cp -f "${cache_dir}/${TEST_APP_NAME}.ptx" "./${TEST_APP_NAME}.ptx"
+    cp -f "${cache_dir}/register_used.txt" "./register_used.txt"
+    persist_current_register_domain_file "./register_used.txt"
+    echo "=== Installed prebuilt ${TEST_APP_NAME} artifacts from ${cache_dir} (compile time excluded) ==="
+    return 0
+}
+
+method_result_dir() {
+    if [[ -n "${STORAGE_METHOD_RESULT_ROOT}" ]]; then
+        echo "${STORAGE_METHOD_RESULT_ROOT}/${TEST_APP_NAME}/result"
+    else
+        echo "test_apps/${TEST_APP_NAME}/result"
+    fi
+}
+
+prebuilt_result_generator_path() {
+    local x_val="$1"
+    local cache_dir
+    cache_dir="$(storage_prebuild_cache_dir 2>/dev/null || true)"
+    if [[ -n "${cache_dir}" ]]; then
+        echo "${cache_dir}/result_generators/gen_${x_val}"
+    fi
+}
+
+run_result_generator_no_compile() {
+    local cu_file="$1"
+    local x_val="$2"
+    local size_line="$3"
+    local out_path="$4"
+    local gen_path=""
+
+    gen_path="$(prebuilt_result_generator_path "${x_val}")"
+    if [[ -n "${gen_path}" && -x "${gen_path}" ]]; then
+        "${gen_path}" ${size_line} > "${out_path}"
+        return $?
+    fi
+
+    if [[ "${FAIR_TIMING}" == "1" ]]; then
+        echo "=== Error: missing prebuilt result generator for ${TEST_APP_NAME}_${x_val}; refusing nvcc in noncompile timing ===" >&2
+        echo "=== Expected: ${gen_path:-<unset>} ===" >&2
+        return 1
+    fi
+
+    if run_with_native_cuda_env nvcc "${cu_file}" -o "./gen" -g -lcudart -arch="${GPU_ARCH}" -arch="${GPU_ARCH}"; then
+        ./gen ${size_line} > "${out_path}"
+    fi
+}
+
 result_generation_outputs_current() {
     if (( $# != 3 )); then
         return 1
@@ -356,6 +552,7 @@ result_generation_outputs_current() {
     return 0
 }
 
+
 generate_results_if_needed() {
     if [[ "${DO_RESULT_GEN}" -ne 1 ]]; then
         echo "=== Result generation skipped ==="
@@ -363,29 +560,28 @@ generate_results_if_needed() {
     fi
     local app_dir="test_apps/${TEST_APP_NAME}"
     local size_list_file="${app_dir}/size_list.txt"
-    local result_dir="${app_dir}/result"
+    local result_dir
+    result_dir="$(method_result_dir)"
     [[ -f "${size_list_file}" ]] || { echo "=== Error: size_list missing: ${size_list_file} ===" >&2; return 1; }
 
     if [[ "${FRESH_RUN}" == "1" ]]; then
-        echo "=== Fresh-run mode: regenerating application inputs from scratch ==="
+        echo "=== Fresh-run mode: regenerating method-owned application inputs from scratch ==="
     elif result_generation_outputs_current "${app_dir}" "${size_list_file}" "${result_dir}"; then
-        echo "=== Result generation skipped: existing outputs are up to date ==="
+        echo "=== Result generation skipped: existing method-owned outputs are up to date ==="
         return 0
     fi
 
-    # Golden input generation must run with fault injection and tracing disabled.
-    # This matches the SARA runner and avoids stale simulator options from a
-    # previous campaign making ./gen require a native CUDA driver.
     update_config_line "-profile" "0"
     update_config_line "-components_to_flip" "0"
     update_config_line "-total_cycle_rand" "-1"
     update_config_line "-exact_trace" "0"
     update_config_line "-regfile_trace" "0"
 
-    local staging_dir backup_dir idx=0 rc=0 generated_any=0
-    mkdir -p "${result_dir}"
-    staging_dir="$(mktemp -d "${app_dir}/result.staging.XXXXXX")"
-    backup_dir="$(mktemp -d "${app_dir}/result.backup.XXXXXX")"
+    local staging_parent staging_dir backup_dir idx=0 rc=0 generated_any=0
+    staging_parent="$(dirname "${result_dir}")"
+    mkdir -p "${result_dir}" "${staging_parent}"
+    staging_dir="$(mktemp -d "${staging_parent}/result.staging.XXXXXX")"
+    backup_dir="$(mktemp -d "${staging_parent}/result.backup.XXXXXX")"
     if dir_has_entries "${result_dir}"; then
         cp -a "${result_dir}/." "${backup_dir}/"
     fi
@@ -397,16 +593,8 @@ generate_results_if_needed() {
             filename="$(basename "${cu_file}")"
             x_val="$(echo "${filename}" | sed -n "s/^${TEST_APP_NAME}_\([0-9]\+\)\.cu$/\1/p")"
             [[ -n "${x_val}" ]] || continue
-            cp "${cu_file}" "${cu_file}.bak"
-            if run_with_native_cuda_env nvcc "${cu_file}" -o "./gen" -g -lcudart -arch="${GPU_ARCH}" -arch="${GPU_ARCH}"; then
-                # Execute generated CUDA input producers under GPGPU-Sim.
-                # Using native CUDA libraries here incorrectly requires a real
-                # GPU/driver and breaks simulator-only runs.
-                if ./gen ${line} > "${staging_dir}/${idx}-${x_val}.txt"; then
-                    :
-                else
-                    rc=$?
-                fi
+            if run_result_generator_no_compile "${cu_file}" "${x_val}" "${line}" "${staging_dir}/${idx}-${x_val}.txt"; then
+                :
             else
                 rc=$?
             fi
@@ -426,9 +614,7 @@ generate_results_if_needed() {
                 fi
                 generated_any=1
             fi
-            rm -f ./gen "./gen.1.${GPU_ARCH}.ptxas"
-            mv "${cu_file}.bak" "${cu_file}"
-            rm -f "${TEST_APP_NAME}.cu" "${TEST_APP_NAME}.ptx"
+            rm -f ./gen "./gen.1.${GPU_ARCH}.ptxas" "${TEST_APP_NAME}.cu" "${TEST_APP_NAME}.ptx"
             if [[ "${rc}" -ne 0 ]]; then
                 break 2
             fi
@@ -456,9 +642,11 @@ persist_current_register_domain_file() {
     cp "${src_path}" "${CURRENT_REGISTER_DOMAIN_FILE}"
 }
 
+
 select_result_file() {
-    local result_dir="test_apps/${TEST_APP_NAME}/result"
-    [[ -d "${result_dir}" ]] || { echo "=== Error: result dir missing: ${result_dir} ===" >&2; return 1; }
+    local result_dir
+    result_dir="$(method_result_dir)"
+    [[ -d "${result_dir}" ]] || { echo "=== Error: method result dir missing: ${result_dir} ===" >&2; return 1; }
     local candidate="${RESULT_BASENAME}"
     if [[ "${candidate}" != *.txt ]]; then
         candidate="${candidate}.txt"
@@ -468,9 +656,10 @@ select_result_file() {
         return 0
     fi
     CURRENT_RESULT_FILE="$(find "${result_dir}" -maxdepth 1 -type f -name '*.txt' | sort | head -n1 || true)"
-    [[ -n "${CURRENT_RESULT_FILE}" ]] || { echo "=== Error: no result files found under ${result_dir} ===" >&2; return 1; }
+    [[ -n "${CURRENT_RESULT_FILE}" ]] || { echo "=== Error: no result files found under ${result_dir}" >&2; return 1; }
     echo "=== Warning: requested result not found; using $(basename "${CURRENT_RESULT_FILE}") ==="
 }
+
 
 prepare_case_files() {
     select_result_file
@@ -508,6 +697,9 @@ prepare_case_files() {
     CURRENT_REGISTER_DOMAIN_FILE="${CURRENT_RUN_DIR}/register_used.txt"
 
     cp "${CURRENT_RESULT_FILE}" ./result.txt
+    if [[ "${DO_BUILD}" -ne 1 ]] && install_storage_prebuild_artifacts; then
+        return 0
+    fi
     if [[ "${FRESH_RUN}" != "1" && "${DO_BUILD}" -ne 1 && -x "./${TEST_APP_NAME}" && -f "${CURRENT_REGISTER_DOMAIN_FILE}" && -s "${CURRENT_REGISTER_DOMAIN_FILE}" ]]; then
         echo "=== Reusing existing ${TEST_APP_NAME} binary/register list from ${CURRENT_REGISTER_DOMAIN_FILE} (DO_BUILD=0) ==="
         return 0
@@ -524,6 +716,10 @@ prepare_case_files() {
         return 0
     fi
 
+    if [[ "${FAIR_TIMING}" == "1" && "${DO_BUILD}" -ne 1 ]]; then
+        echo "=== Error: missing prebuilt ${TEST_APP_NAME} binary/PTX/register artifacts; refusing nvcc inside noncompile timing ===" >&2
+        return 1
+    fi
     cp "${CURRENT_CU_FILE}" "./${TEST_APP_NAME}.cu"
     run_with_native_cuda_env nvcc "./${TEST_APP_NAME}.cu" -o "./${TEST_APP_NAME}" -g -lcudart -arch="${GPU_ARCH}"
     run_with_native_cuda_env nvcc -arch="${GPU_ARCH}" -ptx -g -lineinfo "./${TEST_APP_NAME}.cu" -o "./${TEST_APP_NAME}.ptx"
@@ -647,14 +843,16 @@ run_component_predictors() {
         --output "${l2_json}"
 }
 
+
 write_final_reports() {
-    local rf_json smem_json l1d_json l2_json result_csv simple_csv
+    local rf_json smem_json l1d_json l2_json result_csv simple_csv compare_timing_tsv
     rf_json="${CURRENT_RUN_DIR}/gerem_rf_component.json"
     smem_json="${CURRENT_RUN_DIR}/gerem_smem_component.json"
     l1d_json="${CURRENT_RUN_DIR}/gerem_l1d_component.json"
     l2_json="${CURRENT_RUN_DIR}/gerem_l2_component.json"
     result_csv="$(resolve_test_result_csv_path "gerem_result_${TEST_APP_NAME}_${CURRENT_TEST_ID}.csv")"
     simple_csv="$(resolve_test_result_csv_path "gerem_result_simple_${TEST_APP_NAME}_${CURRENT_TEST_ID}.csv")"
+    compare_timing_tsv="${CURRENT_RUN_DIR}/timings_gerem_compare_noncompile_e2e.tsv"
 
     run_timed "gerem_report_merge_py" \
         python3 "${GEREM_REPORT_TOOL}" merge-components \
@@ -663,6 +861,8 @@ write_final_reports() {
         --l1d "${l1d_json}" \
         --l2 "${l2_json}" \
         --output "${result_csv}"
+
+    write_public_timing_log "${compare_timing_tsv}"
 
     run_timed "gerem_report_simple_py" \
         python3 "${GEREM_REPORT_TOOL}" simple-summary \
@@ -673,7 +873,7 @@ write_final_reports() {
         --app "${TEST_APP_NAME}" \
         --test-id "${CURRENT_TEST_ID}" \
         --input-line "${CURRENT_SIZE_LINE}" \
-        --step-times "${CURRENT_TIMING_LOG_PATH}" \
+        --step-times "${compare_timing_tsv}" \
         --output "${simple_csv}"
     CURRENT_SIMPLE_SUMMARY_CSV="${simple_csv}"
 

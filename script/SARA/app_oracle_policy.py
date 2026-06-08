@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Emit canonical SARA output-oracle policies from explicit benchmark code."""
+"""Emit canonical output-oracle policies for SARA/FI/GEREM experiments.
+
+The current experiment definition is exact-output SDC: for every benchmark,
+including floating-point benchmarks, any final output mismatch is classified as
+SDC. No absolute or relative tolerance is part of the oracle.
+"""
 
 from __future__ import annotations
 
@@ -9,47 +14,20 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-FLOAT32_ABS_1E5_APPS = {
-    "AdamW",
-    "Attention",
-    "Dijkstra",
-    "Gelu",
-    "Gemm",
-    "GESpmm",
-    "LayerNorm",
-    "MatrixFactorization",
-    "MatrixMultiplication",
-    "Render",
-    "Softmax",
-}
-
-
-def _float_policy(abs_tol: float) -> Dict[str, Any]:
+def policy_for_app(app: str) -> Dict[str, Any]:
+    _ = str(app).strip()
     return {
-        "source": "explicit_application_oracle",
-        "compare_kind": "float_abs_tol",
-        "scalar_kind": "float32",
-        "float_abs_tol": float(abs_tol),
-        "float_rel_tol": 0.0,
-        "nan_equal": True,
+        "source": "exact_output_mismatch_oracle",
+        "compare_kind": "exact",
+        "nan_equal": False,
         "inf_sign_must_match": True,
         "device_materialized": True,
     }
 
 
-def policy_for_app(app: str) -> Dict[str, Any]:
-    name = str(app).strip()
-    if name in FLOAT32_ABS_1E5_APPS:
-        return _float_policy(1.0e-5)
-    return {
-        "source": "explicit_application_oracle",
-        "compare_kind": "exact",
-    }
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Write the canonical SARA output-oracle policy for one benchmark."
+        description="Write the canonical exact-output oracle policy for one benchmark."
     )
     parser.add_argument("--app", required=True)
     parser.add_argument("-o", "--output", type=Path, required=True)
