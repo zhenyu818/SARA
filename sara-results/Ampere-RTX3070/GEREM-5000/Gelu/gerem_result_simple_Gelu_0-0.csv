@@ -1,0 +1,22 @@
+line
+Application Name: Gelu
+Test ID: 0-0
+Input: 4 8 4
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=5000 smem_rf=5000 l1d=5000 l2=5000
+Register File: Masked=0.999000000000 SDC=0.001000000000 DUE=0.000000000000 EFM[benign=0.999000000000 dcr=0.001000000000 ebc=0.000000000000]
+Shared Memory: Masked=0.995700000000 SDC=0.004300000000 DUE=0.000000000000 EFM[benign=0.991400000000 dcr=0.008600000000 ebc=0.000000000000] smem_sic=0.500000000000
+L1 D Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=1.000000000000 dcr=0.000000000000 ebc=0.000000000000]
+L2 Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=1.000000000000 dcr=0.000000000000 ebc=0.000000000000]
+Step Times (s):
+generate_results_if_needed: 2.141950
+prepare_case_files: 0.015148
+run_trace_capture: 2.766648
+build_sampling_space: 4.999106
+gerem_rf_predict_py: 483.279458
+gerem_smem_predict_py: 4.909823
+gerem_l1d_predict_py: 3.820996
+gerem_l2_predict_py: 2.946679
+gerem_report_merge_py: 0.018179
+Total Time (s): 504.915408

@@ -1,0 +1,22 @@
+line
+Application Name: Pathfinder
+Test ID: 0-0
+Input: 448 13 12
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=5000 smem_rf=5000 l1d=5000 l2=5000
+Register File: Masked=0.915800000000 SDC=0.084200000000 DUE=0.000000000000 EFM[benign=0.915800000000 dcr=0.084200000000 ebc=0.000000000000]
+Shared Memory: Masked=0.987275000000 SDC=0.012725000000 DUE=0.000000000000 EFM[benign=0.944000000000 dcr=0.056000000000 ebc=0.000000000000] smem_sic=0.227232142857
+L1 D Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=0.998400000000 dcr=0.000000000000 ebc=0.001600000000]
+L2 Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=1.000000000000 dcr=0.000000000000 ebc=0.000000000000]
+Step Times (s):
+generate_results_if_needed: 1.187796
+prepare_case_files: 0.014534
+run_trace_capture: 1.580774
+build_sampling_space: 1.488461
+gerem_rf_predict_py: 224.464522
+gerem_smem_predict_py: 64.723288
+gerem_l1d_predict_py: 2.113821
+gerem_l2_predict_py: 1.558440
+gerem_report_merge_py: 0.018439
+Total Time (s): 297.168300

@@ -1,0 +1,22 @@
+line
+Application Name: AdamW
+Test ID: 0-0
+Input: 128 4
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=5000 smem_rf=5000 l1d=5000 l2=5000
+Register File: Masked=0.993600000000 SDC=0.006400000000 DUE=0.000000000000 EFM[benign=0.993600000000 dcr=0.006400000000 ebc=0.000000000000]
+Shared Memory: Masked=0.906000000000 SDC=0.094000000000 DUE=0.000000000000 EFM[benign=0.906000000000 dcr=0.094000000000 ebc=0.000000000000] smem_sic=1.000000000000
+L1 D Cache: Masked=0.998400000000 SDC=0.001600000000 DUE=0.000000000000 EFM[benign=0.998400000000 dcr=0.001600000000 ebc=0.000000000000]
+L2 Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=0.999800000000 dcr=0.000000000000 ebc=0.000200000000]
+Step Times (s):
+generate_results_if_needed: 0.685508
+prepare_case_files: 0.015108
+run_trace_capture: 0.782419
+build_sampling_space: 0.097034
+gerem_rf_predict_py: 18.013624
+gerem_smem_predict_py: 0.563257
+gerem_l1d_predict_py: 0.244679
+gerem_l2_predict_py: 0.184953
+gerem_report_merge_py: 0.018129
+Total Time (s): 20.622744

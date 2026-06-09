@@ -1,0 +1,22 @@
+line
+Application Name: Stencil1D
+Test ID: 0-0
+Input: 1024
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=5000 smem_rf=5000 l1d=5000 l2=5000
+Register File: Masked=0.987800000000 SDC=0.012200000000 DUE=0.000000000000 EFM[benign=0.987800000000 dcr=0.012200000000 ebc=0.000000000000]
+Shared Memory: Masked=0.905600000000 SDC=0.094400000000 DUE=0.000000000000 EFM[benign=0.905600000000 dcr=0.094400000000 ebc=0.000000000000] smem_sic=1.000000000000
+L1 D Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=1.000000000000 dcr=0.000000000000 ebc=0.000000000000]
+L2 Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=0.999800000000 dcr=0.000000000000 ebc=0.000200000000]
+Step Times (s):
+generate_results_if_needed: 0.687177
+prepare_case_files: 0.015248
+run_trace_capture: 0.880284
+build_sampling_space: 0.339174
+gerem_rf_predict_py: 67.329416
+gerem_smem_predict_py: 7.846574
+gerem_l1d_predict_py: 0.577078
+gerem_l2_predict_py: 0.429031
+gerem_report_merge_py: 0.018655
+Total Time (s): 78.140569

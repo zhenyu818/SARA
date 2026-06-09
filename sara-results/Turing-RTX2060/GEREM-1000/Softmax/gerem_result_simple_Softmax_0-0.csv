@@ -1,0 +1,22 @@
+line
+Application Name: Softmax
+Test ID: 0-0
+Input: 96 16
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=1000 smem_rf=1000 l1d=1000 l2=1000
+Register File: Masked=0.989000000000 SDC=0.011000000000 DUE=0.000000000000 EFM[benign=0.989000000000 dcr=0.011000000000 ebc=0.000000000000]
+Shared Memory: Masked=0.995500000000 SDC=0.004500000000 DUE=0.000000000000 EFM[benign=0.991000000000 dcr=0.009000000000 ebc=0.000000000000] smem_sic=0.500000000000
+L1 D Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=1.000000000000 dcr=0.000000000000 ebc=0.000000000000]
+L2 Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=1.000000000000 dcr=0.000000000000 ebc=0.000000000000]
+Step Times (s):
+generate_results_if_needed: 0.892599
+prepare_case_files: 0.014606
+run_trace_capture: 1.286004
+build_sampling_space: 1.414514
+gerem_rf_predict_py: 40.146840
+gerem_smem_predict_py: 13.381786
+gerem_l1d_predict_py: 3.561525
+gerem_l2_predict_py: 1.434370
+gerem_report_merge_py: 0.018882
+Total Time (s): 62.169706

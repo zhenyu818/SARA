@@ -1,0 +1,22 @@
+line
+Application Name: AdamW
+Input: 128 4
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.980889194517 SDC Rate=0.016622840449 DUE Rate=0.002292573786 Unknown Rate=0.000195391248
+Shared Memory: Masked Rate=0.929365937317 SDC Rate=0.070634062683 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L1 D Cache: Masked Rate=1.000000000000 SDC Rate=0.000000000000 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L2 Cache: Masked Rate=0.999610727755 SDC Rate=0.000389272245 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 1.852395
+prepare_case_files: 0.017567
+run_golden_and_collect: 1.691166
+run_sara_trace_capture: 1.642297
+run_profile2_mean_active_threads: 0.003029
+prepare_fi_sampling_space_snapshot: 0.135665
+analyzer_prepare_input_py: 0.189880
+sara_output_oracle_policy_py: 0.020166
+analyzer_reg_observed_py: 1.272934
+analyzer_sara_compute_py: 0.978185
+analyzer_rates_summary_py (x4): 0.093036
+Total Time (s): 7.957337

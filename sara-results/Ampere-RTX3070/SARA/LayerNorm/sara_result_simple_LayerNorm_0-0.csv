@@ -1,0 +1,22 @@
+line
+Application Name: LayerNorm
+Input: 4 8 32
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.983318456568 SDC Rate=0.015859078806 DUE Rate=0.000101471013 Unknown Rate=0.000720993614
+Shared Memory: Masked Rate=0.956110105699 SDC Rate=0.043889894301 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L1 D Cache: Masked Rate=1.000000000000 SDC Rate=0.000000000000 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L2 Cache: Masked Rate=0.999130177395 SDC Rate=0.000869822605 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 2.062903
+prepare_case_files: 0.018340
+run_golden_and_collect: 1.889909
+run_sara_trace_capture: 2.232729
+run_profile2_mean_active_threads: 0.002962
+prepare_fi_sampling_space_snapshot: 0.138764
+analyzer_prepare_input_py: 2.520247
+sara_output_oracle_policy_py: 0.019821
+analyzer_reg_observed_py: 6.696523
+analyzer_sara_compute_py: 10.446254
+analyzer_rates_summary_py (x4): 0.090024
+Total Time (s): 26.178958

@@ -1,0 +1,22 @@
+line
+Application Name: MatrixFactorization
+Input: 96 44 44
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.994116928529 SDC Rate=0.005463727850 DUE Rate=0.000359914067 Unknown Rate=0.000059429554
+Shared Memory: not used
+L1 D Cache: Masked Rate=0.997740773732 SDC Rate=0.002259226268 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L2 Cache: Masked Rate=0.998966539044 SDC Rate=0.001033460956 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 3.349102
+prepare_case_files: 0.018399
+run_golden_and_collect: 2.101662
+run_sara_trace_capture: 2.199923
+run_profile2_mean_active_threads: 0.003248
+prepare_fi_sampling_space_snapshot: 0.156999
+analyzer_prepare_input_py: 1.687099
+sara_output_oracle_policy_py: 0.020022
+analyzer_reg_observed_py: 15.604285
+analyzer_sara_compute_py: 13.439043
+analyzer_rates_summary_py (x3): 0.070596
+Total Time (s): 38.710099

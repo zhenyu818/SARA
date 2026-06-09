@@ -1,0 +1,22 @@
+line
+Application Name: Gemm
+Input: 1
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.939064233892 SDC Rate=0.055926959631 DUE Rate=0.003687947921 Unknown Rate=0.001320858556
+Shared Memory: not used
+L1 D Cache: Masked Rate=0.998987781854 SDC Rate=0.001012218146 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L2 Cache: Masked Rate=0.999656045613 SDC Rate=0.000343954387 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 2.136801
+prepare_case_files: 0.017067
+run_golden_and_collect: 2.173658
+run_sara_trace_capture: 2.277392
+run_profile2_mean_active_threads: 0.002674
+prepare_fi_sampling_space_snapshot: 0.138925
+analyzer_prepare_input_py: 0.387523
+sara_output_oracle_policy_py: 0.020032
+analyzer_reg_observed_py: 2.734055
+analyzer_sara_compute_py: 2.965901
+analyzer_rates_summary_py (x3): 0.070496
+Total Time (s): 13.504648

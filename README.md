@@ -17,6 +17,7 @@ The evaluated storage components are the register file, shared memory, L1 data c
 - `script/common/` — shared campaign and result-layout utilities.
 - `script/paper_results/` — tracked plotting helpers for paper figures.
 - `gen_paper_results.py` — regenerates paper-ready Markdown tables and figure PDFs from `sara-results/`.
+- `sara-results/` — tracked public experiment results and regenerated paper-ready artifacts used by the manuscript.
 - `test_apps/` — CUDA benchmark applications used by the experiments.
 - `configs/` — GPU architecture configurations used by the runner.
 

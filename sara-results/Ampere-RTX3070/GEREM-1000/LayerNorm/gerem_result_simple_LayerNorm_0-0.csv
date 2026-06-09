@@ -1,0 +1,22 @@
+line
+Application Name: LayerNorm
+Test ID: 0-0
+Input: 4 8 32
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=1000 smem_rf=1000 l1d=1000 l2=1000
+Register File: Masked=0.996000000000 SDC=0.004000000000 DUE=0.000000000000 EFM[benign=0.996000000000 dcr=0.004000000000 ebc=0.000000000000]
+Shared Memory: Masked=0.965000000000 SDC=0.035000000000 DUE=0.000000000000 EFM[benign=0.965000000000 dcr=0.035000000000 ebc=0.000000000000] smem_sic=1.000000000000
+L1 D Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=1.000000000000 dcr=0.000000000000 ebc=0.000000000000]
+L2 Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=1.000000000000 dcr=0.000000000000 ebc=0.000000000000]
+Step Times (s):
+generate_results_if_needed: 1.985161
+prepare_case_files: 0.014666
+run_trace_capture: 2.299545
+build_sampling_space: 1.216481
+gerem_rf_predict_py: 48.663465
+gerem_smem_predict_py: 1.839730
+gerem_l1d_predict_py: 1.598622
+gerem_l2_predict_py: 1.253054
+gerem_report_merge_py: 0.018951
+Total Time (s): 58.908603

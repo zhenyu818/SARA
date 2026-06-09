@@ -1,0 +1,22 @@
+line
+Application Name: Convolution1D
+Input: 2048 5
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.994802478250 SDC Rate=0.003839675348 DUE Rate=0.000528646535 Unknown Rate=0.000829199868
+Shared Memory: Masked Rate=0.900936863925 SDC Rate=0.099063136075 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L1 D Cache: Masked Rate=0.999997676251 SDC Rate=0.000002323749 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L2 Cache: Masked Rate=0.999280679779 SDC Rate=0.000719320221 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 2.191123
+prepare_case_files: 0.017423
+run_golden_and_collect: 1.905414
+run_sara_trace_capture: 2.393578
+run_profile2_mean_active_threads: 0.003056
+prepare_fi_sampling_space_snapshot: 0.131538
+analyzer_prepare_input_py: 5.330561
+sara_output_oracle_policy_py: 0.019912
+analyzer_reg_observed_py: 12.039304
+analyzer_sara_compute_py: 17.267045
+analyzer_rates_summary_py (x4): 0.090556
+Total Time (s): 41.449614

@@ -1,0 +1,22 @@
+line
+Application Name: Softmax
+Input: 96 16
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.994050563932 SDC Rate=0.004866360411 DUE Rate=0.000668408992 Unknown Rate=0.000414666665
+Shared Memory: Masked Rate=0.992995406170 SDC Rate=0.007004593830 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L1 D Cache: Masked Rate=1.000000000000 SDC Rate=0.000000000000 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L2 Cache: Masked Rate=0.998853003644 SDC Rate=0.001146996356 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 0.889541
+prepare_case_files: 0.017307
+run_golden_and_collect: 0.899407
+run_sara_trace_capture: 1.280770
+run_profile2_mean_active_threads: 0.002748
+prepare_fi_sampling_space_snapshot: 0.132443
+analyzer_prepare_input_py: 3.324455
+sara_output_oracle_policy_py: 0.020603
+analyzer_reg_observed_py: 11.717193
+analyzer_sara_compute_py: 13.522016
+analyzer_rates_summary_py (x4): 0.090186
+Total Time (s): 31.957399

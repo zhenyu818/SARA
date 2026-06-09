@@ -75,9 +75,13 @@ setup
 .work/
 backup/
 test_result/*
-sara-results/*
 paper/
 
 
 # Local per-application run outputs
 test_apps/*/result/
+
+# Public experiment results used by the paper are intentionally tracked.
+!sara-results/
+!sara-results/**/
+!sara-results/**

@@ -1,0 +1,22 @@
+line
+Application Name: MatrixMultiplication
+Test ID: 0-0
+Input: wA 32 hA 16 wB 16 hB 32
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=10000 smem_rf=10000 l1d=10000 l2=10000
+Register File: Masked=0.873600000000 SDC=0.126400000000 DUE=0.000000000000 EFM[benign=0.873600000000 dcr=0.126400000000 ebc=0.000000000000]
+Shared Memory: Masked=0.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=0.000000000000 dcr=0.000000000000 ebc=0.000000000000] smem_sic=1.000000000000
+L1 D Cache: Masked=0.996200000000 SDC=0.003800000000 DUE=0.000000000000 EFM[benign=0.995200000000 dcr=0.003800000000 ebc=0.001000000000]
+L2 Cache: Masked=0.999800000000 SDC=0.000200000000 DUE=0.000000000000 EFM[benign=0.999700000000 dcr=0.000200000000 ebc=0.000100000000]
+Step Times (s):
+generate_results_if_needed: 2.664702
+prepare_case_files: 0.014330
+run_trace_capture: 2.627311
+build_sampling_space: 0.297587
+gerem_rf_predict_py: 122.940815
+gerem_smem_predict_py: 0.753387
+gerem_l1d_predict_py: 0.869927
+gerem_l2_predict_py: 0.696171
+gerem_report_merge_py: 0.018361
+Total Time (s): 130.901259

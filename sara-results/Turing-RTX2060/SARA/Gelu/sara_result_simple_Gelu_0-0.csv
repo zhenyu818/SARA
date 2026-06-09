@@ -1,0 +1,22 @@
+line
+Application Name: Gelu
+Input: 4 8 4
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.998452140999 SDC Rate=0.001266107427 DUE Rate=0.000148558238 Unknown Rate=0.000133193335
+Shared Memory: Masked Rate=0.991906177734 SDC Rate=0.008093822266 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L1 D Cache: Masked Rate=1.000000000000 SDC Rate=0.000000000000 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L2 Cache: Masked Rate=0.999901549120 SDC Rate=0.000098450880 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 0.988763
+prepare_case_files: 0.018208
+run_golden_and_collect: 0.999483
+run_sara_trace_capture: 1.881014
+run_profile2_mean_active_threads: 0.002697
+prepare_fi_sampling_space_snapshot: 0.134868
+analyzer_prepare_input_py: 6.745252
+sara_output_oracle_policy_py: 0.019589
+analyzer_reg_observed_py: 12.266318
+analyzer_sara_compute_py: 25.102203
+analyzer_rates_summary_py (x4): 0.092100
+Total Time (s): 48.311340

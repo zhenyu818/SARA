@@ -1,0 +1,22 @@
+line
+Application Name: Attention
+Input: 128 24
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.966955089189 SDC Rate=0.028297859871 DUE Rate=0.003566321787 Unknown Rate=0.001180729153
+Shared Memory: Masked Rate=0.998847434475 SDC Rate=0.001152565525 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L1 D Cache: Masked Rate=0.999788875035 SDC Rate=0.000211124965 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L2 Cache: Masked Rate=0.998749117356 SDC Rate=0.001250882644 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 6.762861
+prepare_case_files: 0.017700
+run_golden_and_collect: 7.632242
+run_sara_trace_capture: 6.810189
+run_profile2_mean_active_threads: 0.002957
+prepare_fi_sampling_space_snapshot: 0.152113
+analyzer_prepare_input_py: 0.522728
+sara_output_oracle_policy_py: 0.019675
+analyzer_reg_observed_py: 5.032556
+analyzer_sara_compute_py: 4.753915
+analyzer_rates_summary_py (x4): 0.093768
+Total Time (s): 31.861708

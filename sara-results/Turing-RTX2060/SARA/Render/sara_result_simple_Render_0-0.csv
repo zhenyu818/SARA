@@ -1,0 +1,22 @@
+line
+Application Name: Render
+Input: 32 16 14
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.951333663515 SDC Rate=0.044276759305 DUE Rate=0.004236305083 Unknown Rate=0.000153272096
+Shared Memory: not used
+L1 D Cache: Masked Rate=0.988157778029 SDC Rate=0.011685368426 DUE Rate=0.000000000000 Unknown Rate=0.000156853545
+L2 Cache: Masked Rate=0.999006694614 SDC Rate=0.000993305386 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 1.493709
+prepare_case_files: 0.017906
+run_golden_and_collect: 2.566413
+run_sara_trace_capture: 1.785623
+run_profile2_mean_active_threads: 0.002690
+prepare_fi_sampling_space_snapshot: 0.155464
+analyzer_prepare_input_py: 1.473301
+sara_output_oracle_policy_py: 0.020017
+analyzer_reg_observed_py: 8.530689
+analyzer_sara_compute_py: 6.330237
+analyzer_rates_summary_py (x3): 0.068108
+Total Time (s): 22.506558

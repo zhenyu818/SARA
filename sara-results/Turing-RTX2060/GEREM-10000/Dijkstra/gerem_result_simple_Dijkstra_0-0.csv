@@ -1,0 +1,22 @@
+line
+Application Name: Dijkstra
+Test ID: 0-0
+Input: 80 40
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=10000 smem_rf=10000 l1d=10000 l2=10000
+Register File: Masked=0.990500000000 SDC=0.009500000000 DUE=0.000000000000 EFM[benign=0.990500000000 dcr=0.009500000000 ebc=0.000000000000]
+Shared Memory: Masked=0.993450000000 SDC=0.006550000000 DUE=0.000000000000 EFM[benign=0.986900000000 dcr=0.013100000000 ebc=0.000000000000] smem_sic=0.500000000000
+L1 D Cache: Masked=0.999800000000 SDC=0.000200000000 DUE=0.000000000000 EFM[benign=0.999500000000 dcr=0.000200000000 ebc=0.000300000000]
+L2 Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=0.999900000000 dcr=0.000000000000 ebc=0.000100000000]
+Step Times (s):
+generate_results_if_needed: 0.686222
+prepare_case_files: 0.014330
+run_trace_capture: 0.680635
+build_sampling_space: 0.041276
+gerem_rf_predict_py: 11.139044
+gerem_smem_predict_py: 0.263848
+gerem_l1d_predict_py: 0.232551
+gerem_l2_predict_py: 0.196811
+gerem_report_merge_py: 0.017574
+Total Time (s): 13.290333

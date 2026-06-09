@@ -1,0 +1,22 @@
+line
+Application Name: Attention
+Test ID: 0-0
+Input: 128 24
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=1000 smem_rf=1000 l1d=1000 l2=1000
+Register File: Masked=0.984000000000 SDC=0.016000000000 DUE=0.000000000000 EFM[benign=0.984000000000 dcr=0.016000000000 ebc=0.000000000000]
+Shared Memory: Masked=0.997500000000 SDC=0.002500000000 DUE=0.000000000000 EFM[benign=0.995000000000 dcr=0.005000000000 ebc=0.000000000000] smem_sic=0.500000000000
+L1 D Cache: Masked=0.993000000000 SDC=0.007000000000 DUE=0.000000000000 EFM[benign=0.993000000000 dcr=0.007000000000 ebc=0.000000000000]
+L2 Cache: Masked=0.999000000000 SDC=0.001000000000 DUE=0.000000000000 EFM[benign=0.999000000000 dcr=0.001000000000 ebc=0.000000000000]
+Step Times (s):
+generate_results_if_needed: 6.666425
+prepare_case_files: 0.015306
+run_trace_capture: 6.668332
+build_sampling_space: 0.248445
+gerem_rf_predict_py: 10.686125
+gerem_smem_predict_py: 0.380321
+gerem_l1d_predict_py: 0.459667
+gerem_l2_predict_py: 0.328666
+gerem_report_merge_py: 0.019731
+Total Time (s): 25.490544

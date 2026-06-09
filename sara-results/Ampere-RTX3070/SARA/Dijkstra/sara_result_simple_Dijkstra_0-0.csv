@@ -1,0 +1,22 @@
+line
+Application Name: Dijkstra
+Input: 80 40
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.991214839474 SDC Rate=0.005936330444 DUE Rate=0.001076248155 Unknown Rate=0.001772581926
+Shared Memory: Masked Rate=0.995388070664 SDC Rate=0.004611929336 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L1 D Cache: Masked Rate=0.999998301298 SDC Rate=0.000001698702 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L2 Cache: Masked Rate=0.999907813256 SDC Rate=0.000092186744 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 1.696800
+prepare_case_files: 0.017557
+run_golden_and_collect: 1.578720
+run_sara_trace_capture: 1.683437
+run_profile2_mean_active_threads: 0.002781
+prepare_fi_sampling_space_snapshot: 0.135816
+analyzer_prepare_input_py: 0.075345
+sara_output_oracle_policy_py: 0.020098
+analyzer_reg_observed_py: 0.281775
+analyzer_sara_compute_py: 0.430416
+analyzer_rates_summary_py (x4): 0.091944
+Total Time (s): 6.078747

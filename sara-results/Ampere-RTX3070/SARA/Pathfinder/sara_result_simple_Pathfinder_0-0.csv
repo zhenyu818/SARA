@@ -1,0 +1,22 @@
+line
+Application Name: Pathfinder
+Input: 448 13 12
+Inference Mode: canonical_proof
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/profile/trace/sampling/analysis/reporting)
+Register: Masked Rate=0.932681802752 SDC Rate=0.054974861176 DUE Rate=0.000013931728 Unknown Rate=0.012329404343
+Shared Memory: Masked Rate=0.968009597685 SDC Rate=0.031990402315 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L1 D Cache: Masked Rate=0.999986982198 SDC Rate=0.000013017802 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+L2 Cache: Masked Rate=0.997952297944 SDC Rate=0.002047702056 DUE Rate=0.000000000000 Unknown Rate=0.000000000000
+Step Times (s):
+generate_results_if_needed: 2.649468
+prepare_case_files: 0.017375
+run_golden_and_collect: 2.497848
+run_sara_trace_capture: 2.840987
+run_profile2_mean_active_threads: 0.002749
+prepare_fi_sampling_space_snapshot: 0.133556
+analyzer_prepare_input_py: 2.866179
+sara_output_oracle_policy_py: 0.020861
+analyzer_reg_observed_py: 14.190964
+analyzer_sara_compute_py: 16.621025
+analyzer_rates_summary_py (x4): 0.091553
+Total Time (s): 41.993159

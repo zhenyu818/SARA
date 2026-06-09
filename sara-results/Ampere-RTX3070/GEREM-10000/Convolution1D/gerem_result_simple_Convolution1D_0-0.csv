@@ -1,0 +1,22 @@
+line
+Application Name: Convolution1D
+Test ID: 0-0
+Input: 2048 5
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=10000 smem_rf=10000 l1d=10000 l2=10000
+Register File: Masked=0.981500000000 SDC=0.018500000000 DUE=0.000000000000 EFM[benign=0.981500000000 dcr=0.018500000000 ebc=0.000000000000]
+Shared Memory: Masked=0.952600000000 SDC=0.047400000000 DUE=0.000000000000 EFM[benign=0.905200000000 dcr=0.094800000000 ebc=0.000000000000] smem_sic=0.500000000000
+L1 D Cache: Masked=1.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=1.000000000000 dcr=0.000000000000 ebc=0.000000000000]
+L2 Cache: Masked=0.999800000000 SDC=0.000200000000 DUE=0.000000000000 EFM[benign=0.999800000000 dcr=0.000200000000 ebc=0.000000000000]
+Step Times (s):
+generate_results_if_needed: 2.023695
+prepare_case_files: 0.015206
+run_trace_capture: 2.415019
+build_sampling_space: 1.834032
+gerem_rf_predict_py: 685.805631
+gerem_smem_predict_py: 17.568059
+gerem_l1d_predict_py: 2.348307
+gerem_l2_predict_py: 1.974196
+gerem_report_merge_py: 0.018715
+Total Time (s): 714.021726

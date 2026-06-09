@@ -1,0 +1,34 @@
+{
+  "result_root": "/home/qzy/research/SARA/sara-results",
+  "output_dir": "/home/qzy/research/SARA/sara-results/paper-results",
+  "apps": [
+    "AdamW",
+    "Attention",
+    "Convolution1D",
+    "Dijkstra",
+    "GESpmm",
+    "Gelu",
+    "Gemm",
+    "LayerNorm",
+    "MatrixFactorization",
+    "MatrixMultiplication",
+    "Pathfinder",
+    "Render",
+    "Softmax",
+    "Stencil1D"
+  ],
+  "generated": [
+    "manifest.json",
+    "perapp_accuracy_bars.pdf",
+    "perapp_speedup_bars.pdf",
+    "sdc_source_breakdown.csv",
+    "sdc_source_breakdown.pdf",
+    "summary.md",
+    "table_iii_accuracy_overall.md",
+    "table_iv_category_error.md",
+    "table_v_speed_overall.md",
+    "table_vi_component_breakdown.md",
+    "unknown_summary.md"
+  ],
+  "warnings": []
+}

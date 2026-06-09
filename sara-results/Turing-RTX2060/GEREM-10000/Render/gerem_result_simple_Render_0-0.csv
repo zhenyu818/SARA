@@ -1,0 +1,22 @@
+line
+Application Name: Render
+Test ID: 0-0
+Input: 32 16 14
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=10000 smem_rf=10000 l1d=10000 l2=10000
+Register File: Masked=0.898100000000 SDC=0.101900000000 DUE=0.000000000000 EFM[benign=0.898100000000 dcr=0.101900000000 ebc=0.000000000000]
+Shared Memory: Masked=0.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=0.000000000000 dcr=0.000000000000 ebc=0.000000000000] smem_sic=1.000000000000
+L1 D Cache: Masked=0.897900000000 SDC=0.102100000000 DUE=0.000000000000 EFM[benign=0.883000000000 dcr=0.102100000000 ebc=0.014900000000]
+L2 Cache: Masked=0.996800000000 SDC=0.003200000000 DUE=0.000000000000 EFM[benign=0.995900000000 dcr=0.003200000000 ebc=0.000900000000]
+Step Times (s):
+generate_results_if_needed: 1.496188
+prepare_case_files: 0.015095
+run_trace_capture: 1.788909
+build_sampling_space: 0.718623
+gerem_rf_predict_py: 256.312101
+gerem_smem_predict_py: 1.203556
+gerem_l1d_predict_py: 2.737908
+gerem_l2_predict_py: 1.206674
+gerem_report_merge_py: 0.018769
+Total Time (s): 265.516437

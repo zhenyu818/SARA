@@ -1,0 +1,22 @@
+line
+Application Name: MatrixFactorization
+Test ID: 0-0
+Input: 96 44 44
+Timing Scope: non-compilation end-to-end (excludes compile/prebuild only; includes method-owned result generation/trace/sampling/prediction/reporting)
+GEREM Campaign Mode: sample
+GEREM Campaign Runs: rf=10000 smem_rf=10000 l1d=10000 l2=10000
+Register File: Masked=0.989000000000 SDC=0.011000000000 DUE=0.000000000000 EFM[benign=0.989000000000 dcr=0.011000000000 ebc=0.000000000000]
+Shared Memory: Masked=0.000000000000 SDC=0.000000000000 DUE=0.000000000000 EFM[benign=0.000000000000 dcr=0.000000000000 ebc=0.000000000000] smem_sic=1.000000000000
+L1 D Cache: Masked=0.997400000000 SDC=0.002600000000 DUE=0.000000000000 EFM[benign=0.996800000000 dcr=0.002600000000 ebc=0.000600000000]
+L2 Cache: Masked=0.999500000000 SDC=0.000500000000 DUE=0.000000000000 EFM[benign=0.999500000000 dcr=0.000500000000 ebc=0.000000000000]
+Step Times (s):
+generate_results_if_needed: 2.153348
+prepare_case_files: 0.014484
+run_trace_capture: 2.213469
+build_sampling_space: 0.743638
+gerem_rf_predict_py: 321.740314
+gerem_smem_predict_py: 1.257520
+gerem_l1d_predict_py: 1.662595
+gerem_l2_predict_py: 1.053801
+gerem_report_merge_py: 0.017706
+Total Time (s): 330.874183
