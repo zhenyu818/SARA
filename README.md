@@ -14,7 +14,9 @@ The evaluated storage components are the register file, shared memory, L1 data c
 - `script/SARA/` — SARA analysis and application runner.
 - `script/GEREM/` — GEREM storage-EFM campaign runner.
 - `script/FI/` — storage fault-injection runner.
-- `script/common/` — shared campaign, result-layout, and output-comparison utilities.
+- `script/common/` — shared campaign and result-layout utilities.
+- `script/paper_results/` — tracked plotting helpers for paper figures.
+- `gen_paper_results.py` — regenerates paper-ready Markdown tables and figure PDFs from `sara-results/`.
 - `test_apps/` — CUDA benchmark applications used by the experiments.
 - `configs/` — GPU architecture configurations used by the runner.
 
@@ -26,6 +28,8 @@ The runnable experiment image is built from this repository's Dockerfile. Docker
 docker pull nvidia/cuda:11.8.0-devel-ubuntu20.04
 docker build --pull -t sara:cuda11.8-dev .
 ```
+
+If paper figure generation reports `ModuleNotFoundError: No module named 'matplotlib'`, rebuild the image with the command above so the plotting dependencies from the Dockerfile are installed.
 
 If you later publish the SARA experiment image to Docker Hub or GHCR, replace `sara:cuda11.8-dev` with that registry-qualified tag and use `docker pull <registry-qualified-tag>` instead of the local build step.
 
@@ -44,7 +48,7 @@ Results are organized as:
 
 ```text
 $PWD/sara-results/<architecture>/<method>/<application>/
-$PWD/sara-results/<architecture>/compare/
+$PWD/sara-results/paper-results/
 ```
 
 For example, SARA results for AdamW on Turing are written under:
@@ -109,7 +113,7 @@ docker run --rm -it \
 | --- | --- |
 | `--arch turing\|ampere\|both` | Selects the target GPU architecture configuration. `turing` uses the Turing RTX2060 configuration, `ampere` uses the Ampere RTX3070 configuration, and `both` runs the selected experiment family on both configurations. |
 | `--method sara\|sara-gerem-all\|fi\|gerem-all\|all` | Selects the experiment family. `sara` runs SARA only; `gerem-all` runs the selected GEREM storage-EFM campaign only; `fi` runs fault injection only; `sara-gerem-all` runs SARA plus GEREM; `all` runs SARA, GEREM, and FI. |
-| `--app NAME\|all` | Selects one benchmark application under `test_apps/` or all applications. If omitted in non-interactive mode, it defaults to `all`. Comparison reports are refreshed from the current result directory after each invocation. |
+| `--app NAME\|all` | Selects one benchmark application under `test_apps/` or all applications. If omitted in non-interactive mode, it defaults to `all`. Paper-ready result summaries are refreshed from the current result directory after each invocation. |
 | `--runs N` | Sets the number of FI trials per storage component. The default is `1000`; `--smoke` changes it to `1`. |
 | `--gerem-runs 1000\|5000\|10000` | Selects the GEREM storage-EFM random-sampling campaign size. Results are written under `GEREM-1000`, `GEREM-5000`, or `GEREM-10000`. Exhaustive `all` mode and ad-hoc GEREM sample counts are not supported. |
 | `--skip-build` | Skips the common simulator build. Use only when the required GPGPU-Sim runtime library already exists from a previous preserved build. |
@@ -174,6 +178,14 @@ Run `bash ./run_experiment.sh --help` inside the container for the complete opti
 
 ## Output comparison policy
 
-SARA, FI, GEREM, and the public comparison reports use the same exact-output policy: any final output mismatch is classified as SDC, regardless of whether the field is integer or floating-point. Runtime failures, timeouts, invalid executions, and missing required outputs are classified as Detected Unrecoverable Error outcomes.
+SARA, FI, GEREM, and the paper-ready summaries use the same exact-output policy: any final output mismatch is classified as SDC, regardless of whether the field is integer or floating-point. Runtime failures, timeouts, invalid executions, and missing required outputs are classified as Detected Unrecoverable Error outcomes.
 
-After each invocation, the runner refreshes comparison reports from the current result root. Partial reruns update only the selected application and method while preserving other existing results in the same result root.
+After each invocation, the runner calls `gen_paper_results.py` to refresh paper-ready artifacts under `sara-results/paper-results/`. The generator writes one Markdown file per experimental table used by the paper and writes the generated figure PDFs/CSV in the same directory. Partial reruns update only the selected application and method while preserving other existing results in the same result root; if some SARA, GEREM, or FI data are missing, the generator prints a warning and records the missing inputs in `sara-results/paper-results/summary.md`.
+
+You can also regenerate these artifacts manually:
+
+```bash
+python3 gen_paper_results.py --result-root sara-results
+```
+
+Figures 4 and 5 are generated from the public aggregate CSV files in `sara-results/`. Figure 6 reports SARA SDC proof-source attribution and therefore requires SARA intermediate `summary_*.json` files under `.work/`; rerun SARA with `--keep-intermediate` if Figure 6 must be regenerated from a clean checkout.

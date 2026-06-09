@@ -25,7 +25,7 @@ PUBLIC_TEXT_EXTENSIONS = {".csv", ".txt", ".md", ".tsv", ".json", ".jsonl"}
 def _is_app_result_dir(path: Path) -> bool:
     if not path.is_dir():
         return False
-    if path.name in ARCHITECTURES or path.name in METHODS or path.name == "compare":
+    if path.name in ARCHITECTURES or path.name in METHODS or path.name in {"compare", "paper-results"}:
         return False
     return any(child.is_file() for child in path.iterdir())
 
@@ -126,14 +126,14 @@ def init_layout(result_root: Path) -> None:
                     gitkeep.touch()
                 except PermissionError:
                     pass
-        compare_dir = result_root / arch / "compare"
-        compare_dir.mkdir(parents=True, exist_ok=True)
-        compare_gitkeep = compare_dir / ".gitkeep"
-        if not compare_gitkeep.exists():
-            try:
-                compare_gitkeep.touch()
-            except PermissionError:
-                pass
+    paper_results_dir = result_root / "paper-results"
+    paper_results_dir.mkdir(parents=True, exist_ok=True)
+    paper_results_gitkeep = paper_results_dir / ".gitkeep"
+    if not paper_results_gitkeep.exists():
+        try:
+            paper_results_gitkeep.touch()
+        except PermissionError:
+            pass
     readme = result_root / "README.md"
     if not readme.exists():
         readme.write_text(
@@ -148,7 +148,8 @@ def init_layout(result_root: Path) -> None:
             "- `Ampere-RTX3070/FI`\n"
             "- `Ampere-RTX3070/GEREM-1000`\n"
             "- `Ampere-RTX3070/GEREM-5000`\n"
-            "- `Ampere-RTX3070/GEREM-10000`\n\n"
+            "- `Ampere-RTX3070/GEREM-10000`\n"
+            "- `paper-results/` for generated paper-ready tables and figures\n\n"
             "Intermediate traces, PTXAS outputs, simulator logs, and scratch run "
             "directories are intentionally excluded from this tree.\n",
             encoding="utf-8",

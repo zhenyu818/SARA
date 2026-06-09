@@ -6,6 +6,36 @@ SCRATCH_DIR=""
 ALL_KNOWN=0
 KEEP_BUILD=1
 DRY_RUN=0
+GIT_GUARD_HOME=""
+
+cleanup_git_guard_home() {
+  if [[ -n "${GIT_GUARD_HOME}" && -d "${GIT_GUARD_HOME}" ]]; then
+    rm -rf -- "${GIT_GUARD_HOME}"
+  fi
+}
+trap cleanup_git_guard_home EXIT
+
+init_git_guard() {
+  if [[ ! -d "${ROOT_DIR}/.git" ]] || ! command -v git >/dev/null 2>&1; then
+    return 0
+  fi
+  if git -C "${ROOT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    return 0
+  fi
+  GIT_GUARD_HOME="$(mktemp -d "${TMPDIR:-/tmp}/sara-cleanup-git-home.XXXXXXXX")"
+  HOME="${GIT_GUARD_HOME}" git config --global --add safe.directory "${ROOT_DIR}" >/dev/null 2>&1 || true
+}
+
+git_tracked_file() {
+  local rel="$1"
+  [[ -d "${ROOT_DIR}/.git" ]] || return 1
+  command -v git >/dev/null 2>&1 || return 1
+  if [[ -n "${GIT_GUARD_HOME}" ]]; then
+    HOME="${GIT_GUARD_HOME}" git -C "${ROOT_DIR}" ls-files --error-unmatch -- "${rel}" >/dev/null 2>&1
+  else
+    git -C "${ROOT_DIR}" ls-files --error-unmatch -- "${rel}" >/dev/null 2>&1
+  fi
+}
 
 usage() {
   cat <<'EOF'
@@ -26,6 +56,20 @@ EOF
 log_rm() {
   local target="$1"
   if [[ ! -e "${target}" && ! -L "${target}" ]]; then
+    return 0
+  fi
+  local rel="${target}"
+  if [[ "${target}" == "${ROOT_DIR}/"* ]]; then
+    rel="${target#${ROOT_DIR}/}"
+  elif [[ "${target}" == ./* ]]; then
+    rel="${target#./}"
+  fi
+  case "${rel}" in
+    gpgpu_inst_stats.txt|register_used.txt|result.txt)
+      return 0
+      ;;
+  esac
+  if git_tracked_file "${rel}"; then
     return 0
   fi
   if [[ "${DRY_RUN}" == "1" ]]; then
@@ -109,6 +153,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "${ROOT_DIR}"
+init_git_guard
 
 if [[ -n "${SCRATCH_DIR}" ]]; then
   safe_remove_dir "${SCRATCH_DIR}"
@@ -142,7 +187,7 @@ find . -maxdepth 1 -type f \( \
 if [[ -d test_apps ]]; then
   find test_apps -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | while IFS= read -r app; do
     [[ -n "${app}" ]] || continue
-    if [[ -f "${ROOT_DIR}/${app}" && -x "${ROOT_DIR}/${app}" ]]; then
+    if [[ -f "${ROOT_DIR}/${app}" || -L "${ROOT_DIR}/${app}" ]]; then
       log_rm "${ROOT_DIR}/${app}"
     fi
     log_rm "${ROOT_DIR}/${app}.cu"
@@ -161,8 +206,18 @@ log_rm "${ROOT_DIR}/gen"
 find . -maxdepth 1 -type d \( -name 'logs*' -o -name 'cache_logs' \) -print0 | while IFS= read -r -d '' path; do log_rm "${path}"; done
 
 # Python and temporary caches.
-find . -path './.git' -prune -o -type d -name '__pycache__' -print0 | while IFS= read -r -d '' path; do log_rm "${path}"; done
-find . -path './.git' -prune -o -type f -name '*.pyc' -print0 | while IFS= read -r -d '' path; do log_rm "${path}"; done
+find . \( \
+  -path './.git' -o -path './.git/*' -o \
+  -path './.work' -o -path './.work/*' -o \
+  -path './.omx' -o -path './.omx/*' -o \
+  -path './sara-results' -o -path './sara-results/*' \
+\) -prune -o -type d -name '__pycache__' -print0 | while IFS= read -r -d '' path; do log_rm "${path}"; done
+find . \( \
+  -path './.git' -o -path './.git/*' -o \
+  -path './.work' -o -path './.work/*' -o \
+  -path './.omx' -o -path './.omx/*' -o \
+  -path './sara-results' -o -path './sara-results/*' \
+\) -prune -o -type f -name '*.pyc' -print0 | while IFS= read -r -d '' path; do log_rm "${path}"; done
 
 if [[ "${ALL_KNOWN}" == "1" ]]; then
   for dir in \

@@ -23,7 +23,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir ply Pmw orjson==3.10.15 zstandard==0.23.0
+RUN pip3 install --no-cache-dir \
+    ply \
+    Pmw \
+    orjson==3.10.15 \
+    zstandard==0.23.0 \
+    numpy==1.24.4 \
+    matplotlib==3.7.5
 
 WORKDIR /workspace
 CMD ["bash"]

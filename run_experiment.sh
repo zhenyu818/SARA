@@ -3,10 +3,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="${ROOT_DIR}/script"
-cd "${ROOT_DIR}"
+# Set result/scratch roots before the runner executes any other logic so every
+# later stage and child process sees the same defaults unless the caller
+# explicitly overrides them in the environment.
+: "${RESULT_ROOT:=${ROOT_DIR}/sara-results}"
+: "${WORK_ROOT:=${ROOT_DIR}/.work}"
+export RESULT_ROOT WORK_ROOT
 
-RESULT_ROOT="${RESULT_ROOT:-${ROOT_DIR}/sara-results}"
-WORK_ROOT="${WORK_ROOT:-${ROOT_DIR}/.work}"
+cd "${ROOT_DIR}"
 EXPERIMENT_RANDOM_SEED=2026
 export EXPERIMENT_RANDOM_SEED
 export PYTHONHASHSEED="${PYTHONHASHSEED:-2026}"
@@ -42,7 +46,7 @@ PROGRESS_CURRENT_TASK_KEY=""
 PROGRESS_CURRENT_COMMAND=""
 PROGRESS_CHILD_PHASE=""
 PROGRESS_FI_DETAIL=""
-PLAN_SYSTEM_UNITS_PER_ARCH=2
+PLAN_SYSTEM_UNITS_PER_ARCH=1
 PLAN_ARCH_LABELS=()
 PLAN_APPS=()
 PLAN_EXPERIMENTS=()
@@ -62,9 +66,9 @@ Options:
   --method sara|sara-gerem-all|fi|gerem-all|all
                               Experiment family to run.
   --app NAME|all             One application or all test_apps (default: all).
-                              This selects what to rerun; compare reports are
-                              always refreshed for the full benchmark suite
-                              from the current RESULT_ROOT data.
+                              This selects what to rerun; paper-ready result
+                              summaries are refreshed from the current
+                              RESULT_ROOT data after each invocation.
   --runs N                   FI runs per component (default: 1000).
                               FI trials inside one app/component run in parallel
                               with FI_PARALLEL_JOBS jobs (default: 8); apps and
@@ -302,19 +306,11 @@ gerem_result_dir_name() {
   echo "GEREM-${GEREM_RUNS}"
 }
 
-gerem_compare_slug() {
+gerem_work_slug() {
   echo "gerem${GEREM_RUNS}"
 }
 
 sara_result_dir_name() {
-  echo "SARA"
-}
-
-sara_compare_output_name() {
-  echo "sara_$(gerem_compare_slug)_vs_fi.txt"
-}
-
-sara_compare_label() {
   echo "SARA"
 }
 
@@ -637,11 +633,11 @@ init_progress() {
       done
     done
   done
-  PLAN_SYSTEM_UNITS_PER_ARCH=2 # compare + cleanup
+  PLAN_SYSTEM_UNITS_PER_ARCH=1 # cleanup
   if method_runs_fi; then
     PLAN_SYSTEM_UNITS_PER_ARCH=$((PLAN_SYSTEM_UNITS_PER_ARCH + 1)) # common simulator build
   fi
-  PROGRESS_TOTAL_STAGES=$(( ${#PLAN_TASK_KEYS[@]} + (${#ARCHES_TO_RUN[@]} * PLAN_SYSTEM_UNITS_PER_ARCH) ))
+  PROGRESS_TOTAL_STAGES=$(( ${#PLAN_TASK_KEYS[@]} + (${#ARCHES_TO_RUN[@]} * PLAN_SYSTEM_UNITS_PER_ARCH) + 1 )) # paper-results
   if (( PROGRESS_TOTAL_STAGES <= 0 )); then
     PROGRESS_TOTAL_STAGES=1
   fi
@@ -812,29 +808,53 @@ filter_logged_output() {
   local label="$1"
   local line
   while IFS= read -r line; do
-    log_line "${line}"
+    # This function runs on the read side of long-running command output.  It
+    # must never die because a dead reader turns the producer's stdout into a
+    # broken pipe; make/python then report 141 even when the experiment itself
+    # did not fail.  Keep logging/progress best-effort and preserve the real
+    # command status in run_logged().
+    log_line "${line}" || true
     maybe_update_progress_from_log_line "${label}" "${line}" || true
     if output_is_compile_warning "${line}"; then
       continue
     fi
     if output_is_alert "${line}"; then
-      console_alert_line "${line}"
+      console_alert_line "${line}" || true
     fi
   done
+  return 0
 }
 
 run_logged() {
   local label="$1"
   shift
-  local rc=0
+  local rc=0 filter_rc=0 fifo="" filter_pid="" tmp_out=""
   log_line ""
   log_line "--- COMMAND START: ${label}"
   log_line "cwd=${ROOT_DIR}"
   log_line "cmd=$*"
-  set +e
-  "$@" 2>&1 | filter_logged_output "${label}"
-  rc=${PIPESTATUS[0]}
-  set -e
+  fifo="$(mktemp -u "${TMPDIR:-/tmp}/sara-run-log.XXXXXXXX")"
+  if mkfifo "${fifo}" 2>/dev/null; then
+    filter_logged_output "${label}" < "${fifo}" &
+    filter_pid=$!
+    set +e
+    "$@" > "${fifo}" 2>&1
+    rc=$?
+    set -e
+    wait "${filter_pid}" || filter_rc=$?
+    rm -f "${fifo}"
+  else
+    tmp_out="$(mktemp "${TMPDIR:-/tmp}/sara-run-log.XXXXXXXX")"
+    set +e
+    "$@" > "${tmp_out}" 2>&1
+    rc=$?
+    set -e
+    filter_logged_output "${label}" < "${tmp_out}" || filter_rc=$?
+    rm -f "${tmp_out}"
+  fi
+  if (( filter_rc != 0 )); then
+    log_line "=== Warning: output filter for ${label} exited with status ${filter_rc}; command status remains ${rc}. ==="
+  fi
   log_line "--- COMMAND EXIT: ${label} rc=${rc}"
   if (( rc != 0 )); then
     console_alert_line "ERROR: ${label} failed with exit code ${rc}; full log: ${LOG_FILE}"
@@ -1128,15 +1148,16 @@ cleanup_current_scratch() {
   if [[ -z "${SCRATCH_ROOT}" || "${SCRATCH_CLEANED}" == "1" ]]; then
     return 0
   fi
+  local cleanup_args=()
   if [[ "${KEEP_INTERMEDIATE}" != "1" ]]; then
-    local cleanup_args=(--scratch "${SCRATCH_ROOT}")
+    cleanup_args+=(--scratch "${SCRATCH_ROOT}")
     if [[ "${KEEP_BUILD}" != "1" && "${build_cleanup_mode}" != "keep-build" ]]; then
       cleanup_args+=(--drop-build)
     fi
-    if ! run_logged "cleanup intermediate artifacts" bash "${SCRIPT_DIR}/common/cleanup_intermediate_artifacts.sh" "${cleanup_args[@]}"; then
-      console_alert_line "=== Error: intermediate cleanup failed for ${SCRATCH_ROOT} ==="
-      return 1
-    fi
+  fi
+  if ! run_logged "cleanup intermediate artifacts" bash "${SCRIPT_DIR}/common/cleanup_intermediate_artifacts.sh" "${cleanup_args[@]}"; then
+    console_alert_line "=== Error: generated artifact cleanup failed for ${SCRATCH_ROOT} ==="
+    return 1
   fi
   SCRATCH_CLEANED=1
 }
@@ -1228,7 +1249,7 @@ run_gerem_all() {
   local method_dir
   method_dir="$(gerem_result_dir_name)"
   local final_dir="${RESULT_ROOT}/${ARCH_LABEL}/${method_dir}"
-  local work_dir="${SCRATCH_ROOT}/$(gerem_compare_slug)_runs"
+  local work_dir="${SCRATCH_ROOT}/$(gerem_work_slug)_runs"
   local prebuild_dir="${SCRATCH_ROOT}/storage_prebuilds"
   progress_stage_start "${ARCH_LABEL} / ${method_dir}" "${method_dir}"
   remove_selected_results "${method_dir}"
@@ -1334,7 +1355,7 @@ print_missing_experiment_reminder() {
   if (( ${#missing_lines[@]} == 0 )); then
     notice_line "All public results for all applications are present for $(sara_result_dir_name), $(gerem_result_dir_name), and FI-storage."
   else
-    notice_line "!!! The following public experiment results are still missing; compare files were updated and missing entries are shown as '-':"
+    notice_line "!!! The following public experiment results are still missing; paper-results generation may report incomplete tables/figures:"
     max_lines=160
     shown=0
     for line in "${missing_lines[@]}"; do
@@ -1346,54 +1367,6 @@ print_missing_experiment_reminder() {
   notice_line "======================================================================"
   notice_line ""
 }
-
-write_compare() {
-  local compare_dir="${RESULT_ROOT}/${ARCH_LABEL}/compare"
-  progress_stage_start "${ARCH_LABEL} / write compare files"
-  mkdir -p "${compare_dir}"
-
-  local sara_root="${RESULT_ROOT}/${ARCH_LABEL}/$(sara_result_dir_name)"
-  local gerem_dir="$(gerem_result_dir_name)"
-  local gerem_root="${RESULT_ROOT}/${ARCH_LABEL}/${gerem_dir}"
-  local output="${compare_dir}/$(sara_compare_output_name)"
-  local legacy_allapps_output="${compare_dir}/sara_geremall_vs_fi_allapps.txt"
-  local sara_label="$(sara_compare_label)"
-  local -a compare_apps=()
-  local -a compare_app_args=()
-  mapfile -t compare_apps < <(all_app_list)
-  if (( ${#compare_apps[@]} > 0 )); then
-    compare_app_args=(--apps "${compare_apps[*]}")
-  fi
-  log_line "=== Refreshing full-suite compare for ${ARCH_LABEL} / ${gerem_dir} using current public results (${#compare_apps[@]} applications) ==="
-  run_logged "compare ${sara_label} ${gerem_dir}" python3 "${ROOT_DIR}/script/common/sara_gerem_fi_compare.py" \
-    --arch-label "${ARCH_LABEL}" \
-    --result-root "${RESULT_ROOT}" \
-    --sara-root "${sara_root}" \
-    --gerem-root "${gerem_root}" \
-    --sara-label "${sara_label}" \
-    --gerem-label "${gerem_dir}" \
-    --expected-gerem-runs "${GEREM_RUNS}" \
-    "${compare_app_args[@]}" \
-    --output "${output}"
-  if [[ "${GEREM_RUNS}" == "1000" && "${legacy_allapps_output}" != "${output}" ]]; then
-    run_logged "compare ${sara_label} legacy allapps alias" python3 - "${output}" "${legacy_allapps_output}" <<'PY'
-import sys
-from pathlib import Path
-
-src = Path(sys.argv[1])
-dst = Path(sys.argv[2])
-text = src.read_text(encoding="utf-8", errors="replace")
-dst.parent.mkdir(parents=True, exist_ok=True)
-try:
-    dst.write_text(text, encoding="utf-8")
-except PermissionError:
-    dst.unlink()
-    dst.write_text(text, encoding="utf-8")
-PY
-  fi
-  progress_stage_done "${ARCH_LABEL} / compare files complete"
-}
-
 
 run_selected_method() {
   case "${METHOD}" in
@@ -1420,12 +1393,23 @@ run_selected_method() {
   esac
 }
 
+generate_paper_results() {
+  progress_stage_start "paper-ready result generation"
+  if run_logged "generate paper-results" python3 "${ROOT_DIR}/gen_paper_results.py" \
+    --result-root "${RESULT_ROOT}" \
+    --work-root "${WORK_ROOT}"; then
+    notice_line "=== Paper-ready tables/figures are under ${RESULT_ROOT}/paper-results ==="
+  else
+    console_alert_line "=== Warning: paper-ready result generation failed; rerun python3 gen_paper_results.py --result-root '${RESULT_ROOT}' for details ==="
+  fi
+  progress_stage_done "paper-ready result generation complete"
+}
+
 total_arches="${#ARCHES_TO_RUN[@]}"
 for arch_index in "${!ARCHES_TO_RUN[@]}"; do
   selected_arch="${ARCHES_TO_RUN[${arch_index}]}"
   set_arch_context "${selected_arch}"
   run_selected_method
-  write_compare
   print_missing_experiment_reminder
   restore_config
   progress_stage_start "${ARCH_LABEL} / cleanup"
@@ -1438,3 +1422,7 @@ for arch_index in "${!ARCHES_TO_RUN[@]}"; do
   progress_finish_line
   notice_line "=== Done. Final results are under ${RESULT_ROOT}/${ARCH_LABEL}; full log: ${LOG_FILE} ==="
 done
+
+generate_paper_results
+progress_finish_line
+notice_line "=== Run complete. Paper-ready result artifacts are under ${RESULT_ROOT}/paper-results; full log: ${LOG_FILE} ==="
