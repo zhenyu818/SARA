@@ -16,7 +16,7 @@ def main():
     from script.execution.campaign import atomic_json
     from script.execution.fault_manifest import FaultPopulation
     from script.execution.batch_workload import contract
-    require_container_execution()
+    profile=require_container_execution()
     config=Path('/configs')/a.architecture.lower()/'gpgpusim.config'
     workload=contract(a.case)
     if a.operation=='population':
@@ -52,6 +52,6 @@ def main():
         c=a.component;root=Path('/masters')/c
         dispatch(['--capture',str(root/'capture'),'--simulator-root','/native','--component',c,
             '--site-manifest',str(root/'manifest.json'),'--seed','2026','--campaign-id',c+'-'+str(a.budget),
-            '--target-count',str(a.budget),'--output','/out','--jobs',os.environ.get('SARA_FI_JOBS','1'),
+            '--target-count',str(a.budget),'--output','/out','--jobs',str(profile.cpus),
             '--watchdog-factor','10','--timeout','300'])
 if __name__=='__main__':main()
