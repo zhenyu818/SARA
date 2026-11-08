@@ -1,0 +1,1696 @@
+{
+  "groups": [
+    {
+      "group_id": "00",
+      "application": "GE-SpMM",
+      "architecture": "SM75",
+      "case": "spmm-empty-and-tail",
+      "source_directory": "GESpmm",
+      "arguments": [
+        "3",
+        "5",
+        "33",
+        "7"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "C": {
+          "count": 99,
+          "dtype": "f32",
+          "output_bytes_sha256": "ba776fe71ce43451da3907576440176a2d45bbcd167ac6d12a2f530dd6b9340c"
+        }
+      }
+    },
+    {
+      "group_id": "01",
+      "application": "GE-SpMM",
+      "architecture": "SM86",
+      "case": "spmm-empty-and-tail",
+      "source_directory": "GESpmm",
+      "arguments": [
+        "3",
+        "5",
+        "33",
+        "7"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "C": {
+          "count": 99,
+          "dtype": "f32",
+          "output_bytes_sha256": "ba776fe71ce43451da3907576440176a2d45bbcd167ac6d12a2f530dd6b9340c"
+        }
+      }
+    },
+    {
+      "group_id": "02",
+      "application": "LayerNorm",
+      "architecture": "SM75",
+      "case": "layernorm-full-gpu",
+      "source_directory": "LayerNorm",
+      "arguments": [
+        "2",
+        "3",
+        "17"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "mean": {
+          "count": 6,
+          "dtype": "f32",
+          "output_bytes_sha256": "5ae2fa1ef54d678208700bea11382d8314b37b0dcbc81b94cbd37694618d24f2"
+        },
+        "out": {
+          "count": 102,
+          "dtype": "f32",
+          "output_bytes_sha256": "af2d5f62d3d7f73f14edae5c2c2b67d094c71819d387c1c0345bfb5681cd101c"
+        },
+        "rstd": {
+          "count": 6,
+          "dtype": "f32",
+          "output_bytes_sha256": "22cefd3a15dd66873bf3333922a0ea2e938fd80625f3b84925547a990e6eef8f"
+        }
+      }
+    },
+    {
+      "group_id": "03",
+      "application": "LayerNorm",
+      "architecture": "SM86",
+      "case": "layernorm-full-gpu",
+      "source_directory": "LayerNorm",
+      "arguments": [
+        "2",
+        "3",
+        "17"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "mean": {
+          "count": 6,
+          "dtype": "f32",
+          "output_bytes_sha256": "5ae2fa1ef54d678208700bea11382d8314b37b0dcbc81b94cbd37694618d24f2"
+        },
+        "out": {
+          "count": 102,
+          "dtype": "f32",
+          "output_bytes_sha256": "af2d5f62d3d7f73f14edae5c2c2b67d094c71819d387c1c0345bfb5681cd101c"
+        },
+        "rstd": {
+          "count": 6,
+          "dtype": "f32",
+          "output_bytes_sha256": "22cefd3a15dd66873bf3333922a0ea2e938fd80625f3b84925547a990e6eef8f"
+        }
+      }
+    },
+    {
+      "group_id": "04",
+      "application": "Attention",
+      "architecture": "SM75",
+      "case": "attention-full-gpu",
+      "source_directory": "Attention",
+      "arguments": [
+        "3",
+        "7"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "out": {
+          "count": 7,
+          "dtype": "f32",
+          "output_bytes_sha256": "06579ce08d3ca3f96c72d94b72455b03ff5f36d04c178a5a44e5d3045c77f346"
+        }
+      }
+    },
+    {
+      "group_id": "05",
+      "application": "Attention",
+      "architecture": "SM86",
+      "case": "attention-full-gpu",
+      "source_directory": "Attention",
+      "arguments": [
+        "3",
+        "7"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "out": {
+          "count": 7,
+          "dtype": "f32",
+          "output_bytes_sha256": "06579ce08d3ca3f96c72d94b72455b03ff5f36d04c178a5a44e5d3045c77f346"
+        }
+      }
+    },
+    {
+      "group_id": "06",
+      "application": "Stencil1D",
+      "architecture": "SM75",
+      "case": "stencil-boundary",
+      "source_directory": "Stencil1D",
+      "arguments": [
+        "257"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "out": {
+          "count": 257,
+          "dtype": "i32",
+          "output_bytes_sha256": "95c9f40cc810a57093f69d46622d2ab43be7e4c07f92af7660833dc088fcf8d2"
+        }
+      }
+    },
+    {
+      "group_id": "07",
+      "application": "Stencil1D",
+      "architecture": "SM86",
+      "case": "stencil-boundary",
+      "source_directory": "Stencil1D",
+      "arguments": [
+        "257"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "out": {
+          "count": 257,
+          "dtype": "i32",
+          "output_bytes_sha256": "95c9f40cc810a57093f69d46622d2ab43be7e4c07f92af7660833dc088fcf8d2"
+        }
+      }
+    },
+    {
+      "group_id": "08",
+      "application": "Convolution1D",
+      "architecture": "SM75",
+      "case": "convolution-boundary",
+      "source_directory": "Convolution1D",
+      "arguments": [
+        "257",
+        "5"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "out": {
+          "count": 257,
+          "dtype": "i32",
+          "output_bytes_sha256": "22587527a08d9728229a91aded8d48b4aabab4ef853311f922b179183604c46f"
+        }
+      }
+    },
+    {
+      "group_id": "09",
+      "application": "Convolution1D",
+      "architecture": "SM86",
+      "case": "convolution-boundary",
+      "source_directory": "Convolution1D",
+      "arguments": [
+        "257",
+        "5"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "out": {
+          "count": 257,
+          "dtype": "i32",
+          "output_bytes_sha256": "22587527a08d9728229a91aded8d48b4aabab4ef853311f922b179183604c46f"
+        }
+      }
+    },
+    {
+      "group_id": "10",
+      "application": "Softmax",
+      "architecture": "SM75",
+      "case": "softmax-stable",
+      "source_directory": "Softmax",
+      "arguments": [
+        "3",
+        "17"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "out": {
+          "count": 51,
+          "dtype": "f32",
+          "output_bytes_sha256": "e0137302e31ed119995f83231432f8b30677dff9199b0bff7751ca0462e7e9cb"
+        }
+      }
+    },
+    {
+      "group_id": "11",
+      "application": "Softmax",
+      "architecture": "SM86",
+      "case": "softmax-stable",
+      "source_directory": "Softmax",
+      "arguments": [
+        "3",
+        "17"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "out": {
+          "count": 51,
+          "dtype": "f32",
+          "output_bytes_sha256": "e0137302e31ed119995f83231432f8b30677dff9199b0bff7751ca0462e7e9cb"
+        }
+      }
+    },
+    {
+      "group_id": "12",
+      "application": "GELU",
+      "architecture": "SM75",
+      "case": "gelu-bias",
+      "source_directory": "Gelu",
+      "arguments": [
+        "2",
+        "3",
+        "17"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "out": {
+          "count": 102,
+          "dtype": "f32",
+          "output_bytes_sha256": "799722e0fc176e73ccc1b9c1bf9d197e264f8aa3a2d3c7100ef30ee50d31a31f"
+        }
+      }
+    },
+    {
+      "group_id": "13",
+      "application": "GELU",
+      "architecture": "SM86",
+      "case": "gelu-bias",
+      "source_directory": "Gelu",
+      "arguments": [
+        "2",
+        "3",
+        "17"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "out": {
+          "count": 102,
+          "dtype": "f32",
+          "output_bytes_sha256": "799722e0fc176e73ccc1b9c1bf9d197e264f8aa3a2d3c7100ef30ee50d31a31f"
+        }
+      }
+    },
+    {
+      "group_id": "14",
+      "application": "GEMM",
+      "architecture": "SM75",
+      "case": "gemm-nonsquare",
+      "source_directory": "Gemm",
+      "arguments": [
+        "1",
+        "2",
+        "1"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "D": {
+          "count": 512,
+          "dtype": "f32",
+          "output_bytes_sha256": "006a47032eded2c64eba33cde46b0bb66ffa0dee2241a2c2d30638ead5ade7ce"
+        }
+      }
+    },
+    {
+      "group_id": "15",
+      "application": "GEMM",
+      "architecture": "SM86",
+      "case": "gemm-nonsquare",
+      "source_directory": "Gemm",
+      "arguments": [
+        "1",
+        "2",
+        "1"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "D": {
+          "count": 512,
+          "dtype": "f32",
+          "output_bytes_sha256": "006a47032eded2c64eba33cde46b0bb66ffa0dee2241a2c2d30638ead5ade7ce"
+        }
+      }
+    },
+    {
+      "group_id": "16",
+      "application": "MatrixMultiplication",
+      "architecture": "SM75",
+      "case": "matrixmul-edge-tiles",
+      "source_directory": "MatrixMultiplication",
+      "arguments": [
+        "wA",
+        "5",
+        "hA",
+        "3",
+        "wB",
+        "7",
+        "hB",
+        "5"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "C": {
+          "count": 21,
+          "dtype": "f32",
+          "output_bytes_sha256": "d64143c26bc2991b43ab40480ab4f751bd91a3fbdf995d402360d29e7cf924a2"
+        }
+      }
+    },
+    {
+      "group_id": "17",
+      "application": "MatrixMultiplication",
+      "architecture": "SM86",
+      "case": "matrixmul-edge-tiles",
+      "source_directory": "MatrixMultiplication",
+      "arguments": [
+        "wA",
+        "5",
+        "hA",
+        "3",
+        "wB",
+        "7",
+        "hB",
+        "5"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "C": {
+          "count": 21,
+          "dtype": "f32",
+          "output_bytes_sha256": "d64143c26bc2991b43ab40480ab4f751bd91a3fbdf995d402360d29e7cf924a2"
+        }
+      }
+    },
+    {
+      "group_id": "18",
+      "application": "AdamW",
+      "architecture": "SM75",
+      "case": "adamw-independent-state",
+      "source_directory": "AdamW",
+      "arguments": [
+        "129",
+        "4"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "m": {
+          "count": 129,
+          "dtype": "f32",
+          "output_bytes_sha256": "b7bf5dd52ac5b0ca58a921c2f320c69997047d9ceeaf4b442910765f06b49e7b"
+        },
+        "params": {
+          "count": 129,
+          "dtype": "f32",
+          "output_bytes_sha256": "bc1dca4129ee373eb55f5549256fefeff82dfb41b4c216c08f744bd07bee8212"
+        },
+        "v": {
+          "count": 129,
+          "dtype": "f32",
+          "output_bytes_sha256": "24023662b281284cf2827956081dd3e46bb44ce2ca671f260cf6bfe232266238"
+        }
+      }
+    },
+    {
+      "group_id": "19",
+      "application": "AdamW",
+      "architecture": "SM86",
+      "case": "adamw-independent-state",
+      "source_directory": "AdamW",
+      "arguments": [
+        "129",
+        "4"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "m": {
+          "count": 129,
+          "dtype": "f32",
+          "output_bytes_sha256": "b7bf5dd52ac5b0ca58a921c2f320c69997047d9ceeaf4b442910765f06b49e7b"
+        },
+        "params": {
+          "count": 129,
+          "dtype": "f32",
+          "output_bytes_sha256": "bc1dca4129ee373eb55f5549256fefeff82dfb41b4c216c08f744bd07bee8212"
+        },
+        "v": {
+          "count": 129,
+          "dtype": "f32",
+          "output_bytes_sha256": "24023662b281284cf2827956081dd3e46bb44ce2ca671f260cf6bfe232266238"
+        }
+      }
+    },
+    {
+      "group_id": "20",
+      "application": "Pathfinder",
+      "architecture": "SM75",
+      "case": "pathfinder-multilaunch",
+      "source_directory": "Pathfinder",
+      "arguments": [
+        "257",
+        "14",
+        "2"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "last_row": {
+          "count": 257,
+          "dtype": "i32",
+          "output_bytes_sha256": "8bec386279a1a633729698053622ebcb82e75a99c407255c828cf707326b9866"
+        }
+      }
+    },
+    {
+      "group_id": "21",
+      "application": "Pathfinder",
+      "architecture": "SM86",
+      "case": "pathfinder-multilaunch",
+      "source_directory": "Pathfinder",
+      "arguments": [
+        "257",
+        "14",
+        "2"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "last_row": {
+          "count": 257,
+          "dtype": "i32",
+          "output_bytes_sha256": "8bec386279a1a633729698053622ebcb82e75a99c407255c828cf707326b9866"
+        }
+      }
+    },
+    {
+      "group_id": "22",
+      "application": "Dijkstra",
+      "architecture": "SM75",
+      "case": "dijkstra-diamond",
+      "source_directory": "Dijkstra",
+      "arguments": [
+        "4",
+        "2"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "distances": {
+          "count": 4,
+          "dtype": "u32",
+          "output_bytes_sha256": "3c52e07ea6f9c688f7921e6114ac155e13c5922f6fe7dd46e242c18e42262a1e"
+        }
+      }
+    },
+    {
+      "group_id": "23",
+      "application": "Dijkstra",
+      "architecture": "SM86",
+      "case": "dijkstra-diamond",
+      "source_directory": "Dijkstra",
+      "arguments": [
+        "4",
+        "2"
+      ],
+      "components": [
+        "rf",
+        "smem",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "distances": {
+          "count": 4,
+          "dtype": "u32",
+          "output_bytes_sha256": "3c52e07ea6f9c688f7921e6114ac155e13c5922f6fe7dd46e242c18e42262a1e"
+        }
+      }
+    },
+    {
+      "group_id": "24",
+      "application": "MatrixFactorization",
+      "architecture": "SM75",
+      "case": "mf-colliding-ratings",
+      "source_directory": "MatrixFactorization",
+      "arguments": [
+        "5",
+        "6",
+        "2"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "item_bias": {
+          "count": 6,
+          "dtype": "f32",
+          "output_bytes_sha256": "95a994f5c1d5360b10ccb109d4d96ba9c13e4622f7213fb41e6f3646cbe051f2"
+        },
+        "P": {
+          "count": 40,
+          "dtype": "f32",
+          "output_bytes_sha256": "bea65f5d6575d844795fff949a8b3de7bfd38a48a167c348e217227338391243"
+        },
+        "Q": {
+          "count": 48,
+          "dtype": "f32",
+          "output_bytes_sha256": "b51dd6998b40609fbe6c1f2a61c693cb0b521e1995c41591c570cd14574f4332"
+        },
+        "user_bias": {
+          "count": 5,
+          "dtype": "f32",
+          "output_bytes_sha256": "1de41aa508e853c64abefdcf1f9ef3c0fb7fff9e9e810844eb5ff9cefe6cfa9c"
+        }
+      }
+    },
+    {
+      "group_id": "25",
+      "application": "MatrixFactorization",
+      "architecture": "SM86",
+      "case": "mf-colliding-ratings",
+      "source_directory": "MatrixFactorization",
+      "arguments": [
+        "5",
+        "6",
+        "2"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "item_bias": {
+          "count": 6,
+          "dtype": "f32",
+          "output_bytes_sha256": "95a994f5c1d5360b10ccb109d4d96ba9c13e4622f7213fb41e6f3646cbe051f2"
+        },
+        "P": {
+          "count": 40,
+          "dtype": "f32",
+          "output_bytes_sha256": "bea65f5d6575d844795fff949a8b3de7bfd38a48a167c348e217227338391243"
+        },
+        "Q": {
+          "count": 48,
+          "dtype": "f32",
+          "output_bytes_sha256": "b51dd6998b40609fbe6c1f2a61c693cb0b521e1995c41591c570cd14574f4332"
+        },
+        "user_bias": {
+          "count": 5,
+          "dtype": "f32",
+          "output_bytes_sha256": "1de41aa508e853c64abefdcf1f9ef3c0fb7fff9e9e810844eb5ff9cefe6cfa9c"
+        }
+      }
+    },
+    {
+      "group_id": "26",
+      "application": "Render",
+      "architecture": "SM75",
+      "case": "render-ray-casting",
+      "source_directory": "Render",
+      "arguments": [
+        "7",
+        "5",
+        "3"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "rgb": {
+          "count": 105,
+          "dtype": "u8",
+          "output_bytes_sha256": "a0052e2be3549351833c53e4a29fafc0be19e3d7b845721b836346a10f3da27a"
+        }
+      }
+    },
+    {
+      "group_id": "27",
+      "application": "Render",
+      "architecture": "SM86",
+      "case": "render-ray-casting",
+      "source_directory": "Render",
+      "arguments": [
+        "7",
+        "5",
+        "3"
+      ],
+      "components": [
+        "rf",
+        "l1d",
+        "l2"
+      ],
+      "expected_observables": {
+        "rgb": {
+          "count": 105,
+          "dtype": "u8",
+          "output_bytes_sha256": "a0052e2be3549351833c53e4a29fafc0be19e3d7b845721b836346a10f3da27a"
+        }
+      }
+    }
+  ],
+  "contracts": {
+    "adamw-independent-state": {
+      "H2D_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "allocations": [
+        516,
+        516,
+        516,
+        516
+      ],
+      "app": "AdamW",
+      "arguments": [
+        "129",
+        "4"
+      ],
+      "launches": [
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "adamw_kernel2",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 516,
+          "count": 129,
+          "dtype": "f32",
+          "heap_index": 0,
+          "name": "params"
+        },
+        {
+          "bytes": 516,
+          "count": 129,
+          "dtype": "f32",
+          "heap_index": 2,
+          "name": "m"
+        },
+        {
+          "bytes": 516,
+          "count": 129,
+          "dtype": "f32",
+          "heap_index": 3,
+          "name": "v"
+        }
+      ]
+    },
+    "attention-full-gpu": {
+      "H2D_indices": [
+        0,
+        1,
+        2
+      ],
+      "allocations": [
+        84,
+        84,
+        28,
+        12,
+        12,
+        28
+      ],
+      "app": "Attention",
+      "arguments": [
+        "3",
+        "7"
+      ],
+      "launches": [
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "attention_logits",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "attention_softmax",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "attention_weighted_sum",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 28,
+          "count": 7,
+          "dtype": "f32",
+          "heap_index": 5,
+          "name": "out"
+        }
+      ]
+    },
+    "convolution-boundary": {
+      "H2D_indices": [
+        0
+      ],
+      "allocations": [
+        1028,
+        1028
+      ],
+      "app": "Convolution1D",
+      "arguments": [
+        "257",
+        "5"
+      ],
+      "launches": [
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "conv1d_tiled_caching",
+          "grid": [
+            2,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 1028,
+          "count": 257,
+          "dtype": "i32",
+          "heap_index": 1,
+          "name": "out"
+        }
+      ]
+    },
+    "dijkstra-diamond": {
+      "H2D_indices": [
+        0,
+        1,
+        2,
+        3,
+        7
+      ],
+      "allocations": [
+        20,
+        16,
+        16,
+        16,
+        4,
+        4,
+        4,
+        4
+      ],
+      "app": "Dijkstra",
+      "arguments": [
+        "4",
+        "2"
+      ],
+      "launches": [
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_block_min",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_select",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_relax",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_block_min",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_select",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_relax",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_block_min",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_select",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_relax",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_block_min",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_select",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dijkstra_relax",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 16,
+          "count": 4,
+          "dtype": "u32",
+          "heap_index": 3,
+          "name": "distances"
+        }
+      ]
+    },
+    "gelu-bias": {
+      "H2D_indices": [
+        0,
+        1
+      ],
+      "allocations": [
+        408,
+        68
+      ],
+      "app": "Gelu",
+      "arguments": [
+        "2",
+        "3",
+        "17"
+      ],
+      "launches": [
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "gelu_bias_loop",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 408,
+          "count": 102,
+          "dtype": "f32",
+          "heap_index": 0,
+          "name": "out"
+        }
+      ]
+    },
+    "gemm-nonsquare": {
+      "H2D_indices": [
+        0,
+        1,
+        2
+      ],
+      "allocations": [
+        1024,
+        2048,
+        2048,
+        2048
+      ],
+      "app": "Gemm",
+      "arguments": [
+        "1",
+        "2",
+        "1"
+      ],
+      "launches": [
+        {
+          "block": [
+            16,
+            16,
+            1
+          ],
+          "entry_suffix": "simple_gemm",
+          "grid": [
+            2,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 2048,
+          "count": 512,
+          "dtype": "f32",
+          "heap_index": 3,
+          "name": "D"
+        }
+      ]
+    },
+    "layernorm-full-gpu": {
+      "H2D_indices": [
+        0,
+        1,
+        2
+      ],
+      "allocations": [
+        408,
+        68,
+        68,
+        408,
+        24,
+        24
+      ],
+      "app": "LayerNorm",
+      "arguments": [
+        "2",
+        "3",
+        "17"
+      ],
+      "launches": [
+        {
+          "block": [
+            128,
+            1,
+            1
+          ],
+          "entry_suffix": "layernorm_forward_kernel1",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 408,
+          "count": 102,
+          "dtype": "f32",
+          "heap_index": 3,
+          "name": "out"
+        },
+        {
+          "bytes": 24,
+          "count": 6,
+          "dtype": "f32",
+          "heap_index": 4,
+          "name": "mean"
+        },
+        {
+          "bytes": 24,
+          "count": 6,
+          "dtype": "f32",
+          "heap_index": 5,
+          "name": "rstd"
+        }
+      ]
+    },
+    "matrixmul-edge-tiles": {
+      "H2D_indices": [
+        0,
+        1
+      ],
+      "allocations": [
+        60,
+        140,
+        84
+      ],
+      "app": "MatrixMultiplication",
+      "arguments": [
+        "wA",
+        "5",
+        "hA",
+        "3",
+        "wB",
+        "7",
+        "hB",
+        "5"
+      ],
+      "launches": [
+        {
+          "block": [
+            16,
+            16,
+            1
+          ],
+          "entry_suffix": "MatrixMulCUDA",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 84,
+          "count": 21,
+          "dtype": "f32",
+          "heap_index": 2,
+          "name": "C"
+        }
+      ]
+    },
+    "mf-colliding-ratings": {
+      "H2D_indices": [
+        0,
+        2,
+        4,
+        6,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "allocations": [
+        160,
+        160,
+        192,
+        192,
+        20,
+        20,
+        24,
+        24,
+        32,
+        60,
+        72,
+        32,
+        32
+      ],
+      "app": "MatrixFactorization",
+      "arguments": [
+        "5",
+        "6",
+        "2"
+      ],
+      "launches": [
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "mf_snapshot_step",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "mf_snapshot_step",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "mf_snapshot_step",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 160,
+          "count": 40,
+          "dtype": "f32",
+          "heap_index": 1,
+          "name": "P"
+        },
+        {
+          "bytes": 192,
+          "count": 48,
+          "dtype": "f32",
+          "heap_index": 3,
+          "name": "Q"
+        },
+        {
+          "bytes": 20,
+          "count": 5,
+          "dtype": "f32",
+          "heap_index": 5,
+          "name": "user_bias"
+        },
+        {
+          "bytes": 24,
+          "count": 6,
+          "dtype": "f32",
+          "heap_index": 7,
+          "name": "item_bias"
+        }
+      ]
+    },
+    "pathfinder-multilaunch": {
+      "H2D_indices": [
+        0,
+        1
+      ],
+      "allocations": [
+        13364,
+        1028,
+        1028
+      ],
+      "app": "Pathfinder",
+      "arguments": [
+        "257",
+        "14",
+        "2"
+      ],
+      "launches": [
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dynproc_kernel",
+          "grid": [
+            2,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dynproc_kernel",
+          "grid": [
+            2,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dynproc_kernel",
+          "grid": [
+            2,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dynproc_kernel",
+          "grid": [
+            2,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dynproc_kernel",
+          "grid": [
+            2,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dynproc_kernel",
+          "grid": [
+            2,
+            1,
+            1
+          ]
+        },
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "dynproc_kernel",
+          "grid": [
+            2,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 1028,
+          "count": 257,
+          "dtype": "i32",
+          "heap_index": 2,
+          "name": "last_row"
+        }
+      ]
+    },
+    "render-ray-casting": {
+      "H2D_indices": [
+        0
+      ],
+      "allocations": [
+        840,
+        105
+      ],
+      "app": "Render",
+      "arguments": [
+        "7",
+        "5",
+        "3"
+      ],
+      "launches": [
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "render_kernel",
+          "grid": [
+            1,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 105,
+          "count": 105,
+          "dtype": "u8",
+          "heap_index": 1,
+          "name": "rgb"
+        }
+      ]
+    },
+    "softmax-stable": {
+      "H2D_indices": [
+        0
+      ],
+      "allocations": [
+        204,
+        204
+      ],
+      "app": "Softmax",
+      "arguments": [
+        "3",
+        "17"
+      ],
+      "launches": [
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "softmax_kernel",
+          "grid": [
+            3,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 204,
+          "count": 51,
+          "dtype": "f32",
+          "heap_index": 1,
+          "name": "out"
+        }
+      ]
+    },
+    "spmm-empty-and-tail": {
+      "H2D_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "allocations": [
+        16,
+        28,
+        28,
+        660,
+        396
+      ],
+      "app": "GESpmm",
+      "arguments": [
+        "3",
+        "5",
+        "33",
+        "7"
+      ],
+      "launches": [
+        {
+          "block": [
+            32,
+            4,
+            1
+          ],
+          "entry_suffix": "spmm_test0",
+          "grid": [
+            1,
+            2,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 396,
+          "count": 99,
+          "dtype": "f32",
+          "heap_index": 4,
+          "name": "C"
+        }
+      ]
+    },
+    "stencil-boundary": {
+      "H2D_indices": [
+        0
+      ],
+      "allocations": [
+        1028,
+        1028
+      ],
+      "app": "Stencil1D",
+      "arguments": [
+        "257"
+      ],
+      "launches": [
+        {
+          "block": [
+            256,
+            1,
+            1
+          ],
+          "entry_suffix": "stencil_1d",
+          "grid": [
+            2,
+            1,
+            1
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "bytes": 1028,
+          "count": 257,
+          "dtype": "i32",
+          "heap_index": 1,
+          "name": "out"
+        }
+      ]
+    }
+  },
+  "input_assets": {
+    "dijkstra-diamond": {
+      "SARA_DIJKSTRA_GRAPH": "Dijkstra/fixtures/diamond.tsv"
+    },
+    "mf-colliding-ratings": {
+      "SARA_MF_RATINGS": "MatrixFactorization/fixtures/ratings.tsv"
+    }
+  }
+}

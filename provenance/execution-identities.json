@@ -1,0 +1,50 @@
+{
+  "serial": {
+    "source_manifest_sha256": "55883fa33408053de0d181d46c0c7147d309e96eafc5c1501bd76731dea863b6",
+    "scalar_core_execution_sha256": "b643885fe582e83f9eafb8d12e3bc8c49e1600d9036b65381b6020a382a5ec2a",
+    "entry": "sara/serial/script/method_group/sara_group.py",
+    "required_external_modules": [
+      "generic_counter_loops",
+      "generic_bound_loops",
+      "closed_control",
+      "closed_word_flow",
+      "closed_pair_reduction",
+      "closed_memory_boundaries",
+      "closed_address_frontiers"
+    ]
+  },
+  "parallel": {
+    "source_manifest_sha256": "1100f7b4ed977f3606ef01605b8be45b3f5be4adb4b2d06ed31f1278336b0210",
+    "operand_admission_execution_sha256": "c2c9969a4b299d631b091c35a67d4295abd5345f6560df57c7558f7f75abc34a",
+    "entry": "sara/parallel/script/parallel_stream/group.py",
+    "parser_workers": 8,
+    "global_reverse_serial": true
+  },
+  "gerem": {
+    "source_binding_sha256": "92f463fd789c45dc3983bb3259eae7f56e9a8906ccd02f1d9dd6c3e3292daa51",
+    "entry": "gerem/script/indexed_storage/group.py",
+    "model": "storage reproduction with FI-compatible writeback rule",
+    "native_outputs": [
+      "efm",
+      "p_sdc",
+      "support_status",
+      "reason"
+    ],
+    "independent_due_available": false
+  },
+  "native": {
+    "source_manifest_sha256": "e306a1ee85eda5fa42888f20224133eb30170da753e3a3bcf82d75ad88918f10",
+    "execution_library_sha256": "cf739e53f289079e3a94fa9d2d476224f27613f4a8acc2df5ba40b440dcc289c",
+    "upstream_commit": "0e39753a623978eb37bf044b21fde1a5909bff03",
+    "source_inventory_files": 392,
+    "source_inventory_is_not_a_compiled_translation_unit_list": true
+  },
+  "sampling": {
+    "seed": 2026,
+    "replacement": true,
+    "original_master_draws": 10000,
+    "extension_draws": 200000,
+    "distinct_draw_identities": true
+  },
+  "data_scope": "selected numerical summary values only"
+}

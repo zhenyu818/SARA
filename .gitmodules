@@ -1,0 +1,4 @@
+[submodule "gpgpusim"]
+    path = fi/upstream/gpgpusim
+    url = https://github.com/gpgpu-sim/gpgpu-sim_distribution.git
+

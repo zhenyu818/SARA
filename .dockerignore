@@ -1,0 +1,8 @@
+.git
+data
+work
+**/__pycache__
+**/*.pyc
+
+
+fi/upstream/gpgpusim

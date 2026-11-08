@@ -1,0 +1,42 @@
+{
+  "selection": "recorded generated C parser and lexer sources",
+  "entries": [
+    {
+      "path": "fi/parser_sources/lex.ptx_.c",
+      "execution_sha256": "c34c47acf25f9219492925d1203b9fdf00aa4607e9ef09e26d1ff38fd607a716",
+      "distributed_sha256": "0cad630bae657542f474d5b08fb8610f4c641e4d9c95da57ab7e836b9cbe0be4",
+      "bytes": 152583
+    },
+    {
+      "path": "fi/parser_sources/lex.ptxinfo_.c",
+      "execution_sha256": "f7f758f0e444a235634901b3e0e6a0048529fc6bab032cb7f0b411f9453e4c17",
+      "distributed_sha256": "86e404b1c14d34e95e378b49751035ea10ebca542644d7e9ec85c5727e764fce",
+      "bytes": 74078
+    },
+    {
+      "path": "fi/parser_sources/ptx.tab.c",
+      "execution_sha256": "fc11573397cbb89fb646cd49ed933718da5669f230871ad81a209a7e4be4c9f0",
+      "distributed_sha256": "31efa57a4cc95bcb8f12b7e2d85df51fe657bc8a11430ef6cd230c5c35eec2fc",
+      "bytes": 128654
+    },
+    {
+      "path": "fi/parser_sources/ptx.tab.h",
+      "execution_sha256": "bbdd98df501d0bb9388b434f08ab7168a397a9f26b09c8c83219f8724247866a",
+      "distributed_sha256": "ba4368b9a2fea8a792eb72d8b3d5070eaf709680eb27a3cbe2f913f57b6baa05",
+      "bytes": 6605
+    },
+    {
+      "path": "fi/parser_sources/ptxinfo.tab.c",
+      "execution_sha256": "6c5b9b95625057ea2adba9853ac6350a92af93d2a06833155a838803c7757f3b",
+      "distributed_sha256": "9670931ad8cc9db89755add6b471e447ca5d620bb87406d062b4f57079a2d751",
+      "bytes": 55318
+    },
+    {
+      "path": "fi/parser_sources/ptxinfo.tab.h",
+      "execution_sha256": "e3dfe1937bce7420ae9fd5bad046bf306a27a00370d3a8ab8d2655d4884e1827",
+      "distributed_sha256": "6eb2627aab239f2b234fd50d1fc0ef5abf0b4a5407ebfde75ac21680287667cd",
+      "bytes": 2886
+    }
+  ],
+  "numeric_actions_changed": false
+}

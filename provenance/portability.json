@@ -1,0 +1,30 @@
+{
+  "scope": [
+    "module and metadata labels",
+    "relative paths and original license locations",
+    "declared bounded container admission",
+    "exact-file guard rebinding after normalization",
+    "recorded generated parser selection",
+    "inactive program-bound constructor removal"
+  ],
+  "recorded_cpu_limit": 64,
+  "recorded_memory_gib": 448,
+  "default_example_cpus": 4,
+  "default_example_memory_gib": 8,
+  "prediction_rules_in_current_grouped_path_changed": false,
+  "sampling_algorithm_changed": false,
+  "recorded_result_values_changed": false,
+  "live_RF_interval_projector_AST_equal": true,
+  "source_guards_removed": false,
+  "original_binding_hashes_retained": true,
+  "parser_changes": [
+    "debug source paths",
+    "column macro identifier"
+  ],
+  "native_changes": [
+    "public environment labels",
+    "version macro labels"
+  ],
+  "unused_loop_constructor_replacement": "same generic structural certificates used by current grouped entry",
+  "performance_requires_recorded_resources": true
+}

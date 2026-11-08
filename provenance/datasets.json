@@ -1,0 +1,50 @@
+{
+  "files": [
+    {
+      "path": "agreement/by_application.csv",
+      "bytes": 3980,
+      "sha256": "39a74bffdc275b22217ab426403108448c6876dcabda9fcccb484fc383b7a863"
+    },
+    {
+      "path": "agreement/by_component.csv",
+      "bytes": 3167,
+      "sha256": "23051220168e784a3f8144a72899788f189bf1f58537235784aa090122aa9d30"
+    },
+    {
+      "path": "agreement/class_proportions.csv",
+      "bytes": 691,
+      "sha256": "0cfdb00c923712f6a168c76ac030191f845304443bf1b117670f8722996c15f6"
+    },
+    {
+      "path": "agreement/overall.csv",
+      "bytes": 537,
+      "sha256": "1a50e362e97b1aa016a5d83a044b6b6104d030208014767f33eef9923ec9df0b"
+    },
+    {
+      "path": "evidence/sdc_attribution.csv",
+      "bytes": 282,
+      "sha256": "9559f4d7599ad29d17497ca4f1f638c002092ca17ff350956dbfeb20ad855dcb"
+    },
+    {
+      "path": "language_model/costs.csv",
+      "bytes": 113,
+      "sha256": "39259ed7cd96b51a206f474daa47267abf190b225e0b7907ef3e3efa37a27e03"
+    },
+    {
+      "path": "language_model/outcomes.csv",
+      "bytes": 600,
+      "sha256": "6f410d2b1e44dfd76983f4df73c737577d60dc1e2088944d77f1cfd4753b8617"
+    },
+    {
+      "path": "performance/by_application.csv",
+      "bytes": 3966,
+      "sha256": "ebcd140ecfdc7aeb21694d36a82f9151083a7d575d3a6aa09d361f06c9efa819"
+    },
+    {
+      "path": "performance/summary.csv",
+      "bytes": 1554,
+      "sha256": "645297d5a5e76d7d2c45d37c20a43ece9f04b7f73b42c08958b1ccc704fdc7c0"
+    }
+  ],
+  "total_csv_bytes": 14890
+}
